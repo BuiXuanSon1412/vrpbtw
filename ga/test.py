@@ -1,5 +1,5 @@
 from pathlib import Path
-from script_cal_igd import find_nadir_point_igd, selection_nondominate
+from script.script_cal_igd import find_nadir_point_igd, selection_nondominate
 import numpy as np
 from moo_algorithm.metric import cal_igd
 

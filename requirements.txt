@@ -41,3 +41,4 @@ pandas
 pulp
 ortools
 pymoo
+numpy
