@@ -42,3 +42,4 @@ pulp
 ortools
 pymoo
 numpy
+matplotlib

@@ -165,7 +165,8 @@ class AGEAPopulation(Population):
 
         if len(selected) > self.pop_size:
             # Too many solutions, decrease divisions
-            self.div = max(2, self.div - 1)
+            # self.div = max(2, self.div - 1)
+            self.div = self.div - 1
             selected_new, indices_new = self.environmental_selection(solutions)
 
             if len(selected_new) >= self.pop_size:
