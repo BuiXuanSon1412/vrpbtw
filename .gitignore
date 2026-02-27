@@ -3,4 +3,6 @@ __pycache__/
 *.pt
 *.png
 result/
+test/
+script/
 
