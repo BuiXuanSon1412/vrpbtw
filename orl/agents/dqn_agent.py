@@ -237,13 +237,15 @@ class DQNAgent:
         td_errors = targets - q_vals
 
         # PER importance weights
-        if batch.weights is not None:
+        if batch.weights is not None and isinstance(
+            self.buffer, PrioritizedReplayBuffer
+        ):
             weights = torch.FloatTensor(batch.weights).to(cfg.device)
             loss = (weights * td_errors.pow(2)).mean()
-            # Update priorities
-            self.buffer.update_priorities(
-                batch.indices, td_errors.detach().cpu().numpy()
-            )
+            if batch.indices is not None:
+                self.buffer.update_priorities(
+                    batch.indices, td_errors.detach().cpu().numpy()
+                )
         else:
             loss = td_errors.pow(2).mean()
 

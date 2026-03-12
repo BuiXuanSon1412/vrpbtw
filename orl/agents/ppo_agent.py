@@ -25,9 +25,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
+
+# import needed for reward normalisation fallback
+import math
 
 from core.buffers import RolloutBuffer, Batch
 from networks.policy_network import PolicyNetwork, NetworkConfig
+from .base_agent import BaseAgent
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +73,7 @@ class PPOConfig:
 # ---------------------------------------------------------------------------
 
 
-class PPOAgent:
+class PPOAgent(BaseAgent):
     """
     On-policy PPO agent with clipped surrogate objective.
 
@@ -380,12 +385,3 @@ class PPOAgent:
             f"actions={self.action_space_size}, "
             f"updates={self._update_count})"
         )
-
-
-# import needed for reward normalisation fallback
-import math
-
-try:
-    import torch.nn.functional as F
-except ImportError:
-    pass
