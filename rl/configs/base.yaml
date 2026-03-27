@@ -1,0 +1,74 @@
+# =============================================================================
+# configs/base.yaml  —  Base experiment configuration
+# =============================================================================
+# This is the canonical starting point for all VRPBTW experiments.
+# For ablation studies, create a small override file and run:
+#
+#   python train.py --config configs/base.yaml \
+#                   --override configs/ablations/no_curriculum.yaml
+#
+# Only the keys you want to change need to appear in the override file.
+# =============================================================================
+
+name:      vrpbtw_ppo_base
+algorithm: ppo        # ppo | dqn
+device:    cpu        # cpu | cuda | mps  (override at runtime with --device)
+
+seed:
+  global_seed: 42
+  env_seed:    null   # null → derived deterministically from global_seed
+  data_seed:   null
+
+env:
+  problem_name: vrpbtw
+  problem_kwargs:
+    n_customers: 10
+    n_fleets:    2
+  max_steps:         null   # null → no hard episode truncation
+  reward_scale:      1.0
+  subtract_baseline: true   # subtract nearest-neighbour heuristic at terminal
+  dense_shaping:     true   # incremental rewards; false → terminal-only
+
+network:
+  network_type:      hacn
+  embed_dim:         128
+  n_heads:           8
+  n_encoder_layers:  3
+  dropout:           0.0
+  clip_logits:       10.0
+  ortho_init:        true
+  use_instance_norm: true
+  hidden_dims:       [256, 256]   # used by MLP-only networks, ignored by hacn
+
+ppo:
+  lr:                   0.0003
+  gamma:                0.99
+  gae_lambda:           0.95
+  clip_eps:             0.2
+  value_coef:           0.5
+  entropy_coef:         0.02
+  max_grad_norm:        0.5
+  n_epochs:             4
+  mini_batch_size:      256
+  rollout_len:          1024
+  target_kl:            0.015   # null → disable KL early-stop
+  normalize_advantages: true
+  normalize_rewards:    true
+  reward_norm_eps:      1.0e-8
+
+train:
+  total_timesteps:     100000
+  log_interval:        5        # log every N training iterations
+  eval_interval:       20       # evaluate every N training iterations
+  checkpoint_interval: 100      # periodic snapshot every N iterations
+  checkpoint_dir:      checkpoints
+  log_dir:             logs
+  patience:            60       # early-stop after N evals with no improvement
+  min_delta:           0.0001
+  n_eval_episodes:     10
+  eval_deterministic:  true
+  eval_beam_width:     1        # 1 = greedy; >1 = beam search
+  curriculum:          true
+  curriculum_start:    3        # starting n_customers
+  curriculum_end:      10       # final n_customers (matches env.problem_kwargs)
+  curriculum_steps:    50000    # steps to ramp from start to end

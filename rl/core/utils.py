@@ -1,58 +1,51 @@
+"""
+core/utils.py
+-------------
+General-purpose utilities for RL research projects.
+
+Classes
+-------
+  RunningNormalizer  — Welford online mean/std for reward normalisation
+  SeedManager        — centralised seed management for full reproducibility
+"""
+
 from __future__ import annotations
 
-import numpy as np
-from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
-
-import math
 import hashlib
+import math
 import random
+from typing import Optional
+
+import numpy as np
 
 
-"""
-utils/normalizer.py
--------------------
-Welford online mean/variance estimator for reward normalisation.
-
-Fixes two bugs from the original code:
-  1. Normalisation subtracts mean AND divides by std  (original only divided).
-  2. The normaliser can be reset on curriculum advancement.
-  3. Named so its purpose is clear at the call site.
-
-Usage
------
-norm = RunningNormalizer()
-normalised = norm.normalise(raw_reward)
-norm.reset()  # e.g. when curriculum advances
-"""
+# ---------------------------------------------------------------------------
+# RunningNormalizer
+# ---------------------------------------------------------------------------
 
 
 class RunningNormalizer:
     """
     Streaming mean/std estimator using Welford's online algorithm.
 
-    Thread-unsafe (single-process use only).
+    Normalises a stream of scalar values to zero mean / unit variance.
+    Call normalise(x) at every step; it updates statistics then returns
+    the z-score.
+
+    Parameters
+    ----------
+    eps  : Added to std to prevent division by zero.
+    clip : If set, clip z-scores to [-clip, clip].
     """
 
     def __init__(self, eps: float = 1e-8, clip: Optional[float] = 10.0):
-        """
-        Parameters
-        ----------
-        eps  : Small constant added to std to prevent division by zero.
-        clip : If set, clip normalised values to [-clip, clip].
-        """
         self.eps = eps
         self.clip = clip
         self._count = 0
         self._mean = 0.0
-        self._M2 = 0.0  # sum of squared deviations (Welford accumulator)
-
-    # ------------------------------------------------------------------
-    # Welford update
-    # ------------------------------------------------------------------
+        self._M2 = 0.0  # Welford sum-of-squared-deviations accumulator
 
     def update(self, value: float) -> None:
-        """Update running statistics with a new value."""
         self._count += 1
         delta = value - self._mean
         self._mean += delta / self._count
@@ -64,26 +57,14 @@ class RunningNormalizer:
 
     @property
     def variance(self) -> float:
-        if self._count < 2:
-            return 1.0
-        return self._M2 / (self._count - 1)
+        return self._M2 / (self._count - 1) if self._count >= 2 else 1.0
 
     @property
     def std(self) -> float:
         return max(math.sqrt(self.variance), self.eps)
 
-    # ------------------------------------------------------------------
-    # Normalisation
-    # ------------------------------------------------------------------
-
     def normalise(self, value: float) -> float:
-        """
-        Normalise value and update statistics.
-
-        Returns (value - mean) / std — a proper z-score.
-        Statistics are updated BEFORE normalisation so the first value
-        always has std=1 (avoids NaN on first step).
-        """
+        """Update statistics then return the z-score of value."""
         self.update(value)
         z = (value - self.mean) / self.std
         if self.clip is not None:
@@ -91,7 +72,6 @@ class RunningNormalizer:
         return z
 
     def reset(self) -> None:
-        """Reset statistics — call when the distribution shifts (e.g. curriculum)."""
         self._count = 0
         self._mean = 0.0
         self._M2 = 0.0
@@ -111,24 +91,9 @@ class RunningNormalizer:
         )
 
 
-"""
-utils/seed.py
--------------
-Centralised seed management for full reproducibility.
-
-Every source of randomness — Python, NumPy, PyTorch, CUDA — is seeded
-from a single integer.  Child seeds for the environment and data pipeline
-are derived deterministically so they are independent yet reproducible.
-
-Usage
------
-from utils.seed import SeedManager
-
-sm = SeedManager(global_seed=42)
-sm.seed_everything()
-env_rng  = sm.make_env_rng()
-data_rng = sm.make_data_rng()
-"""
+# ---------------------------------------------------------------------------
+# SeedManager
+# ---------------------------------------------------------------------------
 
 
 def _derive_seed(base: int, tag: str) -> int:
@@ -141,11 +106,15 @@ class SeedManager:
     """
     Manages all sources of randomness for a single experiment.
 
+    Calling seed_everything() seeds Python, NumPy, and PyTorch from
+    global_seed.  Child RNGs for the environment and data pipeline are
+    derived deterministically so they are independent yet reproducible.
+
     Parameters
     ----------
-    global_seed  : Master seed.
-    env_seed     : Override for environment RNG (default: derived).
-    data_seed    : Override for data pipeline RNG (default: derived).
+    global_seed : Master seed.
+    env_seed    : Override for the environment RNG (None → derived).
+    data_seed   : Override for the data/instance RNG (None → derived).
     """
 
     def __init__(
@@ -172,22 +141,19 @@ class SeedManager:
             torch.manual_seed(self.global_seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(self.global_seed)
-            # Deterministic ops (at some perf cost)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
         except ImportError:
             pass
 
     def make_env_rng(self) -> np.random.Generator:
-        """Return a dedicated NumPy RNG for the environment."""
         return np.random.default_rng(self.env_seed)
 
     def make_data_rng(self) -> np.random.Generator:
-        """Return a dedicated NumPy RNG for data/instance generation."""
         return np.random.default_rng(self.data_seed)
 
     def make_eval_rng(self) -> np.random.Generator:
-        """Return a dedicated NumPy RNG for evaluation (fixed across runs)."""
+        """Fixed RNG for evaluation — identical across runs."""
         return np.random.default_rng(_derive_seed(self.global_seed, "eval"))
 
     def __repr__(self) -> str:

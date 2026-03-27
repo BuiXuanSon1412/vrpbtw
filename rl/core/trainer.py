@@ -1,55 +1,88 @@
+"""
+core/trainer.py
+---------------
+Training loop abstractions.
+
+Classes
+-------
+  BaseTrainer      — minimal interface: train() → summary dict
+  OnPolicyTrainer  — full PPO-style collect → update → log → eval loop
+
+Design notes on trainer / evaluator / MAML
+-------------------------------------------
+The Trainer orchestrates the *loop*; the Agent owns the *update math*.
+This separation means:
+
+  Standard PPO:  OnPolicyTrainer  + PPOAgent   (ppo_update inside agent)
+  MAML:          MetaTrainer      + MAMLAgent   (meta_update inside agent)
+  Eval-only:     run evaluate.py directly       (no trainer needed)
+
+To add MAML:
+  1. Add MAMLAgent(BaseAgent) to core/agent.py with its meta_update().
+  2. Add MetaTrainer(BaseTrainer) here that calls
+     agent.meta_update(support_batch, query_batch).
+  Evaluator stays completely unchanged.
+
+Circular dependency fix
+-----------------------
+The old code did `from evaluator import Agent` inside __init__ to avoid
+a circular import.  Here the Evaluator is accepted as a plain Any-typed
+argument to BaseTrainer.__init__, so there is no import of evaluator.py
+from trainer.py at all.  The concrete type is only instantiated in
+train.py / evaluate.py where both modules are already imported.
+"""
+
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, cast, Dict, List, Optional, Tuple, Union
-
+from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+from core.agent import BaseAgent
+from core.environment import Environment
 
 
-from agent import BaseAgent
-from core import Environment
-from config import ExperimentConfig, TrainConfig, save_config
-from logger import Logger
-from evaluator import Evaluator
-
-"""
-trainers/trainer.py
---------------------
-Master training loop.
-
-Responsibilities
-----------------
-- Orchestrate collect → update → log → eval → checkpoint
-- Curriculum scheduling
-- Early stopping
-- Saving best and periodic checkpoints
-
-NOT responsible for
--------------------
-- Algorithm math (in algorithms/)
-- Network architecture (in networks/)
-- Problem definition (in core/)
-- Any isinstance dispatch on agent type — uses BaseAgent interface only
-
-Key fix vs original
---------------------
-No isinstance(agent, PPOAgent) / isinstance(agent, DQNAgent) anywhere.
-Both agent types expose collect() and update() — the trainer is truly
-algorithm-agnostic.
-"""
+# ---------------------------------------------------------------------------
+# BaseTrainer
+# ---------------------------------------------------------------------------
 
 
-class Trainer:
+class BaseTrainer(ABC):
     """
-    Algorithm-agnostic training loop.
+    Minimal training-loop interface.
 
-    Parameters
-    ----------
-    agent              : Any BaseAgent (PPO, DQN, SAC, …).
-    env                : Env.
-    instance_generator : Callable[..., Any] — returns a raw problem instance.
-                         Receives ``size=`` kwarg when curriculum is active.
-    cfg                : ExperimentConfig.
+    Subclasses implement train() and any curriculum / meta-learning logic.
+    """
+
+    @abstractmethod
+    def train(self) -> Dict[str, Any]:
+        """Run the full training loop and return a summary dict."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# OnPolicyTrainer  (PPO / A2C style)
+# ---------------------------------------------------------------------------
+
+
+class OnPolicyTrainer(BaseTrainer):
+    """
+    Algorithm-agnostic on-policy training loop.
+
+    Responsibilities
+    ----------------
+    - collect → update → log → eval → checkpoint
+    - Curriculum scheduling
+    - Early stopping
+    - Saving best and periodic checkpoints
+
+    NOT responsible for
+    -------------------
+    - Algorithm math        (inside agent.update())
+    - Network architecture  (inside agent.network)
+    - Problem definition    (inside env.problem)
+    - Any isinstance dispatch on agent or problem type
     """
 
     def __init__(
@@ -57,48 +90,28 @@ class Trainer:
         agent: BaseAgent,
         env: Environment,
         instance_generator: Callable,
-        cfg: ExperimentConfig,
+        cfg: Any,  # ExperimentConfig
+        evaluator: Any,  # Evaluator — passed in, not imported
+        logger: Any,  # Logger
     ):
         self.agent = agent
         self.env = env
         self.instance_generator = instance_generator
         self.cfg = cfg
-        self.tcfg: TrainConfig = cfg.train
-
-        self.logger = Logger(
-            log_dir=self.tcfg.log_dir,
-            experiment_name=cfg.name,
-            verbose=True,
-        )
-        from evaluator import Agent
-
-        self.evaluator = Evaluator(
-            agent=cast(Agent, agent),
-            env=env,
-            n_episodes=self.tcfg.n_eval_episodes,
-            deterministic=self.tcfg.eval_deterministic,
-            beam_width=self.tcfg.eval_beam_width,
-        )
+        self.tcfg = cfg.train
+        self.evaluator = evaluator
+        self.logger = logger
 
         self._timestep = 0
         self._iteration = 0
         self._best_objective = float("-inf")
         self._patience_counter = 0
 
-        # Persist config next to checkpoints for full reproducibility
-        Path(self.tcfg.checkpoint_dir).mkdir(parents=True, exist_ok=True)
-        save_config(cfg, f"{self.tcfg.checkpoint_dir}/{cfg.name}_config.json")
-
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     def train(self) -> Dict[str, Any]:
-        """
-        Run the training loop to completion.
-
-        Returns a summary dict.
-        """
         self._print_header()
         start_time = time.time()
         stop_reason = "timestep_limit"
@@ -108,15 +121,19 @@ class Trainer:
             self._iteration += 1
 
             size = self._curriculum_size()
-            gen = self._make_generator(size)
+            gen = (
+                (lambda s=size: self.instance_generator(size=s))
+                if size is not None
+                else self.instance_generator
+            )
 
-            # ── Collect + update (algorithm-agnostic) ──────────────────
+            # ── Collect + update ────────────────────────────────────
             collect_stats = self.agent.collect(self.env, gen)
             self._timestep += int(collect_stats.get("rollout/steps", 1))
 
             update_metrics = self.agent.update() or {}
 
-            # ── Logging ────────────────────────────────────────────────
+            # ── Logging ─────────────────────────────────────────────
             iter_time = time.time() - iter_start
             all_metrics = {**collect_stats, **update_metrics, "iter_time_s": iter_time}
 
@@ -127,14 +144,12 @@ class Trainer:
                     print_keys=[
                         "rollout/mean_reward",
                         "train/policy_loss",
-                        "train/td_loss",
                         "train/explained_var",
-                        "train/epsilon",
                         "train/grad_norm",
                     ],
                 )
 
-            # ── Evaluation ─────────────────────────────────────────────
+            # ── Evaluation ──────────────────────────────────────────
             if self._iteration % self.tcfg.eval_interval == 0:
                 eval_stats = self.evaluator.evaluate(self.instance_generator)
                 self.logger.log_metrics(eval_stats, step=self._timestep, prefix="eval")
@@ -157,7 +172,7 @@ class Trainer:
                     )
                     break
 
-            # ── Periodic checkpoint ────────────────────────────────────
+            # ── Periodic checkpoint ──────────────────────────────────
             if self._iteration % self.tcfg.checkpoint_interval == 0:
                 self._save_checkpoint(f"iter_{self._iteration}")
 
@@ -187,11 +202,6 @@ class Trainer:
             + frac * (self.tcfg.curriculum_end - self.tcfg.curriculum_start)
         )
 
-    def _make_generator(self, size: Optional[int]) -> Callable:
-        if size is not None:
-            return lambda: self.instance_generator(size=size)
-        return self.instance_generator
-
     # ------------------------------------------------------------------
     # Checkpointing
     # ------------------------------------------------------------------
@@ -201,18 +211,19 @@ class Trainer:
         self.agent.save(path)
 
     # ------------------------------------------------------------------
-    # Pretty printing
+    # Display
     # ------------------------------------------------------------------
 
     def _print_header(self) -> None:
+        p = self.env.problem
         print(
             f"\n{'=' * 64}\n"
             f"  Experiment : {self.cfg.name}\n"
             f"  Algorithm  : {self.cfg.algorithm.upper()}\n"
             f"  Network    : {self.cfg.network.network_type}\n"
-            f"  Problem    : {self.env.problem.name}\n"
-            f"  Obs shape  : {self.env.problem.observation_shape}\n"
-            f"  Actions    : {self.env.problem.action_space_size}\n"
+            f"  Problem    : {p.name}\n"
+            f"  Obs shape  : {p.observation_shape}\n"
+            f"  Actions    : {p.action_space_size}\n"
             f"  Budget     : {self.tcfg.total_timesteps:,} steps\n"
             f"  Device     : {self.cfg.device}\n"
             f"{'=' * 64}"
