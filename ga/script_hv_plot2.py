@@ -277,7 +277,7 @@ def plot_all_sizes_comparison():
     # fig.suptitle("HV Convergence Comparison by Problem Size", fontsize=16, y=0.995)
     plt.tight_layout(rect=(0, 0, 1, 0.99))
     # Save
-    save_path = output_dir / "ALL_SIZES_COMPARISON.png"
+    save_path = output_dir / "ALL_SIZES_COMPARISON.pdf"
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
 

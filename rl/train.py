@@ -32,7 +32,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -149,12 +149,22 @@ def main() -> None:
     env = Environment(problem, cfg.env)
 
     # ── 5. Instance generator ───────────────────────────────────────────
-    def instance_generator(size: Optional[int] = None, **_: Any) -> Any:
+    def instance_generator(size: Optional[int] = None, **_: Any) -> Dict[str, Any]:
         kw = dict(cfg.env.problem_kwargs)
         if size is not None and cfg.env.problem_name == "vrpbtw":
             kw["n_customers"] = size
         kw["rng"] = data_rng
-        return base_gen(**kw)
+
+        raw: Dict[str, Any] = base_gen(**kw)  # safe default
+        for _attempt in range(50):  # _attempt, not overwriting raw
+            candidate: Dict[str, Any] = base_gen(**kw)
+            problem.encode_instance(candidate)
+            state = problem.initial_state()
+            mask = problem.get_action_mask(state)
+            if not mask.is_empty():
+                raw = candidate
+                break
+        return raw
 
     # ── 6. Agent ────────────────────────────────────────────────────────
     agent = build_agent(

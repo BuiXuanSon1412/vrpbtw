@@ -95,6 +95,7 @@ class _MHA(nn.Module):
         if mask is not None:
             sc = sc.masked_fill(mask.unsqueeze(1), float("-inf"))
         at = self.drop(torch.softmax(sc, dim=-1))
+        at = torch.nan_to_num(at, nan=0.0)
         out = torch.matmul(at, V).transpose(1, 2).contiguous().view(B, Tq, self.D)
         return self.Wo(out)
 

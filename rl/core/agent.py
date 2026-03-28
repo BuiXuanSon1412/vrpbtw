@@ -179,19 +179,31 @@ class PPOAgent(BaseAgent):
 
     def _batch_obs(self, obs: Union[np.ndarray, Dict]) -> Any:
         if isinstance(obs, dict):
-            return {k: v[None] for k, v in obs.items()}
+            batched = {k: v[None] for k, v in obs.items()}
+            # Pad node_features to the fixed obs_shape
+            if "node_features" in batched:
+                nf = batched["node_features"]  # (1, n_cur+1, 5)
+                target = self.obs_shape[0]  # N_max+1
+                if nf.shape[1] < target:
+                    pad = np.zeros(
+                        (1, target - nf.shape[1], nf.shape[2]), dtype=nf.dtype
+                    )
+                    batched["node_features"] = np.concatenate([nf, pad], axis=1)
+            return batched
         return obs[None]
 
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
-
     def select_action(
         self,
         obs: Union[np.ndarray, Dict],
         action_mask: np.ndarray,
         training: bool = True,
     ) -> Tuple[int, float, float]:
+        # Always ensure mask matches full action space size
+        if action_mask.shape[0] != self.action_space_size:
+            action_mask = _pad_mask(action_mask, self.action_space_size)
         with torch.no_grad():
             obs_t = self._to_tensor_obs(self._batch_obs(obs))
             mask_t = torch.BoolTensor(action_mask).unsqueeze(0).to(self.device)
@@ -211,20 +223,46 @@ class PPOAgent(BaseAgent):
         ep_lengths: List[int] = []
         ep_reward, ep_length = 0.0, 0
 
-        raw = instance_generator()
-        obs, info = env.reset(raw)
-        action_mask = info["action_mask"]
+        def _get_fresh_episode():
+            """Keep sampling new instances until we get one with a non-empty mask."""
+            for _ in range(100):
+                raw = instance_generator()
+                obs, info = env.reset(raw)
+                mask = info["action_mask"]
+                if mask.any():
+                    return obs, mask
+            raise RuntimeError(
+                "instance_generator produced 100 consecutive dead-start instances."
+            )
+
+        obs, action_mask = _get_fresh_episode()
 
         while not self.rollout_buffer.is_full:
+            padded_mask = _pad_mask(action_mask, self.action_space_size)
+
             action, log_prob, value = self.select_action(
-                obs, action_mask, training=True
+                obs, padded_mask, training=True
             )
+
+            # Re-map if network selected an out-of-range or infeasible action
+            if action >= len(action_mask) or not action_mask[action]:
+                feasible = np.where(action_mask)[0]
+                if len(feasible) > 0:
+                    action = int(np.random.choice(feasible))
+                else:
+                    # Dead-end state — record episode as done and start fresh
+                    ep_rewards.append(ep_reward)
+                    ep_lengths.append(ep_length)
+                    ep_reward, ep_length = 0.0, 0
+                    obs, action_mask = _get_fresh_episode()
+                    continue
+                log_prob = 0.0
+
             next_obs, reward, terminated, truncated, info = env.step(action)
 
             if self.reward_normalizer is not None:
                 reward = self.reward_normalizer.normalise(reward)
 
-            # ── obs storage ─────────────────────────────────────────
             if isinstance(obs, dict):
                 obs_to_store = _pad_to(obs["node_features"], self.obs_shape)
                 veh_to_store = obs.get("vehicle_features")
@@ -247,7 +285,7 @@ class PPOAgent(BaseAgent):
                 done=(terminated or truncated),
                 log_prob=log_prob,
                 value=value,
-                action_mask=_pad_mask(action_mask, self.action_space_size),
+                action_mask=padded_mask,
                 vehicle_features=veh_to_store,
                 graph_data=graph_to_store,
             )
@@ -262,12 +300,17 @@ class PPOAgent(BaseAgent):
                 ep_rewards.append(ep_reward)
                 ep_lengths.append(ep_length)
                 ep_reward, ep_length = 0.0, 0
-                raw = instance_generator()
-                obs, info = env.reset(raw)
-                action_mask = info["action_mask"]
+                obs, action_mask = _get_fresh_episode()
+            elif not action_mask.any():
+                # Dead-end reached mid-episode (mask emptied without termination)
+                ep_rewards.append(ep_reward)
+                ep_lengths.append(ep_length)
+                ep_reward, ep_length = 0.0, 0
+                obs, action_mask = _get_fresh_episode()
 
-        # Bootstrap value for GAE
-        _, _, last_value = self.select_action(obs, action_mask, training=False)
+        _, _, last_value = self.select_action(
+            obs, _pad_mask(action_mask, self.action_space_size), training=False
+        )
         self.rollout_buffer.compute_returns_and_advantages(last_value=last_value)
 
         return {
@@ -303,7 +346,6 @@ class PPOAgent(BaseAgent):
         payload = {
             "network_state": self._network.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
-            "ppo_cfg": dataclasses.asdict(self.cfg),
             "obs_shape": self.obs_shape,
             "action_space_size": self.action_space_size,
             "update_count": self._update_count,
@@ -317,7 +359,20 @@ class PPOAgent(BaseAgent):
         torch.save(payload, path)
 
     def load(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device)
+        try:
+            ckpt = torch.load(path, map_location=self.device, weights_only=True)
+        except Exception:
+            # PyTorch 2.6+: numpy scalars in checkpoint require weights_only=False
+            # Safe here because we only save our own checkpoints
+            import torch.serialization as _ts
+            import numpy._core.multiarray as _npcm
+
+            try:
+                with _ts.safe_globals([_npcm.scalar]):
+                    ckpt = torch.load(path, map_location=self.device, weights_only=True)
+            except Exception:
+                ckpt = torch.load(path, map_location=self.device, weights_only=False)
+
         self._network.load_state_dict(ckpt["network_state"])
         self.optimizer.load_state_dict(ckpt["optimizer_state"])
         self._update_count = ckpt.get("update_count", 0)
