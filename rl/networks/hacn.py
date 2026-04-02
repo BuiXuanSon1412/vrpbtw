@@ -25,9 +25,7 @@ ENCODING PHASE  (runs once per step, not once per instance)
       5. Type-gated readout MLP
 
   HierarchicalEncoder
-    Orchestrates one round of NodeEncoder → VehicleEncoder, then a
-    second cross-attention pass where nodes attend back to vehicles
-    (so nodes "read" the current fleet state before decoding).
+    Orchestrates one round of NodeEncoder → VehicleEncoder.
     Produces the final Z_node, Z_veh, g_node, g_veh used by the decoder.
 
 DECODING PHASE  (hierarchical two-pointer)
@@ -35,12 +33,15 @@ DECODING PHASE  (hierarchical two-pointer)
 
   NodeSelectionDecoder
     Upper pointer: selects which node n* to serve next.
-    Query = f(g_node, g_veh).  Keys = Z_node.
+    Query = f(g_node, mean(Z_veh)).  Keys = Z_node.
+    Vehicle compatibility is captured by mean-pooling all vehicle
+    representations from VehicleEncoder.
 
   VehicleSelectionDecoder
     Lower pointer: selects which vehicle v* serves n*.
-    Explicitly conditioned on vehicle type via type embeddings.
-    Query = f(g_veh, Z_node[n*]).  Keys = Z_veh with type injection.
+    Query = f(mean(Z_node), g_veh).  Keys = Z_veh with type injection.
+    Node compatibility is captured by mean-pooling all node
+    representations from NodeEncoder.
 
   Joint log-prob = log π_upper(n*) + log π_lower(v* | n*)
   Flat action index = n* × 2K + v*
@@ -237,17 +238,10 @@ class VehicleEncoder(nn.Module):
        over the incremental route graph.  Each vehicle's embedding is
        initialised from its current node in this graph.
 
-    4. Vehicle→Node cross-attention
-       Each vehicle attends over the full Z_node set to read the
-       remaining problem structure (unserved nodes, their time windows,
-       demands).  This is the key coupling that makes the encoding phase
-       hierarchical: vehicles learn *what is left to serve* before the
-       decoder runs.
-
-    5. Type-gated readout MLP
-       Final embedding = MLP([gnn_context | node_context | type_emb | props])
-       The gate jointly processes all four signals so truck/drone
-       differences in scoring are learned, not hard-coded.
+    4. Type-gated readout MLP
+       Final embedding = MLP([gnn_context | type_emb | state_props] (3D → 2D → D))
+       No cross-attention to Z_node — the vehicle encoder is fully
+       independent of the node encoder.
     """
 
     TRUCK = 0
@@ -259,7 +253,6 @@ class VehicleEncoder(nn.Module):
         K: int,
         edge_feat_dim: int,
         n_gnn_layers: int = 2,
-        n_cross_attn_heads: int = 4,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -291,15 +284,10 @@ class VehicleEncoder(nn.Module):
             [_EdgeConvLayer(D, edge_feat_dim, dropout) for _ in range(n_gnn_layers)]
         )
 
-        # ── 4: vehicle → node cross-attention ────────────────────────
-        # Vehicles (queries) attend over node embeddings (keys/values)
-        self.veh_to_node_attn = _MHA(D, n_cross_attn_heads, dropout)
-        self.cross_norm = nn.LayerNorm(D)
-
-        # ── 5: type-gated readout ─────────────────────────────────────
-        # inputs: gnn_context(D) + node_context(D) + type_emb(D) + state_props(D)
+        # ── 4: type-gated readout ─────────────────────────────────────
+        # inputs: gnn_context(D) + type_emb(D) + state_props(D)
         self.readout_gate = nn.Sequential(
-            nn.Linear(D * 4, D * 2),
+            nn.Linear(D * 3, D * 2),
             nn.ReLU(),
             nn.Linear(D * 2, D),
         )
@@ -371,16 +359,15 @@ class VehicleEncoder(nn.Module):
 
     def forward(
         self,
-        Z_node_full: torch.Tensor,  # (N+1, D)   from NodeEncoder
-        Z_node_batch: torch.Tensor,  # (1, N+1, D) batched version for cross-attn
         veh_feat: torch.Tensor,  # (2K, VEH_FEAT_DIM)
         edge_index: torch.Tensor,  # (2, E)
         edge_attr: torch.Tensor,  # (E, EDGE_FEAT_DIM)
         visited: List[int],
         meta: torch.Tensor,  # (|V|, 1+K+1)
         cur_nodes: List[int],  # (2K,)
+        Z_node_full: torch.Tensor,  # (N+1, D)  used only for visited-node projection
     ) -> torch.Tensor:  # (2K, D)
-        device = Z_node_full.device
+        device = veh_feat.device
         V2K = 2 * self.K
         t_ids = self.type_ids(device)  # (2K,)
         type_emb = self.type_embed(t_ids)  # (2K, D)
@@ -404,24 +391,8 @@ class VehicleEncoder(nn.Module):
                 if cn in local_map:
                     gnn_context[vi] = h[local_map[cn]]
 
-        # ── 4: vehicle → node cross-attention ────────────────────────
-        # Each vehicle (query) attends over all nodes (keys/values) to
-        # read remaining demand, time windows, and spatial structure.
-        # Shape: queries (1, 2K, D), keys/values (1, N+1, D)
-        veh_queries = (gnn_context + type_emb + state_props).unsqueeze(0)  # (1, 2K, D)
-        node_context_raw = self.veh_to_node_attn(
-            veh_queries,  # Q: vehicles
-            Z_node_batch,  # K: nodes
-            Z_node_batch,  # V: nodes
-        )  # (1, 2K, D)
-        node_context = self.cross_norm(veh_queries + node_context_raw).squeeze(
-            0
-        )  # (2K, D)
-
-        # ── 5: type-gated readout ─────────────────────────────────────
-        fused = torch.cat(
-            [gnn_context, node_context, type_emb, state_props], dim=-1
-        )  # (2K, 4D)
+        # ── 4: type-gated readout ─────────────────────────────────────
+        fused = torch.cat([gnn_context, type_emb, state_props], dim=-1)  # (2K, 3D)
         out = self.readout_gate(fused)  # (2K, D)
         return self.readout_norm(out)  # (2K, D)
 
@@ -433,26 +404,20 @@ class VehicleEncoder(nn.Module):
 
 class HierarchicalEncoder(nn.Module):
     """
-    Coordinates the bidirectional encoding pass between nodes and vehicles.
+    Coordinates the encoding pass between nodes and vehicles.
 
     Pass 1 — NodeEncoder
       Encodes nodes using heterogeneous self-attention.
       Produces Z_node (B, N+1, D) and g_node (B, D).
 
     Pass 2 — VehicleEncoder
-      Encodes vehicles using Z_node as cross-attention context.
-      Vehicles attend to nodes to read remaining problem structure.
+      Encodes vehicles purely from their own state and route graph.
+      No cross-attention to Z_node — the two encoders are independent.
       Produces Z_veh (B, 2K, D) and g_veh (B, D).
 
-    Pass 3 — Node refinement cross-attention
-      Nodes attend back to the vehicle embeddings so node embeddings
-      are updated with information about the current fleet state
-      (positions, loads, which nodes each vehicle has already visited).
-      This makes Z_node "aware of" the fleet before the decoder runs,
-      closing the bidirectional loop.
-
-    The output Z_node from Pass 3, along with Z_veh from Pass 2, are
-    what the NodeSelectionDecoder and VehicleSelectionDecoder use.
+    The decoders then use mean pooling to bridge the two representations:
+      NodeSelectionDecoder  uses mean(Z_veh) as its vehicle context.
+      VehicleSelectionDecoder uses mean(Z_node) as its node context.
     """
 
     def __init__(
@@ -478,13 +443,8 @@ class HierarchicalEncoder(nn.Module):
             K=K,
             edge_feat_dim=EDGE_FEAT_DIM,
             n_gnn_layers=n_gnn_layers,
-            n_cross_attn_heads=n_heads,
             dropout=dropout,
         )
-        # Pass 3: nodes attend to vehicles
-        # Nodes (queries) read vehicle embeddings (keys/values)
-        self.node_to_veh_attn = _MHA(D, n_heads, dropout)
-        self.node_refine_norm = _make_norm(use_instance_norm, D)
 
     def forward(
         self,
@@ -505,29 +465,24 @@ class HierarchicalEncoder(nn.Module):
         Z_node, g_node = self.node_encoder(node_feat, l_idx, b_idx)
         # Z_node: (B, N+1, D),  g_node: (B, D)
 
-        # ── Pass 2: encode vehicles using Z_node as context ───────────
+        # ── Pass 2: encode vehicles independently ─────────────────────
+        # VehicleEncoder uses only vehicle state + route graph — no Z_node.
         Z_veh_list = []
         for b in range(B):
             Z_veh_b = self.vehicle_encoder(
-                Z_node_full=Z_node[b],  # (N+1, D)
-                Z_node_batch=Z_node[b].unsqueeze(0),  # (1, N+1, D)
                 veh_feat=veh_feat[b],  # (2K, VEH_FEAT_DIM)
                 edge_index=edge_indices[b],
                 edge_attr=edge_attrs[b],
                 visited=visited_list[b],
                 meta=meta_list[b],
                 cur_nodes=cur_nodes_list[b],
+                Z_node_full=Z_node[
+                    b
+                ],  # (N+1, D) — used only for visited-node projection in GNN
             )
             Z_veh_list.append(Z_veh_b)
         Z_veh = torch.stack(Z_veh_list, dim=0)  # (B, 2K, D)
         g_veh = Z_veh.mean(dim=1)  # (B, D)
-
-        # ── Pass 3: refine nodes by attending to vehicles ─────────────
-        # Z_node (B, N+1, D) queries Z_veh (B, 2K, D)
-        node_veh_ctx = self.node_to_veh_attn(Z_node, Z_veh, Z_veh)  # (B, N+1, D)
-        Z_node = self.node_refine_norm(Z_node + node_veh_ctx)
-        Z_node = torch.nan_to_num(Z_node, nan=0.0)
-        g_node = Z_node.mean(dim=1)  # (B, D)  recompute after refinement
 
         return Z_node, g_node, Z_veh, g_veh
 
@@ -541,9 +496,11 @@ class NodeSelectionDecoder(nn.Module):
     """
     Selects which node n* to serve next.
 
-    Query  = f(g_node, g_veh)  — a context vector summarising both
-             the global node state and the current fleet.
-    Keys   = W_k(Z_node)       — one key per node.
+    Query  = f(g_node, mean(Z_veh))  — the vehicle context is formed by
+             mean-pooling all vehicle representations from VehicleEncoder,
+             so every vehicle contributes equally to the node-selection
+             query regardless of the number of vehicles.
+    Keys   = W_k(Z_node)             — one key per node.
     Logits = clip_logits × tanh( Q·K^T / sqrt(D) )
 
     The tanh clip prevents logits from saturating early in training,
@@ -553,6 +510,7 @@ class NodeSelectionDecoder(nn.Module):
     def __init__(self, D: int, clip_logits: float):
         super().__init__()
         self.clip_logits = clip_logits
+        # context input: g_node (D) + mean(Z_veh) (D)
         self.context_proj = nn.Sequential(nn.Linear(D * 2, D), nn.ReLU())
         self.Wq = nn.Linear(D, D, bias=False)
         self.Wk = nn.Linear(D, D, bias=False)
@@ -561,14 +519,16 @@ class NodeSelectionDecoder(nn.Module):
     def forward(
         self,
         g_node: torch.Tensor,  # (B, D)
-        g_veh: torch.Tensor,  # (B, D)
+        Z_veh: torch.Tensor,  # (B, 2K, D)  — all vehicle embeddings
         Z_node: torch.Tensor,  # (B, N+1, D)
         node_mask: Optional[torch.Tensor],  # (B, N+1) bool, True=feasible
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         D = Z_node.shape[-1]
         if self._scale is None:
             self._scale = math.sqrt(D)
-        ctx = self.context_proj(torch.cat([g_node, g_veh], dim=-1))  # (B, D)
+        # Mean-pool vehicle representations to form the vehicle context signal
+        mean_veh = Z_veh.mean(dim=1)  # (B, D)
+        ctx = self.context_proj(torch.cat([g_node, mean_veh], dim=-1))  # (B, D)
         query = self.Wq(ctx).unsqueeze(1)  # (B, 1, D)
         keys = self.Wk(Z_node)  # (B, N+1, D)
         logits = torch.bmm(query, keys.transpose(1, 2)).squeeze(1) / self._scale
@@ -587,16 +547,21 @@ class VehicleSelectionDecoder(nn.Module):
     """
     Selects which vehicle v* serves the chosen node n*.
 
+    Node compatibility is captured by mean-pooling all node representations
+    from NodeEncoder, giving each vehicle a holistic view of the remaining
+    problem structure rather than conditioning on a single selected node.
+
+    Context = f(g_veh, mean(Z_node))  — combines the fleet summary with
+    the mean of all node embeddings.
+
     Explicitly conditioned on vehicle type: the scoring MLP receives
     [Z_veh_i | ctx | type_emb_i] so the network can learn distinct
-    scoring preferences for trucks vs drones given the selected node.
-
-    Context = f(g_veh, Z_node[n*])  — combines the fleet summary with
-    the embedding of the node that was just selected.
+    scoring preferences for trucks vs drones.
     """
 
     def __init__(self, D: int):
         super().__init__()
+        # context input: g_veh (D) + mean(Z_node) (D)
         self.context_proj = nn.Sequential(nn.Linear(D * 2, D), nn.ReLU())
         # Input: Z_veh(D) + context(D) + type_emb(D) → score(1)
         self.score_mlp = nn.Sequential(nn.Linear(D * 3, D), nn.ReLU(), nn.Linear(D, 1))
@@ -604,13 +569,15 @@ class VehicleSelectionDecoder(nn.Module):
     def forward(
         self,
         g_veh: torch.Tensor,  # (B, D)
-        Z_node_sel: torch.Tensor,  # (B, D)  embedding of selected node
+        Z_node: torch.Tensor,  # (B, N+1, D)  — all node embeddings
         Z_veh: torch.Tensor,  # (B, 2K, D)
         veh_mask: Optional[torch.Tensor],  # (B, 2K) bool, True=feasible
         type_emb: torch.Tensor,  # (2K, D)  vehicle type embeddings
     ) -> torch.Tensor:  # (B, 2K)  logits
         B, V2K, D = Z_veh.shape
-        ctx = self.context_proj(torch.cat([g_veh, Z_node_sel], dim=-1))  # (B, D)
+        # Mean-pool node representations to form the node compatibility signal
+        mean_node = Z_node.mean(dim=1)  # (B, D)
+        ctx = self.context_proj(torch.cat([g_veh, mean_node], dim=-1))  # (B, D)
         ctx_exp = ctx.unsqueeze(1).expand(B, V2K, D)  # (B, 2K, D)
         type_exp = type_emb.unsqueeze(0).expand(B, V2K, D)  # (B, 2K, D)
         logits = self.score_mlp(torch.cat([Z_veh, ctx_exp, type_exp], dim=-1)).squeeze(
@@ -726,19 +693,13 @@ class PolicyNetwork(BaseNetwork):
 
     @staticmethod
     def _node_mask(action_mask: torch.Tensor, N1: int, V2K: int) -> torch.Tensor:
+        """True for nodes that have at least one feasible vehicle."""
         return action_mask.view(action_mask.shape[0], N1, V2K).any(dim=-1)
 
     @staticmethod
-    def _veh_mask_for_node(
-        action_mask: torch.Tensor,
-        node_id: torch.Tensor,
-        N1: int,
-        V2K: int,
-    ) -> torch.Tensor:
-        B = action_mask.shape[0]
-        m = action_mask.view(B, N1, V2K)
-        idx = node_id.view(B, 1, 1).expand(B, 1, V2K)
-        return m.gather(1, idx).squeeze(1)
+    def _veh_mask(action_mask: torch.Tensor, N1: int, V2K: int) -> torch.Tensor:
+        """True for vehicles that are feasible for at least one node."""
+        return action_mask.view(action_mask.shape[0], N1, V2K).any(dim=1)
 
     # ------------------------------------------------------------------
     # Core encoding
@@ -790,10 +751,20 @@ class PolicyNetwork(BaseNetwork):
         n_mask = (
             self._node_mask(action_mask, N1, V2K) if action_mask is not None else None
         )
-        logits_U, _ = self.node_decoder(g_node, g_veh, Z_node, n_mask)
-        flat = self._build_flat_logits(
-            logits_U, Z_node, g_veh, Z_veh, action_mask, N1, V2K, type_emb
+        v_mask = (
+            self._veh_mask(action_mask, N1, V2K) if action_mask is not None else None
         )
+        logits_U, _ = self.node_decoder(g_node, Z_veh, Z_node, n_mask)  # (B, N+1)
+        logits_L = self.vehicle_decoder(
+            g_veh, Z_node, Z_veh, v_mask, type_emb
+        )  # (B, 2K)
+
+        # Outer sum: flat[n, v] = logits_U[n] + logits_L[v]  — O(N+V), not O(NV)
+        flat = logits_U.unsqueeze(2) + logits_L.unsqueeze(1)  # (B, N+1, 2K)
+        flat = flat.view(flat.shape[0], N1 * V2K)
+        if action_mask is not None:
+            flat = flat.masked_fill(~action_mask, float("-inf"))
+
         value = self.value_head(
             torch.cat([g_node.detach(), g_veh.detach()], dim=-1)
         ).squeeze(-1)
@@ -804,25 +775,26 @@ class PolicyNetwork(BaseNetwork):
     ):
         device = next(self.parameters()).device.type
         Z_node, g_node, Z_veh, g_veh, N1, V2K, type_emb = self._encode(obs, device)
-        B = Z_node.shape[0]
 
         n_mask = (
             self._node_mask(action_mask, N1, V2K) if action_mask is not None else None
         )
-        logits_U, _ = self.node_decoder(g_node, g_veh, Z_node, n_mask)
+        v_mask = (
+            self._veh_mask(action_mask, N1, V2K) if action_mask is not None else None
+        )
+
+        # ── Node head (independent) ───────────────────────────────────
+        logits_U, _ = self.node_decoder(g_node, Z_veh, Z_node, n_mask)  # (B, N+1)
         if not torch.isfinite(logits_U).any():
             logits_U = torch.zeros_like(logits_U)
         dist_U = torch.distributions.Categorical(logits=logits_U)
         node_id = logits_U.argmax(-1) if deterministic else dist_U.sample()
         lp_node = dist_U.log_prob(node_id)
 
-        Z_node_sel = Z_node[torch.arange(B, device=device), node_id]
-        v_mask = (
-            self._veh_mask_for_node(action_mask, node_id, N1, V2K)
-            if action_mask is not None
-            else None
-        )
-        logits_L = self.vehicle_decoder(g_veh, Z_node_sel, Z_veh, v_mask, type_emb)
+        # ── Vehicle head (independent — no node_id fed in) ───────────
+        logits_L = self.vehicle_decoder(
+            g_veh, Z_node, Z_veh, v_mask, type_emb
+        )  # (B, 2K)
         if not torch.isfinite(logits_L).any():
             logits_L = torch.zeros_like(logits_L)
         dist_L = torch.distributions.Categorical(logits=logits_L)
@@ -839,7 +811,6 @@ class PolicyNetwork(BaseNetwork):
     ):
         device = next(self.parameters()).device.type
         Z_node, g_node, Z_veh, g_veh, N1, V2K, type_emb = self._encode(obs, device)
-        B = Z_node.shape[0]
 
         node_id = actions // V2K
         veh_id = actions % V2K
@@ -847,20 +818,22 @@ class PolicyNetwork(BaseNetwork):
         n_mask = (
             self._node_mask(action_mask, N1, V2K) if action_mask is not None else None
         )
-        logits_U, _ = self.node_decoder(g_node, g_veh, Z_node, n_mask)
+        v_mask = (
+            self._veh_mask(action_mask, N1, V2K) if action_mask is not None else None
+        )
+
+        # ── Node head ────────────────────────────────────────────────
+        logits_U, _ = self.node_decoder(g_node, Z_veh, Z_node, n_mask)  # (B, N+1)
         if not torch.isfinite(logits_U).any():
             logits_U = torch.zeros_like(logits_U)
         dist_U = torch.distributions.Categorical(logits=logits_U)
         lp_node = dist_U.log_prob(node_id)
         ent_U = dist_U.entropy()
 
-        Z_node_sel = Z_node[torch.arange(B, device=device), node_id]
-        v_mask = (
-            self._veh_mask_for_node(action_mask, node_id, N1, V2K)
-            if action_mask is not None
-            else None
-        )
-        logits_L = self.vehicle_decoder(g_veh, Z_node_sel, Z_veh, v_mask, type_emb)
+        # ── Vehicle head (independent — no node_id fed in) ───────────
+        logits_L = self.vehicle_decoder(
+            g_veh, Z_node, Z_veh, v_mask, type_emb
+        )  # (B, 2K)
         if not torch.isfinite(logits_L).any():
             logits_L = torch.zeros_like(logits_L)
         dist_L = torch.distributions.Categorical(logits=logits_L)
@@ -871,21 +844,3 @@ class PolicyNetwork(BaseNetwork):
             torch.cat([g_node.detach(), g_veh.detach()], dim=-1)
         ).squeeze(-1)
         return lp_node + lp_veh, value, ent_U + ent_L
-
-    def _build_flat_logits(
-        self, logits_U, Z_node, g_veh, Z_veh, action_mask, N1, V2K, type_emb
-    ) -> torch.Tensor:
-        B = logits_U.shape[0]
-        flat = torch.full((B, N1 * V2K), float("-inf"), device=logits_U.device)
-        for n in range(N1):
-            Z_n = Z_node[:, n, :]
-            v_mask = None
-            if action_mask is not None:
-                nid_t = torch.full((B,), n, dtype=torch.long, device=logits_U.device)
-                v_mask = self._veh_mask_for_node(action_mask, nid_t, N1, V2K)
-            l_L = self.vehicle_decoder(g_veh, Z_n, Z_veh, v_mask, type_emb)
-            for v in range(V2K):
-                flat[:, n * V2K + v] = logits_U[:, n] + l_L[:, v]
-        if action_mask is not None:
-            flat = flat.masked_fill(~action_mask, float("-inf"))
-        return flat

@@ -3,26 +3,30 @@ problems/vrpbtw.py
 ------------------
 VRPBTW with heterogeneous truck-drone fleets.
 
-This module is self-contained: it imports only from core.problem (the ABC)
-and standard libraries.  No agent, buffer, or network imports.
+Reward design
+-------------
+Per-step reward uses potential-based shaping:
+    r_t = F(s_{t+1}) - F(s_t)
+
+where F(s) = -(0.5 * f_cost(s) / z_cost + 0.5 * f_maxtard(s) / z_tard)
+
+f_cost and f_maxtard are maintained incrementally in VRPBTWState so no
+full evaluate() replay is needed at each step.
+
+z_cost, z_tard are nadir approximations from the heuristic solution,
+computed once at episode reset via set_nadir().
+
+At termination:
+    feasible   -> r_T = F(s_T) - F(s_{T-1})  (normal shaped step)
+    infeasible -> r_T = -2.0                  (Option 1: hard penalty,
+                                               always worse than feasible F
+                                               which lies in roughly [-1, 0])
 
 Constants
 ---------
 NODE_FEAT_DIM  = 5   [x, y, demand, tw_open, tw_close]
 VEH_FEAT_DIM   = 5   [x, y, load, time, deadline]
 EDGE_FEAT_DIM  = 6   [vtype, travel_time, dist, depart, arrive, tardiness]
-
-These are imported by networks/hacn.py so the network knows the input
-dimensions without importing the full problem module.
-
-Key design decisions
---------------------
-1. Signed demand:  >0 linehaul (delivery),  <0 backhaul (pickup)
-2. Distance:       truck = Manhattan,  drone = Euclidean
-3. Multi-stop drone trips with trip_duration and load reset on landing
-4. Phase constraint: truck_phase 0=linehaul, 1=backhaul
-5. Flat action:    node * 2K + vehicle_idx
-                   vehicle_idx 0..K-1 = truck,  K..2K-1 = drone
 """
 
 from __future__ import annotations
@@ -47,10 +51,11 @@ NODE_FEAT_DIM = 5
 VEH_FEAT_DIM = 5
 EDGE_FEAT_DIM = 6
 
-# Internal labels
 TRUCK = 0
 DRONE = 1
 DEPOT = 0
+
+_TARD_EPS = 1e-6  # clamp z_tard to avoid division by zero
 
 
 # ---------------------------------------------------------------------------
@@ -61,29 +66,33 @@ DEPOT = 0
 @dataclass
 class VRPBTWState:
     # Per fleet (K,)
-    truck_node: np.ndarray  # (K,) int   current node
-    truck_time: np.ndarray  # (K,) float earliest available time
-    truck_load: np.ndarray  # (K,) float remaining capacity
-    truck_phase: np.ndarray  # (K,) int   0=linehaul 1=backhaul
+    truck_node: np.ndarray
+    truck_time: np.ndarray
+    truck_load: np.ndarray
+    truck_phase: np.ndarray
 
-    drone_node: np.ndarray  # (K,) int
-    drone_time: np.ndarray  # (K,) float
-    drone_load: np.ndarray  # (K,) float remaining trip capacity
-    drone_launch_time: np.ndarray  # (K,) float launch time of current trip
-    drone_active: np.ndarray  # (K,) bool  airborne
+    drone_node: np.ndarray
+    drone_time: np.ndarray
+    drone_load: np.ndarray
+    drone_launch_time: np.ndarray
+    drone_active: np.ndarray
 
     # Global
     served: np.ndarray  # (N+1,) bool
 
+    # Incremental objective accumulators
+    current_cost: float  # total travel cost so far
+    current_max_tard: float  # max tardiness across served customers so far
+
     # Routes (for logging + evaluate())
     truck_routes: List[List[int]]
     drone_route_nodes: List[List[int]]
-    drone_route_mask: List[List[int]]  # 0=waypoint 1=customer
+    drone_route_mask: List[List[int]]
 
     # Incremental graph (input to vehicle GNN)
-    edge_index: np.ndarray  # (2, E) int
-    edge_attr: np.ndarray  # (E, EDGE_FEAT_DIM) float
-    edge_fleet: np.ndarray  # (E,) int
+    edge_index: np.ndarray  # (2, E)
+    edge_attr: np.ndarray  # (E, EDGE_FEAT_DIM)
+    edge_fleet: np.ndarray  # (E,)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +112,8 @@ def _copy_state(s: VRPBTWState) -> VRPBTWState:
         drone_launch_time=s.drone_launch_time.copy(),
         drone_active=s.drone_active.copy(),
         served=s.served.copy(),
+        current_cost=s.current_cost,
+        current_max_tard=s.current_max_tard,
         truck_routes=[list(r) for r in s.truck_routes],
         drone_route_nodes=[list(r) for r in s.drone_route_nodes],
         drone_route_mask=[list(m) for m in s.drone_route_mask],
@@ -124,7 +135,6 @@ class VRPBTWProblem(Problem):
         self.n_fleets = n_fleets
         self.K = n_fleets
 
-        # Populated by encode_instance
         self.coords: np.ndarray = np.zeros((1, 2), dtype=np.float32)
         self.demands: np.ndarray = np.zeros(1, dtype=np.float32)
         self.tw_open: np.ndarray = np.zeros(1, dtype=np.float32)
@@ -143,10 +153,14 @@ class VRPBTWProblem(Problem):
         self.c_d: float = 0.5
         self.launch_time: float = 0.0
         self.land_time: float = 0.0
-        self.lambda_weight: float = 1.0
+        self.lambda_weight: float = 0.5
 
         self._linehaul_idx: np.ndarray = np.array([], dtype=np.int32)
         self._backhaul_idx: np.ndarray = np.array([], dtype=np.int32)
+
+        # Nadir reference values — set at episode reset via set_nadir()
+        self._z_cost: float = 1.0
+        self._z_tard: float = 1.0
 
     # ------------------------------------------------------------------
     # encode_instance
@@ -191,11 +205,51 @@ class VRPBTWProblem(Problem):
         self.c_d = float(raw_instance["drone_cost"])
         self.launch_time = float(raw_instance.get("launch_time", 0.0))
         self.land_time = float(raw_instance.get("land_time", 0.0))
-        self.lambda_weight = float(raw_instance.get("lambda_weight", 1.0))
+        self.lambda_weight = float(raw_instance.get("lambda_weight", 0.5))
 
         cust_d = self.demands[1:]
         self._linehaul_idx = (np.where(cust_d > 0)[0] + 1).astype(np.int32)
         self._backhaul_idx = (np.where(cust_d < 0)[0] + 1).astype(np.int32)
+
+    # ------------------------------------------------------------------
+    # reset override — computes nadir internally before returning state
+    # ------------------------------------------------------------------
+
+    def reset(self, raw_instance: Any) -> VRPBTWState:
+        """
+        Encode the instance, compute per-instance nadir approximations
+        from the heuristic, then return the initial state.
+
+        Overrides Problem.reset() so that Environment never needs to
+        know about objectives, heuristics, or normalisation — those are
+        internal concerns of VRPBTWProblem.
+        """
+        self.encode_instance(raw_instance)
+        self._n_steps = 0
+        self._set_nadir_from_heuristic()
+        return self.initial_state()
+
+    def _set_nadir_from_heuristic(self) -> None:
+        """
+        Run the nearest-neighbour heuristic and register (z_cost, z_tard)
+        as the per-instance nadir approximations for reward normalisation.
+        z_tard is clamped to _TARD_EPS to avoid division by zero when the
+        heuristic produces zero tardiness.
+        """
+        z_cost, z_tard = self._heuristic_nadir()
+        self._z_cost = max(z_cost, _TARD_EPS)
+        self._z_tard = max(z_tard, _TARD_EPS)
+
+    # ------------------------------------------------------------------
+    # Potential function
+    # ------------------------------------------------------------------
+
+    def _F(self, cost: float, max_tard: float) -> float:
+        """
+        Scalarised normalised objective.  Always <= 0 for typical solutions.
+        F = -(0.5 * cost / z_cost + 0.5 * max_tard / z_tard)
+        """
+        return -(0.5 * cost / self._z_cost + 0.5 * max_tard / self._z_tard)
 
     # ------------------------------------------------------------------
     # initial_state
@@ -216,6 +270,8 @@ class VRPBTWProblem(Problem):
             drone_launch_time=np.zeros(K, dtype=np.float32),
             drone_active=np.zeros(K, dtype=bool),
             served=served,
+            current_cost=0.0,
+            current_max_tard=0.0,
             truck_routes=[[] for _ in range(K)],
             drone_route_nodes=[[] for _ in range(K)],
             drone_route_mask=[[] for _ in range(K)],
@@ -371,23 +427,26 @@ class VRPBTWProblem(Problem):
     def apply_action(self, state: VRPBTWState, action: int) -> StepResult:
         node, v_idx = self.decode_action(action)
         k, vtype = self.vehicle_fleet_type(v_idx)
+
+        # Snapshot potential before transition
+        F_before = self._F(state.current_cost, state.current_max_tard)
+
         state = _copy_state(state)
 
         if vtype == TRUCK:
-            reward = self._apply_truck(state, k, node)
+            self._apply_truck(state, k, node)
         else:
             if state.drone_active[k]:
                 landing = self._landing_nodes(state, k)
                 if node in landing or state.served[node]:
-                    reward = self._apply_drone_land(state, k, node)
+                    self._apply_drone_land(state, k, node)
                 else:
-                    reward = self._apply_drone_extend(state, k, node)
+                    self._apply_drone_extend(state, k, node)
             else:
-                reward = self._apply_drone_launch(state, k, node)
+                self._apply_drone_launch(state, k, node)
 
         terminated = self._is_terminated(state)
-        if terminated:
-            reward += self._terminal_reward(state)
+        infeasible_end = False
 
         next_mask = (
             self.get_action_mask(state)
@@ -396,7 +455,13 @@ class VRPBTWProblem(Problem):
         )
         if not terminated and next_mask.is_empty():
             terminated = True
-            reward += self._terminal_reward(state)
+            infeasible_end = True
+
+        # ── Reward (Option 1: infeasibility as hard terminal penalty) ──
+        if terminated and infeasible_end:
+            reward = -2.0
+        else:
+            reward = self._F(state.current_cost, state.current_max_tard) - F_before
 
         return StepResult(
             next_state=state,
@@ -409,14 +474,16 @@ class VRPBTWProblem(Problem):
                 "fleet": k,
                 "vehicle": "truck" if vtype == TRUCK else "drone",
                 "served_count": int(state.served[1:].sum()),
+                "current_cost": state.current_cost,
+                "current_max_tard": state.current_max_tard,
             },
         )
 
     # ------------------------------------------------------------------
-    # Transition helpers
+    # Transition helpers  (update state in-place, no return value)
     # ------------------------------------------------------------------
 
-    def _apply_truck(self, state: VRPBTWState, k: int, j: int) -> float:
+    def _apply_truck(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.truck_node[k])
         dist = self.manhattan_dist[from_node, j]
         arrive = state.truck_time[k] + dist / self.v_t
@@ -431,6 +498,10 @@ class VRPBTWProblem(Problem):
             state.served[j] = True
             self._update_phase(state, k)
 
+        state.current_cost += self.c_t * dist
+        if j != DEPOT:
+            state.current_max_tard = max(state.current_max_tard, tardiness)
+
         self._add_edge(
             state,
             from_node,
@@ -441,9 +512,8 @@ class VRPBTWProblem(Problem):
             arrive_time=arrive,
             tardiness=tardiness,
         )
-        return float(-(self.c_t * dist) - self.lambda_weight * tardiness)
 
-    def _apply_drone_launch(self, state: VRPBTWState, k: int, j: int) -> float:
+    def _apply_drone_launch(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, j]
         depart_t = state.drone_time[k] + self.launch_time
@@ -463,6 +533,9 @@ class VRPBTWProblem(Problem):
         state.drone_route_nodes[k].extend([launch_node, j])
         state.drone_route_mask[k].extend([0, 1])
 
+        state.current_cost += self.c_d * dist
+        state.current_max_tard = max(state.current_max_tard, tardiness)
+
         self._add_edge(
             state,
             launch_node,
@@ -473,9 +546,8 @@ class VRPBTWProblem(Problem):
             arrive_time=arrive_j,
             tardiness=tardiness,
         )
-        return float(-(self.c_d * dist) - self.lambda_weight * tardiness)
 
-    def _apply_drone_extend(self, state: VRPBTWState, k: int, j: int) -> float:
+    def _apply_drone_extend(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, j]
         arrive_j = state.drone_time[k] + dist / self.v_d
@@ -491,6 +563,9 @@ class VRPBTWProblem(Problem):
         state.drone_route_nodes[k].append(j)
         state.drone_route_mask[k].append(1)
 
+        state.current_cost += self.c_d * dist
+        state.current_max_tard = max(state.current_max_tard, tardiness)
+
         self._add_edge(
             state,
             from_node,
@@ -501,9 +576,8 @@ class VRPBTWProblem(Problem):
             arrive_time=arrive_j,
             tardiness=tardiness,
         )
-        return float(-(self.c_d * dist) - self.lambda_weight * tardiness)
 
-    def _apply_drone_land(self, state: VRPBTWState, k: int, land: int) -> float:
+    def _apply_drone_land(self, state: VRPBTWState, k: int, land: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, land]
         arrive = state.drone_time[k] + dist / self.v_d + self.land_time
@@ -519,6 +593,9 @@ class VRPBTWProblem(Problem):
         state.drone_route_nodes[k].append(land)
         state.drone_route_mask[k].append(0)
 
+        # Landing has no tardiness — cost only
+        state.current_cost += self.c_d * dist
+
         self._add_edge(
             state,
             from_node,
@@ -529,7 +606,6 @@ class VRPBTWProblem(Problem):
             arrive_time=arrive,
             tardiness=0.0,
         )
-        return float(-(self.c_d * dist))
 
     # ------------------------------------------------------------------
     # Graph edge builder
@@ -587,16 +663,11 @@ class VRPBTWProblem(Problem):
     def _is_terminated(self, state: VRPBTWState) -> bool:
         return bool(state.served[1:].all()) and not state.drone_active.any()
 
-    def _terminal_reward(self, state: VRPBTWState) -> float:
-        unserved = int((~state.served[1:]).sum())
-        return float(10.0 if unserved == 0 else -2.0 * unserved)
-
     # ------------------------------------------------------------------
     # state_to_obs
     # ------------------------------------------------------------------
 
     def state_to_obs(self, state: VRPBTWState) -> Dict[str, np.ndarray]:
-        N1 = self.n_customers + 1
         T = self.T_max + 1e-6
         max_coord = float(self.coords.max()) + 1e-6
 
@@ -626,7 +697,6 @@ class VRPBTWProblem(Problem):
                     dtype=np.float32,
                 )
             )
-
             dx, dy = self.coords[state.drone_node[k]]
             tw_unavail = (state.drone_launch_time[k] + self.t_max) / T
             veh_rows.append(
@@ -671,9 +741,13 @@ class VRPBTWProblem(Problem):
     # ------------------------------------------------------------------
 
     def evaluate(self, state: VRPBTWState) -> Tuple[float, float]:
-        """Returns (total_cost, total_tardiness)."""
+        """
+        Returns (total_cost, max_tardiness) by replaying stored routes.
+        max_tardiness is the worst single time-window violation across
+        all customer visits — not the sum.
+        """
         total_cost = 0.0
-        total_tard = 0.0
+        max_tard = 0.0
 
         for k in range(self.K):
             t, prev = 0.0, DEPOT
@@ -681,7 +755,7 @@ class VRPBTWProblem(Problem):
                 dist = self.manhattan_dist[prev, j]
                 t += dist / self.v_t
                 if j != DEPOT:
-                    total_tard += max(t - self.tw_close[j], 0.0)
+                    max_tard = max(max_tard, max(t - self.tw_close[j], 0.0))
                     t = max(t, self.tw_open[j]) + self.service_times[j]
                 total_cost += self.c_t * dist
                 prev = j
@@ -696,12 +770,12 @@ class VRPBTWProblem(Problem):
                     t_d = max(t_d + dist / self.v_d, 0.0)
                 elif not in_trip and is_cust:
                     t_d += self.launch_time + dist / self.v_d
-                    total_tard += max(t_d - self.tw_close[node], 0.0)
+                    max_tard = max(max_tard, max(t_d - self.tw_close[node], 0.0))
                     t_d = max(t_d, self.tw_open[node]) + self.service_times[node]
                     in_trip = True
                 elif in_trip and is_cust:
                     t_d += dist / self.v_d
-                    total_tard += max(t_d - self.tw_close[node], 0.0)
+                    max_tard = max(max_tard, max(t_d - self.tw_close[node], 0.0))
                     t_d = max(t_d, self.tw_open[node]) + self.service_times[node]
                 else:
                     t_d += dist / self.v_d + self.land_time
@@ -710,24 +784,28 @@ class VRPBTWProblem(Problem):
 
         unserved = int((~state.served[1:]).sum())
         total_cost += unserved * 1000.0
-        return total_cost, total_tard
+        return total_cost, max_tard
 
     def scalar_objective(self, state: VRPBTWState) -> float:
-        cost, tard = self.evaluate(state)
-        return -(cost + self.lambda_weight * tard)
+        """Normalised scalarised objective using current nadir references."""
+        cost, max_tard = self.evaluate(state)
+        return self._F(cost, max_tard)
 
     def is_complete(self, state: VRPBTWState) -> bool:
         return self._is_terminated(state)
 
     def decode_solution(self, state: VRPBTWState) -> Solution:
-        cost, tard = self.evaluate(state)
+        cost, max_tard = self.evaluate(state)
+        obj = self._F(cost, max_tard)
         return Solution(
             problem_name=self.name,
             raw_state=state,
-            objective=-(cost + self.lambda_weight * tard),
+            objective=obj,
             metadata={
                 "total_cost": cost,
-                "total_tardiness": tard,
+                "max_tardiness": max_tard,
+                "z_cost": self._z_cost,
+                "z_tard": self._z_tard,
                 "served_count": int(state.served[1:].sum()),
                 "n_customers": self.n_customers,
                 "truck_routes": [list(r) for r in state.truck_routes],
@@ -737,11 +815,17 @@ class VRPBTWProblem(Problem):
             },
         )
 
-    def heuristic_solution(self) -> Optional[float]:
-        """Nearest-neighbour truck-only baseline (Manhattan distance)."""
+    def _heuristic_nadir(self) -> Tuple[float, float]:
+        """
+        Nearest-neighbour truck-only baseline.
+        Returns (z_cost, z_tard) as nadir approximations for normalisation,
+        where z_tard is max tardiness across all customers (not total).
+        Private — called only by _set_nadir_from_heuristic.
+        """
         served = np.zeros(self.n_customers + 1, dtype=bool)
         served[DEPOT] = True
-        current, t, cost, tard, load, phase = DEPOT, 0.0, 0.0, 0.0, self.Q_t, 0
+        current, t, cost, load, phase = DEPOT, 0.0, 0.0, self.Q_t, 0
+        max_tard = 0.0
 
         while not served[1:].all():
             best_j, best_d = -1, float("inf")
@@ -767,7 +851,8 @@ class VRPBTWProblem(Problem):
                 break
             d = self.manhattan_dist[current, best_j]
             arrive = t + d / self.v_t
-            tard += max(arrive - self.tw_close[best_j], 0.0)
+            tard = max(arrive - self.tw_close[best_j], 0.0)
+            max_tard = max(max_tard, tard)
             t = max(arrive, self.tw_open[best_j]) + self.service_times[best_j]
             cost += self.c_t * d
             load -= abs(self.demands[best_j])
@@ -778,8 +863,19 @@ class VRPBTWProblem(Problem):
                     phase = 1
 
         cost += self.c_t * self.manhattan_dist[current, DEPOT]
-        cost += int((~served[1:]).sum()) * 1000.0
-        return -(cost + self.lambda_weight * tard)
+        unserved = int((~served[1:]).sum())
+        cost += unserved * 1000.0
+        return cost, max_tard
+
+    def heuristic_solution(self) -> Optional[float]:
+        """
+        Override base class contract: return scalar heuristic objective.
+        Callers expecting Optional[float] (e.g. Evaluator) get the
+        normalised scalarised value.  Nadir computation uses
+        _heuristic_nadir() directly so this stays a clean scalar.
+        """
+        z_cost, z_tard = self._heuristic_nadir()
+        return self._F(z_cost, z_tard)
 
     # ------------------------------------------------------------------
     # Properties
@@ -816,7 +912,7 @@ def generate_vrpbtw(
     n_fleets: int = 2,
     grid_size: float = 100.0,
     linehaul_ratio: float = 0.5,
-    lambda_weight: float = 1.0,
+    lambda_weight: float = 0.5,
     rng: Optional[np.random.Generator] = None,
     **kwargs,
 ) -> Dict:

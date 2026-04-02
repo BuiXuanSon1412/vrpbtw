@@ -3,14 +3,10 @@ core/environment.py
 -------------------
 Generic Gym-style MDP wrapper for any Problem subclass.
 
-The Environment class knows nothing about VRPBTW, Knapsack, or any other
-concrete problem.  It only calls the Problem ABC interface.
-
-Reward shaping options (controlled by EnvConfig)
--------------------------------------------------
-  dense_shaping     : pass incremental rewards through unchanged
-  subtract_baseline : scale terminal reward relative to heuristic
-  reward_scale      : global multiplier
+Reward shaping is now handled entirely inside the Problem (vrpbtw.py).
+Reward shaping is handled entirely inside the Problem subclass.
+Environment is problem-agnostic and has no knowledge of objectives,
+heuristics, or normalisation.
 """
 
 from __future__ import annotations
@@ -46,7 +42,6 @@ class Environment:
         self._current_obs: Any = None
         self._step_count: int = 0
         self._episode_reward: float = 0.0
-        self._baseline: Optional[float] = None
 
         # Aggregate stats
         self._total_episodes: int = 0
@@ -65,9 +60,6 @@ class Environment:
         self._step_count = 0
         self._episode_reward = 0.0
 
-        self._baseline = (
-            self.problem.heuristic_solution() if self.cfg.subtract_baseline else None
-        )
         return self._current_obs, self._make_info()
 
     def step(self, action: int) -> Tuple[Any, float, bool, bool, Dict]:
@@ -86,7 +78,7 @@ class Environment:
         self._step_count += 1
         self._total_steps += 1
 
-        reward = self._shape_reward(result.reward, result.terminated)
+        reward = result.reward * self.cfg.reward_scale
         self._episode_reward += reward
 
         truncated = (
@@ -108,19 +100,6 @@ class Environment:
         return self._current_obs, reward, terminated, truncated, info
 
     # ------------------------------------------------------------------
-    # Reward shaping
-    # ------------------------------------------------------------------
-
-    def _shape_reward(self, raw: float, terminated: bool) -> float:
-        if not self.cfg.dense_shaping and not terminated:
-            return 0.0
-        if terminated and self._baseline is not None:
-            return (
-                self.problem.scalar_objective(self._state) - self._baseline
-            ) * self.cfg.reward_scale
-        return raw * self.cfg.reward_scale
-
-    # ------------------------------------------------------------------
     # Info dict
     # ------------------------------------------------------------------
 
@@ -131,7 +110,6 @@ class Environment:
             "feasible_actions": self._current_mask.action_indices,
             "step": self._step_count,
         }
-        # Expose structured obs fields so agents can read them from info
         if isinstance(self._current_obs, dict):
             for key in (
                 "node_features",

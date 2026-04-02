@@ -123,6 +123,17 @@ class Evaluator:
             action, _, _ = self.agent.select_action(
                 obs, mask, training=not self.deterministic
             )
+
+            # The independent decoder samples node and vehicle heads
+            # separately, so the combined flat action may be infeasible
+            # even if each head individually looked feasible.
+            # Remap to a random feasible action when this happens.
+            feasible = np.where(mask)[0]
+            if len(feasible) == 0:
+                break
+            if action not in feasible:
+                action = int(np.random.choice(feasible))
+
             obs, reward, terminated, truncated, info = self.env.step(action)
             mask = info["action_mask"]
             ep_reward += reward
@@ -193,9 +204,8 @@ class Evaluator:
     def _get_log_probs(self, obs: Any, mask: np.ndarray) -> np.ndarray:
         """Extract per-action log-probabilities from the policy network."""
 
-        network = self.agent.network  # assign once to a local variable
+        network = self.agent.network
         if network is None:
-            # Fallback: uniform over feasible actions
             lp = np.full(len(mask), -1e9, dtype=np.float32)
             lp[mask] = 0.0
             return lp
