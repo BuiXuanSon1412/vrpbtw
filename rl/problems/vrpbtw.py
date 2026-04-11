@@ -909,7 +909,7 @@ class VRPBTWProblem(Problem):
 
 def generate_vrpbtw(
     n_customers: int = 10,
-    n_fleets: int = 2,
+    n_fleets: int = 1,
     grid_size: float = 100.0,
     linehaul_ratio: float = 0.5,
     lambda_weight: float = 0.5,

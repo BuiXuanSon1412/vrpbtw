@@ -22,7 +22,7 @@ env:
   problem_name: vrpbtw
   problem_kwargs:
     n_customers: 10
-    n_fleets:    2
+    n_fleets:    1
   max_steps:         null
   reward_scale:      1.0
   subtract_baseline: true
