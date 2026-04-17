@@ -53,13 +53,11 @@ class EnvironmentConfig:
     problem_kwargs: Dict[str, Any] = field(default_factory=dict)
     max_steps: Optional[int] = None
     reward_scale: float = 1.0
-    subtract_baseline: bool = False
-    dense_shaping: bool = True
 
 
 @dataclass
 class NetworkConfig:
-    network_type: str = "hacn"
+    network_type: str = "hgnn"
     embed_dim: int = 128
     n_heads: int = 8
     n_encoder_layers: int = 3
@@ -67,7 +65,6 @@ class NetworkConfig:
     clip_logits: float = 10.0
     ortho_init: bool = True
     use_instance_norm: bool = True
-    hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
 
 
 @dataclass
@@ -85,27 +82,48 @@ class PPOConfig:
     target_kl: Optional[float] = 0.015
     normalize_advantages: bool = True
     normalize_rewards: bool = True
-    reward_norm_eps: float = 1e-8
 
 
 @dataclass
-class DQNConfig:
-    lr: float = 1e-4
+class MAMLConfig:
+    """Hyperparameters for First-Order MAML (FOMAML) meta-training."""
+
+    # Optimizers
+    meta_lr: float = 3e-4          # outer loop: Adam on meta-parameters θ
+    inner_lr: float = 1e-2         # inner loop: SGD step size α
+
+    # Loop structure
+    n_inner_steps: int = 1         # inner gradient steps per task per meta-update
+    n_tasks_per_update: int = 7    # tasks sampled per meta-update (≤ len(task_sizes))
+
+    # Rollout budgets per task per meta-update
+    support_rollout_len: int = 256  # steps used for inner-loop adaptation
+    query_rollout_len: int = 256    # steps used for outer-loop meta-gradient
+
+    # Task distribution (sizes and coordinate distributions)
+    task_sizes: List[int] = field(
+        default_factory=lambda: [10, 20, 50, 100, 200, 400, 1000]
+    )
+    task_distributions: List[str] = field(
+        default_factory=lambda: ["R", "C", "RC"]
+    )
+
+    # Curriculum learning
+    entropy_threshold: float = 0.5     # entropy threshold for curriculum expansion
+    curriculum_check_interval: int = 1 # check curriculum every N meta-updates
+
+    # Shared RL hyperparameters (used by both inner and outer PG loss)
     gamma: float = 0.99
-    buffer_capacity: int = 100_000
-    batch_size: int = 64
-    target_update_freq: int = 500
-    tau: float = 1.0
-    train_freq: int = 4
-    learning_starts: int = 1_000
-    eps_start: float = 1.0
-    eps_end: float = 0.05
-    eps_decay_steps: int = 50_000
-    use_per: bool = False
-    per_alpha: float = 0.6
-    per_beta_start: float = 0.4
-    per_beta_end: float = 1.0
-    per_beta_steps: int = 100_000
+    gae_lambda: float = 0.95
+    value_coef: float = 0.5
+    entropy_coef: float = 0.02
+    max_grad_norm: float = 0.5
+    normalize_advantages: bool = True
+    normalize_rewards: bool = True
+
+    # Phase 2: Fine-tuning after meta-learning
+    enable_fine_tuning: bool = False   # run Phase 2 after Phase 1 meta-learning
+    fine_tuning_steps: int = 100_000   # total timesteps for Phase 2
 
 
 @dataclass
@@ -138,7 +156,7 @@ class ExperimentConfig:
     env: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
-    dqn: DQNConfig = field(default_factory=DQNConfig)
+    maml: MAMLConfig = field(default_factory=MAMLConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
 
@@ -239,18 +257,12 @@ def load_config(path: str) -> ExperimentConfig:
 def save_config(cfg: ExperimentConfig, path: str) -> None:
     """
     Save config to YAML or JSON.
-    YAML output omits the unused algorithm block (dqn when ppo, etc.)
-    to keep hand-edited files clean.  JSON always saves the full schema.
     """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fmt = _infer_format(path)
     data = config_to_dict(cfg)
 
     if fmt == "yaml":
-        if cfg.algorithm == "ppo":
-            data.pop("dqn", None)
-        elif cfg.algorithm == "dqn":
-            data.pop("ppo", None)
         _dump_yaml(data, path)
     else:
         Path(path).write_text(json.dumps(data, indent=2))

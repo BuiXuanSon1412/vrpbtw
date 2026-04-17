@@ -15,7 +15,7 @@ What lives here
 
 What does NOT live here
 -----------------------
-  Concrete network architectures (PolicyNetwork / HACN) → networks/hacn.py
+  Concrete network architectures (PolicyNetwork)        → networks/hgnn.py
   Problem-specific constants (NODE_FEAT_DIM etc.)       → problems/vrpbtw.py
 """
 
@@ -121,7 +121,7 @@ class _FF(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class BaseNetwork(nn.Module, ABC):
+class BasePolicy(nn.Module, ABC):
     """
     Abstract base for all policy + value networks.
 
@@ -194,7 +194,7 @@ class BaseNetwork(nn.Module, ABC):
     # Shared helpers available to all subclasses
     # ------------------------------------------------------------------
 
-    def to_device(self, device: str) -> "BaseNetwork":
+    def to_device(self, device: str) -> "BasePolicy":
         return self.to(torch.device(device))
 
     @staticmethod

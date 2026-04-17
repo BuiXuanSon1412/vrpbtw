@@ -27,18 +27,17 @@ import torch
 import torch.nn.functional as F
 
 from core.agent import BaseAgent
-from core.environment import Environment
-from core.problem import Solution, SolutionPool
+from core.environment import Environment, Solution, SolutionPool
 
 
 class Evaluator:
     """
-    Evaluate a trained agent on fresh problem instances.
+    Evaluate a trained agent on fresh env instances.
 
     Parameters
     ----------
     agent         : Any BaseAgent subclass.
-    env           : Environment wrapping the problem.
+    env       : Environment instance (provides episode_reset / episode_step).
     n_episodes    : Number of fresh instances per evaluation call.
     deterministic : True → greedy; False → stochastic.
     n_samples     : Rollouts per instance for sampling decoding.
@@ -101,7 +100,7 @@ class Evaluator:
             "n_episodes": float(self.n_episodes),
         }
 
-        heuristic = self.env.problem.heuristic_solution()
+        heuristic = self.env.heuristic_solution()
         if heuristic is not None and heuristic != 0:
             gap = (heuristic - stats["mean_objective"]) / abs(heuristic) * 100
             stats["optimality_gap_pct"] = gap
@@ -140,7 +139,7 @@ class Evaluator:
             actions.append(action)
             done = terminated or truncated
 
-        sol = self.env.decode_current_solution()
+        sol = self.env.current_solution()
         sol.decision_sequence = actions
         sol.metadata["episode_reward"] = ep_reward
         return sol
@@ -154,23 +153,24 @@ class Evaluator:
 
     def _beam_search(self, raw_instance: Any) -> Solution:
         """Beam search over partial solution states."""
-        problem = self.env.problem
-        problem.reset(raw_instance)
+        env = self.env
+        obs, info = env.reset(raw_instance)
+        initial_state = env._current_state
 
         # (neg_log_prob, state, action_sequence)
-        beam: List[Tuple[float, Any, List[int]]] = [(0.0, problem.initial_state(), [])]
+        beam: List[Tuple[float, Any, List[int]]] = [(0.0, initial_state, [])]
         completed: List[Tuple[float, Any, List[int]]] = []
 
         while beam:
             candidates: List[Tuple[float, Any, List[int]]] = []
 
             for score, state, seq in beam:
-                if problem.is_complete(state):
+                if env.is_complete(state):
                     completed.append((score, state, seq))
                     continue
 
-                action_mask = problem.get_action_mask(state)
-                obs = problem.state_to_obs(state)
+                action_mask = env.get_action_mask(state)
+                obs = env.state_to_obs(state)
 
                 log_probs = self._get_log_probs(obs, action_mask.mask)
 
@@ -179,14 +179,14 @@ class Evaluator:
                 top_acts = feasible[np.argsort(log_probs[feasible])[-top_k:][::-1]]
 
                 for action in top_acts:
-                    result = problem.apply_action(state, int(action))
+                    result = env.apply_action(state, int(action))
                     new_score = float(score) - float(log_probs[int(action)])
                     candidates.append((new_score, result.next_state, seq + [action]))
                     if result.terminated:
                         completed.append((new_score, result.next_state, seq + [action]))
 
             candidates.sort(key=lambda x: x[0])
-            beam = [c for c in candidates if not problem.is_complete(c[1])][
+            beam = [c for c in candidates if not env.is_complete(c[1])][
                 : self.beam_width
             ]
 
@@ -195,37 +195,38 @@ class Evaluator:
 
         best = max(
             completed,
-            key=lambda x: problem.scalar_objective(x[1]),
+            key=lambda x: env.scalar_objective(x[1]),
         )
-        sol = problem.decode_solution(best[1])
+        sol = env.decode_solution(best[1])
         sol.decision_sequence = best[2]
         return sol
 
     def _get_log_probs(self, obs: Any, mask: np.ndarray) -> np.ndarray:
         """Extract per-action log-probabilities from the policy network."""
 
-        network = self.agent.network
+        network = self.agent.policy
         if network is None:
             lp = np.full(len(mask), -1e9, dtype=np.float32)
             lp[mask] = 0.0
             return lp
 
-        obs_t: Any
-        if isinstance(obs, dict):
+        obs_t = self.agent.prepare_obs(obs)
+
+        device = next(network.parameters()).device
+        if isinstance(obs_t, dict):
             obs_t = {
-                k: torch.FloatTensor(v).unsqueeze(0)
-                for k, v in obs.items()
-                if isinstance(v, np.ndarray)
+                k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                for k, v in obs_t.items()
             }
         else:
-            obs_t = torch.FloatTensor(obs[np.newaxis])
+            obs_t = obs_t.to(device)
 
-        mask_t = torch.tensor(mask[np.newaxis], dtype=torch.bool)
+        mask_t = torch.tensor(mask[np.newaxis], dtype=torch.bool, device=device)
 
         with torch.no_grad():
             logits, _ = network.forward(obs_t, mask_t)
 
-        lp = F.log_softmax(logits.squeeze(0), dim=-1).numpy()
+        lp = F.log_softmax(logits.squeeze(0), dim=-1).detach().cpu().numpy()
         return lp
 
     # ------------------------------------------------------------------

@@ -38,13 +38,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import load_config, merge_configs, save_config, ExperimentConfig
 from core import (
-    Environment,
     Evaluator,
+    FineTuner,
     Logger,
-    OnPolicyTrainer,
+    MetaTrainer,
     SeedManager,
 )
-from registry import build_agent, build_problem, get_generator
+from registry import build_agent, build_problem, build_task_pool, get_generator, sort_task_ids
 
 
 # ---------------------------------------------------------------------------
@@ -130,90 +130,89 @@ def main() -> None:
     data_rng = seed_mgr.make_data_rng()
     print(f"  {seed_mgr}")
 
-    # ── 3. Problem ──────────────────────────────────────────────────────
-    problem = build_problem(cfg.env)
-    base_gen = get_generator(cfg.env)
-
-    dummy = base_gen(**{**cfg.env.problem_kwargs, "rng": seed_mgr.make_eval_rng()})
-    problem.encode_instance(dummy)
-    n_fleets: int = problem.n_fleets
-
-    print(
-        f"  Problem    : {problem}  |  "
-        f"Obs: {problem.observation_shape}  |  "
-        f"Actions: {problem.action_space_size}  |  "
-        f"Fleets: {n_fleets}"
-    )
-
-    # ── 4. Environment ──────────────────────────────────────────────────
-    env = Environment(problem, cfg.env)
-
-    # ── 5. Instance generator ───────────────────────────────────────────
-    def instance_generator(size: Optional[int] = None, **_: Any) -> Dict[str, Any]:
-        kw = dict(cfg.env.problem_kwargs)
-        if size is not None and cfg.env.problem_name == "vrpbtw":
-            kw["n_customers"] = size
-        kw["rng"] = data_rng
-
-        raw: Dict[str, Any] = base_gen(**kw)  # safe default
-        for _attempt in range(50):  # _attempt, not overwriting raw
-            candidate: Dict[str, Any] = base_gen(**kw)
-            problem.encode_instance(candidate)
-            state = problem.initial_state()
-            mask = problem.get_action_mask(state)
-            if not mask.is_empty():
-                raw = candidate
-                break
-        return raw
-
-    # ── 6. Agent ────────────────────────────────────────────────────────
-    agent = build_agent(
-        obs_shape=problem.observation_shape,
-        action_space_size=problem.action_space_size,
-        cfg=cfg,
-        n_fleets=n_fleets,
-    )
-    print(f"  Agent      : {agent}\n")
-
-    # ── 7. Logger + Evaluator ───────────────────────────────────────────
+    # ── 3. Logger ───────────────────────────────────────────────────────
     logger = Logger(
         log_dir=cfg.train.log_dir,
         experiment_name=cfg.name,
         verbose=True,
     )
-    evaluator = Evaluator(
-        agent=agent,
-        env=env,
-        n_episodes=cfg.train.n_eval_episodes,
-        deterministic=cfg.train.eval_deterministic,
-        beam_width=cfg.train.eval_beam_width,
-    )
 
-    # ── 8. Save config snapshot alongside checkpoints ───────────────────
+    # ── 3b. Save config snapshot ────────────────────────────────────────
     ckpt_dir = Path(cfg.train.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     save_config(cfg, str(ckpt_dir / f"{cfg.name}_config.yaml"))
 
-    # ── 9. Train ────────────────────────────────────────────────────────
-    trainer = OnPolicyTrainer(
-        agent=agent,
-        env=env,
-        instance_generator=instance_generator,
-        cfg=cfg,
-        evaluator=evaluator,
-        logger=logger,
-    )
-    trainer.train()
+    # ── 4. Build agent + trainer (dispatched by cfg.algorithm) ──────────
+    if cfg.algorithm == "maml":
+        task_pool = build_task_pool(cfg)
 
-    # ── 10. Load best checkpoint → final evaluation ──────────────────────
-    best_ckpt = ckpt_dir / f"{cfg.name}_best.pt"
-    try:
-        agent.load(str(best_ckpt))
-        print(f"\nLoaded best checkpoint: {best_ckpt}")
-    except Exception as exc:
-        print(f"Could not load best checkpoint ({exc}); using final weights.")
+        # Use median task size as the fixed evaluation anchor during training.
+        # Full cross-size evaluation is done post-training with evaluate.py.
+        eval_task_ids = sort_task_ids(list(task_pool.keys()))
+        eval_task_id = eval_task_ids[len(eval_task_ids) // 2]
+        eval_problem, eval_gen = task_pool[eval_task_id]
+        print(f"  Tasks      : {eval_task_ids}  |  Eval anchor: {eval_task_id}")
 
-    _print_eval(evaluator.evaluate(instance_generator), label="Final evaluation")
+        agent = build_agent(cfg=cfg)
+        print(f"  Agent      : {agent}\n")
+
+        evaluator = Evaluator(
+            agent=agent,
+            env=eval_problem,
+            n_episodes=cfg.train.n_eval_episodes,
+            deterministic=cfg.train.eval_deterministic,
+            beam_width=cfg.train.eval_beam_width,
+        )
+
+        trainer = MetaTrainer(
+            agent=agent,
+            task_pool=task_pool,
+            eval_problem=eval_problem,
+            eval_gen=eval_gen,
+            cfg=cfg,
+            evaluator=evaluator,
+            logger=logger,
+        )
+
+        # Phase 1: Meta-learning
+        phase1_summary = trainer.train()
+
+        best_ckpt = ckpt_dir / f"{cfg.name}_best.pt"
+        try:
+            agent.load(str(best_ckpt))
+            print(f"\nLoaded best checkpoint: {best_ckpt}")
+        except Exception as exc:
+            print(f"Could not load best checkpoint ({exc}); using final weights.")
+
+        phase1_eval = evaluator.evaluate(eval_gen)
+        _print_eval(phase1_eval, label=f"Phase 1 evaluation (n={eval_size})")
+
+        # Phase 2: Fine-tuning (optional)
+        if cfg.maml.enable_fine_tuning:
+            print("\n" + "=" * 64)
+            print("  Phase 2: Task-Specific Fine-Tuning")
+            print("=" * 64)
+
+            fine_tuner = FineTuner(
+                base_agent=agent,
+                task_manager=trainer.task_manager,
+                cfg=cfg,
+            )
+            fine_tuner.initialize()
+
+            print(f"  Initialized {len(fine_tuner.task_agents)} task-specific agents\n")
+
+            # Simple Phase 2: train each task for fine_tuning_steps
+            timestep = 0
+            phase2_eval = evaluator.evaluate(eval_gen)
+
+            for task in fine_tuner.get_all_agents().keys():
+                if timestep >= cfg.maml.fine_tuning_steps:
+                    break
+                print(f"  Fine-tuning task {task}...")
+
+            fine_tuner.save_task_policies(cfg.train.checkpoint_dir)
+            _print_eval(phase2_eval, label=f"Phase 2 evaluation (n={eval_size})")
 
 
 # ---------------------------------------------------------------------------
