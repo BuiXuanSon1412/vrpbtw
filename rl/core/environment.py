@@ -1,148 +1,379 @@
 """
 core/environment.py
--------------------
-Generic Gym-style MDP wrapper for any Problem subclass.
+---------------
+Abstract base class for combinatorial optimisation problems,
+plus the data containers every problem shares.
 
-Reward shaping is now handled entirely inside the Problem (vrpbtw.py).
-Reward shaping is handled entirely inside the Problem subclass.
-Environment is problem-agnostic and has no knowledge of objectives,
-heuristics, or normalisation.
+Any new problem (TSP, CVRP, Knapsack, …) must subclass Environment and
+implement the abstract members.  All other core/ classes depend
+only on this ABC — never on a concrete problem.
+
+Containers defined here
+-----------------------
+  ActionMask    — boolean feasibility mask over the action space
+  StepResult    — everything returned by apply_action
+  Solution      — decoded solution with objective and metadata
+  SolutionPool  — fixed-capacity best-solution keeper
+  State         — abstract state representation (see core/state.py)
+  Environment   — abstract MDP definition
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from core.problem import Problem, ActionMask
+
+"""
+-------------
+Abstract state representation for MDP/environment abstraction.
+
+All environments track state internally and transition through states.
+A State encapsulates the complete problem state at a point in time.
+
+Design principle:
+  - Problem holds no mutable state
+  - State is immutable or at least semantically isolated
+  - Episode management (stateful reset/step) is separate from Problem (stateless)
+"""
+
+
+class State(ABC):
+    """
+    Abstract state representation for any MDP.
+
+    A state encapsulates:
+    - Decision variables (which node served, vehicle positions, etc.)
+    - Constraints (time windows, capacities, etc.)
+    - Derived quantities (cost, feasibility, etc.)
+
+    Implementations should be immutable or at least thread-safe.
+    """
+
+    @property
+    @abstractmethod
+    def is_terminal(self) -> bool:
+        """True if this state is terminal (no more actions possible)."""
+        ...
+
+    @property
+    @abstractmethod
+    def is_feasible(self) -> bool:
+        """True if solution represented by this state is feasible."""
+        ...
+
+    @abstractmethod
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize state to dict for checkpointing, logging, etc."""
+        ...
+
+    @classmethod
+    @abstractmethod
+    def from_dict(cls, data: Dict[str, Any]) -> State:
+        """Deserialize state from dict."""
+        ...
+
+
+# Example concrete implementation (defined in problems/vrpbtw.py):
+# class VRPBTWState(State):
+#     truck_node: np.ndarray  # (K,)
+#     truck_time: np.ndarray  # (K,)
+#     drone_node: np.ndarray  # (K,)
+#     ...
+#
+#     @property
+#     def is_terminal(self) -> bool:
+#         return all_nodes_served()
+#
+#     @property
+#     def is_feasible(self) -> bool:
+#         return all_time_windows_met()
 
 
 # ---------------------------------------------------------------------------
-# Environment
+# ActionMask
 # ---------------------------------------------------------------------------
 
 
-class Environment:
+@dataclass
+class ActionMask:
     """
-    Wraps any Problem in a step / reset interface.
-
-    Parameters
-    ----------
-    problem : Any concrete Problem subclass.
-    cfg     : EnvConfig dataclass from config.py.
+    Boolean mask over the discrete action space.
+    True  → action is feasible at the current state.
+    False → infeasible.
     """
 
-    def __init__(self, problem: Problem, cfg: Any):
-        self.problem = problem
-        self.cfg = cfg
+    mask: np.ndarray  # (n_actions,) bool
+    action_indices: np.ndarray  # indices where mask is True
 
-        self._state: Any = None
-        self._current_mask: Optional[ActionMask] = None
-        self._current_obs: Any = None
-        self._step_count: int = 0
-        self._episode_reward: float = 0.0
+    @classmethod
+    def all_valid(cls, n: int) -> "ActionMask":
+        m = np.ones(n, dtype=bool)
+        return cls(mask=m, action_indices=np.arange(n))
 
-        # Aggregate stats
-        self._total_episodes: int = 0
-        self._total_steps: int = 0
-        self._episode_rewards: List[float] = []
-        self._episode_objectives: List[float] = []
+    @classmethod
+    def from_bool_array(cls, arr: np.ndarray) -> "ActionMask":
+        arr = arr.astype(bool)
+        return cls(mask=arr, action_indices=np.where(arr)[0])
 
-    # ------------------------------------------------------------------
-    # Core interface
-    # ------------------------------------------------------------------
+    def is_empty(self) -> bool:
+        return len(self.action_indices) == 0
 
-    def reset(self, raw_instance: Any) -> Tuple[Any, Dict]:
-        self._state = self.problem.reset(raw_instance)
-        self._current_mask = self.problem.get_action_mask(self._state)
-        self._current_obs = self.problem.state_to_obs(self._state)
-        self._step_count = 0
-        self._episode_reward = 0.0
 
-        return self._current_obs, self._make_info()
+# ---------------------------------------------------------------------------
+# StepResult
+# ---------------------------------------------------------------------------
 
-    def step(self, action: int) -> Tuple[Any, float, bool, bool, Dict]:
-        if self._state is None or self._current_mask is None:
-            raise RuntimeError("Call reset() before step().")
-        if not self._current_mask.mask[action]:
-            raise ValueError(
-                f"Action {action} is infeasible. "
-                f"Feasible: {self._current_mask.action_indices.tolist()}"
-            )
 
-        result = self.problem.apply_action(self._state, action)
-        self._state = result.next_state
-        self._current_mask = result.action_mask
-        self._current_obs = self.problem.state_to_obs(self._state)
-        self._step_count += 1
-        self._total_steps += 1
+@dataclass
+class StepResult:
+    """Everything returned by Environment.apply_action."""
 
-        reward = result.reward * self.cfg.reward_scale
-        self._episode_reward += reward
+    next_state: Any
+    reward: float
+    terminated: bool  # natural construction end
+    truncated: bool  # external step-limit hit
+    action_mask: ActionMask
+    info: Dict[str, Any] = field(default_factory=dict)
 
-        truncated = (
-            self.cfg.max_steps is not None and self._step_count >= self.cfg.max_steps
-        ) or result.truncated
-        terminated = result.terminated
 
-        if terminated or truncated:
-            self._total_episodes += 1
-            self._episode_rewards.append(self._episode_reward)
-            if terminated:
-                obj = self.problem.scalar_objective(self._state)
-                self._episode_objectives.append(obj)
-                result.info["episode_objective"] = obj
-            result.info["episode_reward"] = self._episode_reward
-            result.info["episode_steps"] = self._step_count
+# ---------------------------------------------------------------------------
+# Solution
+# ---------------------------------------------------------------------------
 
-        info = {**result.info, **self._make_info()}
-        return self._current_obs, reward, terminated, truncated, info
 
-    # ------------------------------------------------------------------
-    # Info dict
-    # ------------------------------------------------------------------
+@dataclass
+class Solution:
+    """Decoded combinatorial solution with objective and metadata."""
 
-    def _make_info(self) -> Dict:
-        assert self._current_mask is not None
-        info: Dict[str, Any] = {
-            "action_mask": self._current_mask.mask,
-            "feasible_actions": self._current_mask.action_indices,
-            "step": self._step_count,
-        }
-        if isinstance(self._current_obs, dict):
-            for key in (
-                "node_features",
-                "vehicle_features",
-                "edge_index",
-                "edge_attr",
-                "edge_fleet",
-            ):
-                if key in self._current_obs:
-                    info[key] = self._current_obs[key]
-        return info
+    problem_name: str
+    raw_state: Any
+    objective: float
+    decision_sequence: List[int] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
 
-    # ------------------------------------------------------------------
-    # Convenience
-    # ------------------------------------------------------------------
+    def __lt__(self, other: "Solution") -> bool:
+        return self.objective < other.objective
 
-    def decode_current_solution(self):
-        return self.problem.decode_solution(self._state)
+    def is_better_than(
+        self, other: Optional["Solution"], minimise: bool = False
+    ) -> bool:
+        if other is None:
+            return True
+        return (
+            self.objective < other.objective
+            if minimise
+            else self.objective > other.objective
+        )
 
-    def get_stats(self) -> Dict:
-        r = self._episode_rewards
-        o = self._episode_objectives
-        return {
-            "total_episodes": self._total_episodes,
-            "total_steps": self._total_steps,
-            "mean_ep_reward": float(np.mean(r)) if r else 0.0,
-            "mean_objective": float(np.mean(o)) if o else 0.0,
-            "best_objective": float(np.max(o)) if o else 0.0,
-        }
+    def summary(self) -> str:
+        seq_preview = self.decision_sequence[:20]
+        tail = "…" if len(self.decision_sequence) > 20 else ""
+        lines = [
+            f"Solution [{self.problem_name}]",
+            f"  Objective  : {self.objective:.6f}",
+            f"  # Steps    : {len(self.decision_sequence)}",
+            f"  Sequence   : {seq_preview}{tail}",
+        ]
+        if self.metadata:
+            lines.append(f"  Metadata   : {self.metadata}")
+        return "\n".join(lines)
 
     def __repr__(self) -> str:
         return (
-            f"Environment(problem={self.problem.name!r}, "
-            f"max_steps={self.cfg.max_steps}, "
-            f"episodes={self._total_episodes})"
+            f"Solution(problem={self.problem_name!r}, "
+            f"objective={self.objective:.4f}, "
+            f"steps={len(self.decision_sequence)})"
         )
+
+
+# ---------------------------------------------------------------------------
+# SolutionPool
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SolutionPool:
+    """Fixed-capacity pool that keeps the best solutions found so far."""
+
+    capacity: int = 10
+    minimise: bool = False
+    _solutions: List[Solution] = field(default_factory=list, init=False)
+
+    def add(self, sol: Solution) -> bool:
+        self._solutions.append(sol)
+        self._solutions.sort(reverse=not self.minimise, key=lambda s: s.objective)
+        if len(self._solutions) > self.capacity:
+            self._solutions = self._solutions[: self.capacity]
+        return sol in self._solutions
+
+    @property
+    def best(self) -> Optional[Solution]:
+        return self._solutions[0] if self._solutions else None
+
+    @property
+    def all(self) -> List[Solution]:
+        return list(self._solutions)
+
+    def __len__(self) -> int:
+        return len(self._solutions)
+
+
+# ---------------------------------------------------------------------------
+# Environment  (abstract base)
+# ---------------------------------------------------------------------------
+
+
+class Environment(ABC):
+    """
+    Abstract MDP definition for a combinatorial optimisation problem.
+
+    Subclassing contract
+    --------------------
+    Implement all seven abstract members.  Never import concrete agent,
+    network, or buffer classes — the problem layer is dependency-free
+    with respect to the rest of the framework.
+
+    Abstract members
+    ----------------
+    encode_instance   parse raw input, build internal structures
+    initial_state     return the empty / trivial starting state
+    get_action_mask   return the ActionMask for the current state
+    apply_action      apply one decision, return StepResult
+    state_to_obs      state → numpy array (or dict of arrays)
+    evaluate          scalar (or tuple) objective of a complete state
+    is_complete       True when no more decisions can be made
+
+    Properties
+    ----------
+    action_space_size  total number of discrete actions
+    observation_shape  shape of the obs array returned by state_to_obs
+    """
+
+    def __init__(self, name: str = "Environment"):
+        self.name = name
+        self._n_steps: int = 0
+        self._current_state: Any = None
+
+    # ------------------------------------------------------------------
+    # Abstract interface
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def encode_instance(self, raw_instance: Any) -> None: ...
+
+    @abstractmethod
+    def initial_state(self) -> Any: ...
+
+    @abstractmethod
+    def get_action_mask(self, state: Any) -> ActionMask: ...
+
+    @abstractmethod
+    def apply_action(self, state: Any, action: int) -> StepResult: ...
+
+    @abstractmethod
+    def state_to_obs(self, state: Any) -> Union[np.ndarray, Dict[str, np.ndarray]]: ...
+
+    @abstractmethod
+    def evaluate(self, state: Any) -> Union[float, Tuple[float, ...]]: ...
+
+    @abstractmethod
+    def is_complete(self, state: Any) -> bool: ...
+
+    @property
+    @abstractmethod
+    def action_space_size(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def observation_shape(self) -> Tuple[int, ...]: ...
+
+    # ------------------------------------------------------------------
+    # Optional overrides
+    # ------------------------------------------------------------------
+
+    def scalar_objective(self, state: Any) -> float:
+        """
+        Return a single scalar objective for ranking solutions.
+        Default: use evaluate() directly if it already returns a float,
+        or the first element if it returns a tuple.
+        Override whenever evaluate() returns a multi-objective tuple.
+        """
+        result = self.evaluate(state)
+        return float(result) if not isinstance(result, tuple) else float(result[0])
+
+    def decode_solution(self, state: Any) -> Solution:
+        obj = self.scalar_objective(state) if self.is_complete(state) else float("-inf")
+        return Solution(problem_name=self.name, raw_state=state, objective=obj)
+
+    def heuristic_solution(self) -> Optional[float]:
+        """Optional baseline objective (used for reward shaping)."""
+        return None
+
+    @property
+    def n_steps(self) -> int:
+        return self._n_steps
+
+    # ------------------------------------------------------------------
+    # Stateful episode interface  (replaces Environment)
+    # ------------------------------------------------------------------
+
+    def reset(
+        self, raw_instance: Any
+    ) -> Tuple[Union[np.ndarray, Dict[str, np.ndarray]], Dict[str, Any]]:
+        """
+        Encode a new instance and return the first observation.
+
+        Returns
+        -------
+        obs  : observation dict/array from state_to_obs
+        info : dict with 'action_mask' (bool array) and 'feasible_actions' (indices)
+        """
+        self.encode_instance(raw_instance)
+        self._current_state = self.initial_state()
+        self._n_steps = 0
+        mask = self.get_action_mask(self._current_state)
+        obs = self.state_to_obs(self._current_state)
+        return obs, {
+            "action_mask": mask.mask,
+            "feasible_actions": mask.action_indices,
+        }
+
+    def step(
+        self, action: int
+    ) -> Tuple[
+        Union[np.ndarray, Dict[str, np.ndarray]], float, bool, bool, Dict[str, Any]
+    ]:
+        """
+        Apply action to the current episode state.
+
+        Returns
+        -------
+        obs        : next observation
+        reward     : float
+        terminated : bool — episode ended naturally
+        truncated  : bool — episode ended by external limit (unused; always False)
+        info       : dict with 'action_mask', 'feasible_actions', plus any result.info keys
+        """
+        result = self.apply_action(self._current_state, action)
+        self._current_state = result.next_state
+        obs = self.state_to_obs(self._current_state)
+        mask = result.action_mask
+        info: Dict[str, Any] = {
+            "action_mask": mask.mask,
+            "feasible_actions": mask.action_indices,
+            **result.info,
+        }
+        return obs, result.reward, result.terminated, result.truncated, info
+
+    def current_solution(self) -> Solution:
+        """Decode the current episode state into a Solution."""
+        return self.decode_solution(self._current_state)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(name={self.name!r})"

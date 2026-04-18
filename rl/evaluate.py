@@ -43,7 +43,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import load_config, merge_configs, ExperimentConfig
-from core import Environment, Evaluator, SeedManager
+from core import Evaluator, SeedManager
 from registry import build_agent, build_problem, get_generator
 
 
@@ -99,6 +99,15 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Best-of-N sampling rollouts per instance (default: 1).",
     )
+    p.add_argument(
+        "--customers",
+        default=None,
+        type=int,
+        metavar="N",
+        help="Override n_customers for evaluation instances.  "
+        "Allows evaluating a checkpoint on larger or smaller problems "
+        "than the training size.",
+    )
     return p
 
 
@@ -141,41 +150,27 @@ def main() -> None:
     problem = build_problem(cfg.env)
     base_gen = get_generator(cfg.env)
 
-    dummy = base_gen(**{**cfg.env.problem_kwargs, "rng": eval_rng})
-    problem.encode_instance(dummy)
-    n_fleets: int = problem.n_fleets
+    print(f"  Problem    : {problem}")
 
-    print(
-        f"  Problem    : {problem}  |  "
-        f"Obs: {problem.observation_shape}  |  "
-        f"Actions: {problem.action_space_size}"
-    )
-
-    # ── 4. Environment ──────────────────────────────────────────────────
-    env = Environment(problem, cfg.env)
-
-    # ── 5. Instance generator (fixed eval RNG for reproducibility) ──────
+    # ── 4. Instance generator (fixed eval RNG for reproducibility) ──────
     def instance_generator(size: Optional[int] = None, **_: Any) -> Any:
         kw = dict(cfg.env.problem_kwargs)
-        if size is not None and cfg.env.problem_name == "vrpbtw":
+        if args.customers is not None:
+            kw["n_customers"] = args.customers
+        elif size is not None and cfg.env.problem_name == "vrpbtw":
             kw["n_customers"] = size
         kw["rng"] = eval_rng
         return base_gen(**kw)
 
     # ── 6. Agent ────────────────────────────────────────────────────────
-    agent = build_agent(
-        obs_shape=problem.observation_shape,
-        action_space_size=problem.action_space_size,
-        cfg=cfg,
-        n_fleets=n_fleets,
-    )
+    agent = build_agent(cfg=cfg)
     agent.load(args.checkpoint)
     print(f"  Agent      : {agent}\n")
 
     # ── 7. Evaluate ─────────────────────────────────────────────────────
     evaluator = Evaluator(
         agent=agent,
-        env=env,
+        env=problem,
         n_episodes=cfg.train.n_eval_episodes,
         deterministic=cfg.train.eval_deterministic,
         n_samples=args.samples,

@@ -26,30 +26,28 @@ Constants
 ---------
 NODE_FEAT_DIM  = 5   [x, y, demand, tw_open, tw_close]
 VEH_FEAT_DIM   = 5   [x, y, load, time, deadline]
-EDGE_FEAT_DIM  = 6   [vtype, travel_time, dist, depart, arrive, tardiness]
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from core.problem import (
+from core.environment import (
     ActionMask,
-    Problem,
+    Environment,
     Solution,
     StepResult,
 )
 
 # ---------------------------------------------------------------------------
-# Feature-dimension constants  (imported by networks/hacn.py)
+# Feature-dimension constants
 # ---------------------------------------------------------------------------
 
 NODE_FEAT_DIM = 5
 VEH_FEAT_DIM = 5
-EDGE_FEAT_DIM = 6
 
 TRUCK = 0
 DRONE = 1
@@ -76,6 +74,7 @@ class VRPBTWState:
     drone_load: np.ndarray
     drone_launch_time: np.ndarray
     drone_active: np.ndarray
+    drone_launch_node: np.ndarray  # (K,) truck node at which drone k last launched
 
     # Global
     served: np.ndarray  # (N+1,) bool
@@ -89,16 +88,6 @@ class VRPBTWState:
     drone_route_nodes: List[List[int]]
     drone_route_mask: List[List[int]]
 
-    # Incremental graph (input to vehicle GNN)
-    edge_index: np.ndarray  # (2, E)
-    edge_attr: np.ndarray  # (E, EDGE_FEAT_DIM)
-    edge_fleet: np.ndarray  # (E,)
-
-
-# ---------------------------------------------------------------------------
-# State copy helper
-# ---------------------------------------------------------------------------
-
 
 def _copy_state(s: VRPBTWState) -> VRPBTWState:
     return VRPBTWState(
@@ -111,15 +100,13 @@ def _copy_state(s: VRPBTWState) -> VRPBTWState:
         drone_load=s.drone_load.copy(),
         drone_launch_time=s.drone_launch_time.copy(),
         drone_active=s.drone_active.copy(),
+        drone_launch_node=s.drone_launch_node.copy(),
         served=s.served.copy(),
         current_cost=s.current_cost,
         current_max_tard=s.current_max_tard,
         truck_routes=[list(r) for r in s.truck_routes],
         drone_route_nodes=[list(r) for r in s.drone_route_nodes],
         drone_route_mask=[list(m) for m in s.drone_route_mask],
-        edge_index=s.edge_index.copy(),
-        edge_attr=s.edge_attr.copy(),
-        edge_fleet=s.edge_fleet.copy(),
     )
 
 
@@ -128,7 +115,7 @@ def _copy_state(s: VRPBTWState) -> VRPBTWState:
 # ---------------------------------------------------------------------------
 
 
-class VRPBTWProblem(Problem):
+class VRPBTWEnv(Environment):
     def __init__(self, n_customers: int = 10, n_fleets: int = 2):
         super().__init__(name="VRPBTW")
         self.n_customers = n_customers
@@ -215,19 +202,24 @@ class VRPBTWProblem(Problem):
     # reset override — computes nadir internally before returning state
     # ------------------------------------------------------------------
 
-    def reset(self, raw_instance: Any) -> VRPBTWState:
+    def reset(self, raw_instance: Any) -> Tuple[Dict, Dict[str, Any]]:
         """
         Encode the instance, compute per-instance nadir approximations
-        from the heuristic, then return the initial state.
+        from the heuristic, then return the first observation.
 
-        Overrides Problem.reset() so that Environment never needs to
-        know about objectives, heuristics, or normalisation — those are
-        internal concerns of VRPBTWProblem.
+        Returns (obs, info) tuple where obs is the state dict and info
+        contains action_mask and feasible_actions.
         """
         self.encode_instance(raw_instance)
         self._n_steps = 0
         self._set_nadir_from_heuristic()
-        return self.initial_state()
+        self._current_state = self.initial_state()
+        mask = self.get_action_mask(self._current_state)
+        obs = self.state_to_obs(self._current_state)
+        return obs, {
+            "action_mask": mask.mask,
+            "feasible_actions": mask.action_indices,
+        }
 
     def _set_nadir_from_heuristic(self) -> None:
         """
@@ -269,15 +261,13 @@ class VRPBTWProblem(Problem):
             drone_load=np.full(K, self.Q_d, dtype=np.float32),
             drone_launch_time=np.zeros(K, dtype=np.float32),
             drone_active=np.zeros(K, dtype=bool),
+            drone_launch_node=np.zeros(K, dtype=np.int32),
             served=served,
             current_cost=0.0,
             current_max_tard=0.0,
             truck_routes=[[] for _ in range(K)],
             drone_route_nodes=[[] for _ in range(K)],
             drone_route_mask=[[] for _ in range(K)],
-            edge_index=np.zeros((2, 0), dtype=np.int32),
-            edge_attr=np.zeros((0, EDGE_FEAT_DIM), dtype=np.float32),
-            edge_fleet=np.zeros(0, dtype=np.int32),
         )
 
     # ------------------------------------------------------------------
@@ -332,11 +322,36 @@ class VRPBTWProblem(Problem):
     # ------------------------------------------------------------------
 
     def _landing_nodes(self, state: VRPBTWState, k: int) -> List[int]:
-        nodes = [DEPOT]
-        t_node = int(state.truck_node[k])
-        if t_node != DEPOT:
-            nodes.append(t_node)
-        return nodes
+        """
+        Return every node the truck visited strictly after the drone's launch
+        node, plus the depot.  Landing at the launch node itself is forbidden.
+
+        The truck route is searched from the end to find the most recent
+        occurrence of drone_launch_node[k], then all subsequent entries
+        (including DEPOT if the truck has returned) are valid candidates.
+        """
+        launch_node = int(state.drone_launch_node[k])
+        route = state.truck_routes[k]
+
+        # Find the last position of the launch node in the truck route
+        launch_idx = -1
+        for i in range(len(route) - 1, -1, -1):
+            if route[i] == launch_node:
+                launch_idx = i
+                break
+
+        # All nodes the truck visited after the launch node
+        after_launch: set = (
+            set(route[launch_idx + 1 :]) if launch_idx >= 0 else set(route)
+        )
+
+        # DEPOT is always reachable as a terminal landing point
+        after_launch.add(DEPOT)
+
+        # Landing at the launch node itself is forbidden
+        after_launch.discard(launch_node)
+
+        return list(after_launch)
 
     def _phase_ok(self, state: VRPBTWState, k: int, j: int) -> bool:
         phase = int(state.truck_phase[k])
@@ -438,7 +453,7 @@ class VRPBTWProblem(Problem):
         else:
             if state.drone_active[k]:
                 landing = self._landing_nodes(state, k)
-                if node in landing or state.served[node]:
+                if node in landing:
                     self._apply_drone_land(state, k, node)
                 else:
                     self._apply_drone_extend(state, k, node)
@@ -502,17 +517,6 @@ class VRPBTWProblem(Problem):
         if j != DEPOT:
             state.current_max_tard = max(state.current_max_tard, tardiness)
 
-        self._add_edge(
-            state,
-            from_node,
-            j,
-            k,
-            TRUCK,
-            depart_time=arrive,
-            arrive_time=arrive,
-            tardiness=tardiness,
-        )
-
     def _apply_drone_launch(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, j]
@@ -521,6 +525,7 @@ class VRPBTWProblem(Problem):
         serve_start = max(arrive_j, self.tw_open[j])
         tardiness = max(arrive_j - self.tw_close[j], 0.0)
         launch_node = int(state.truck_node[k])
+        state.drone_launch_node[k] = launch_node
 
         state.drone_launch_time[k] = state.drone_time[k]
         state.drone_time[k] = serve_start + self.service_times[j]
@@ -535,17 +540,6 @@ class VRPBTWProblem(Problem):
 
         state.current_cost += self.c_d * dist
         state.current_max_tard = max(state.current_max_tard, tardiness)
-
-        self._add_edge(
-            state,
-            launch_node,
-            j,
-            k,
-            DRONE,
-            depart_time=depart_t,
-            arrive_time=arrive_j,
-            tardiness=tardiness,
-        )
 
     def _apply_drone_extend(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.drone_node[k])
@@ -566,17 +560,6 @@ class VRPBTWProblem(Problem):
         state.current_cost += self.c_d * dist
         state.current_max_tard = max(state.current_max_tard, tardiness)
 
-        self._add_edge(
-            state,
-            from_node,
-            j,
-            k,
-            DRONE,
-            depart_time=state.drone_time[k] - self.service_times[j],
-            arrive_time=arrive_j,
-            tardiness=tardiness,
-        )
-
     def _apply_drone_land(self, state: VRPBTWState, k: int, land: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, land]
@@ -595,54 +578,6 @@ class VRPBTWProblem(Problem):
 
         # Landing has no tardiness — cost only
         state.current_cost += self.c_d * dist
-
-        self._add_edge(
-            state,
-            from_node,
-            land,
-            k,
-            DRONE,
-            depart_time=state.drone_time[k] - dist / self.v_d - self.land_time,
-            arrive_time=arrive,
-            tardiness=0.0,
-        )
-
-    # ------------------------------------------------------------------
-    # Graph edge builder
-    # ------------------------------------------------------------------
-
-    def _add_edge(
-        self,
-        state: VRPBTWState,
-        src: int,
-        dst: int,
-        fleet: int,
-        vtype: int,
-        depart_time: float,
-        arrive_time: float,
-        tardiness: float,
-    ) -> None:
-        dist = (self.euclidean_dist if vtype == DRONE else self.manhattan_dist)[
-            src, dst
-        ]
-        speed = self.v_d if vtype == DRONE else self.v_t
-        T = self.T_max + 1e-6
-        feat = np.array(
-            [
-                float(vtype),
-                (dist / speed) / T,
-                dist / (speed * T),
-                depart_time / T,
-                arrive_time / T,
-                tardiness / T,
-            ],
-            dtype=np.float32,
-        )
-        state.edge_index = np.concatenate(
-            [state.edge_index, np.array([[src], [dst]], dtype=np.int32)], axis=1
-        )
-        state.edge_attr = np.concatenate([state.edge_attr, feat[None]], axis=0)
-        state.edge_fleet = np.concatenate([state.edge_fleet, [fleet]], axis=0)
 
     # ------------------------------------------------------------------
     # Phase update
@@ -667,73 +602,175 @@ class VRPBTWProblem(Problem):
     # state_to_obs
     # ------------------------------------------------------------------
 
-    def state_to_obs(self, state: VRPBTWState) -> Dict[str, np.ndarray]:
-        T = self.T_max + 1e-6
-        max_coord = float(self.coords.max()) + 1e-6
+    """
+    All normalisation and static graph construction happens here, once per
+    step, before anything enters the network.  The policy network receives
+    only plain normalised numpy arrays — no scalar parameters, no raw coords.
 
+    New obs dict keys:
+    node_features     (N+1, 5)   normalised  [x, y, demand, tw_open, tw_close]
+    vehicle_features  (2K,  5)   normalised  [x, y, rem_load, tw_open, tw_close]
+    truck_edge_index  (2, E)     int32        E = (N+1)*N  all ordered pairs i≠j
+    truck_edge_attr   (E,  2)    float32      [cost, time]  normalised
+    drone_edge_index  (2, E)     int32
+    drone_edge_attr   (E,  2)    float32      [cost, time]  normalised
+
+    Normalisation rules
+    -------------------
+    x, y          / coord_bound          coord_bound = coords.max()
+    demand        / Q_t
+    tw_open/close / T_max
+    rem_load      / Q_t  (truck)  or  Q_d  (drone)
+    vehicle tw_open, tw_close  / T_max   (see details below)
+
+    edge cost   = dist * cost_unit / (sqrt(2) * coord_bound * max(c_t, c_d))
+                    manhattan dist * c_t  for truck edges
+                    euclidean dist * c_d  for drone edges
+    edge time   = dist / speed / T_max
+                    manhattan / v_t / T_max  for truck edges
+                    euclidean / v_d / T_max  for drone edges
+
+    Vehicle feature semantics
+    -------------------------
+    Truck k:
+        tw_open  = truck_time[k] / T_max   (earliest next departure = now)
+        tw_close = 1.0                     (T_max / T_max)
+
+    Drone k  (NOT on trip, drone_active[k] == False):
+        tw_open  = truck_time[k] / T_max   (drone boards when truck arrives)
+        tw_close = (drone_launch_time[k] + t_max) / T_max
+
+    Drone k  (ON trip, drone_active[k] == True):
+        tw_open  = drone_time[k] / T_max   (earliest next departure from current node)
+        tw_close = (drone_launch_time[k] + t_max) / T_max
+
+    The static graph is rebuilt from scratch each call using the instance's
+    distance matrices, which are already stored on self after encode_instance.
+    This is O(N^2) numpy work — fast enough for N<=50.
+    """
+
+    def state_to_obs(self, state) -> dict:
+        N1 = self.n_customers + 1
+        T = self.T_max
+        cb = float(self.coords.max()) + 1e-8  # coord bound
+        mc = max(self.c_t, self.c_d) + 1e-8  # max cost unit
+        norm_cost_denom = np.sqrt(2.0) * cb * mc  # cost normalisation denominator
+
+        # ── Node features ────────────────────────────────────────────────
+        # Demand is zeroed for served nodes so the network can distinguish
+        # visited (demand=0) from unvisited (demand≠0) without an extra feature.
+        # Served linehaul/backhaul nodes also leave the l_idx/b_idx index sets
+        # in NodeEncoder, stopping them from influencing routing cross-attention.
+        effective_demand = np.where(state.served, 0.0, self.demands).astype(np.float32)
         node_features = np.stack(
             [
-                self.coords[:, 0] / max_coord,
-                self.coords[:, 1] / max_coord,
-                self.demands / (self.Q_t + 1e-6),
+                self.coords[:, 0] / cb,
+                self.coords[:, 1] / cb,
+                effective_demand / (self.Q_t + 1e-8),
                 self.tw_open / T,
                 self.tw_close / T,
             ],
             axis=1,
-        ).astype(np.float32)
+        ).astype(np.float32)  # (N+1, 5)
 
-        veh_rows = []
+        # ── Vehicle features ─────────────────────────────────────────────
+        truck_rows = []
+        drone_rows = []
         for k in range(self.K):
+            # Truck k
             tx, ty = self.coords[state.truck_node[k]]
-            veh_rows.append(
-                np.array(
-                    [
-                        tx / max_coord,
-                        ty / max_coord,
-                        state.truck_load[k] / (self.Q_t + 1e-6),
-                        state.truck_time[k] / T,
-                        self.T_max / T,
-                    ],
-                    dtype=np.float32,
-                )
-            )
-            dx, dy = self.coords[state.drone_node[k]]
-            tw_unavail = (state.drone_launch_time[k] + self.t_max) / T
-            veh_rows.append(
-                np.array(
-                    [
-                        dx / max_coord,
-                        dy / max_coord,
-                        state.drone_load[k] / (self.Q_d + 1e-6),
-                        state.drone_time[k] / T,
-                        tw_unavail,
-                    ],
-                    dtype=np.float32,
-                )
+            t_rem = float(state.truck_load[k]) / (self.Q_t + 1e-8)
+            t_open = float(state.truck_time[k]) / T
+            t_close = 1.0  # T_max / T_max
+            truck_rows.append(
+                np.array([tx / cb, ty / cb, t_rem, t_open, t_close], dtype=np.float32)
             )
 
-        vehicle_features = np.stack(veh_rows, axis=0)
+            # Drone k
+            dx, dy = self.coords[state.drone_node[k]]
+            d_rem = float(state.drone_load[k]) / (self.Q_d + 1e-8)
+            d_close = float(state.drone_launch_time[k] + self.t_max) / T
+            if state.drone_active[k]:
+                d_open = float(state.drone_time[k]) / T  # already flying
+            else:
+                d_open = float(state.truck_time[k]) / T  # boards when truck arrives
+            drone_rows.append(
+                np.array([dx / cb, dy / cb, d_rem, d_open, d_close], dtype=np.float32)
+            )
+
+        # Vehicle index order matches encode_action()/vehicle_fleet_type():
+        # [truck_0..truck_{K-1}, drone_0..drone_{K-1}]
+        vehicle_features = np.stack(truck_rows + drone_rows, axis=0)  # (2K, 5)
+
+        # ── Candidate edges: all ordered (i, j), i != j ─────────────────────
+        src, dst = np.meshgrid(np.arange(N1), np.arange(N1), indexing="ij")
+        src, dst = src.ravel(), dst.ravel()
+        valid = src != dst
+        src, dst = src[valid], dst[valid]
+
+        man = self.manhattan_dist[src, dst]
+        euc = self.euclidean_dist[src, dst]
+
+        truck_cost = (man * self.c_t) / norm_cost_denom
+        truck_time = man / (self.v_t * T + 1e-8)
+        drone_cost = (euc * self.c_d) / norm_cost_denom
+        drone_time = euc / (self.v_d * T + 1e-8)
+
+        truck_edge_attr_all = np.stack([truck_cost, truck_time], axis=1).astype(
+            np.float32
+        )
+        drone_edge_attr_all = np.stack([drone_cost, drone_time], axis=1).astype(
+            np.float32
+        )
+
+        # ── Sparse edge sets ──────────────────────────────────────────────
+        #
+        # Truck subgraph — keep endpoints that are routing-relevant for the truck:
+        #   • unserved customers        (future truck targets)
+        #   • depot                     (always kept — trucks return, drones land)
+        #   • current truck node(s)     (planning origin)
+        #   • landing candidates        (post-launch truck nodes the active drone
+        #                                can rendezvous with; kept so the GNN
+        #                                propagates structure around those sites)
+        #
+        # Drone subgraph — same keep set as truck, plus the current drone node:
+        #   • current drone node(s)     (active: extend-trip or land decisions;
+        #                                inactive: next-launch origin)
+        #
+        # Edges where EITHER endpoint falls outside the keep set are dropped.
+        # Nodes left with no edges in either subgraph still participate in the
+        # attention encoders (NodeEncoder / VehicleEncoder) but receive no GNN
+        # message aggregation — their Z_graph embedding is feature-only.
+
+        keep_truck = ~state.served.copy()  # unserved customers
+        keep_truck[DEPOT] = True
+        for k in range(self.K):
+            keep_truck[int(state.truck_node[k])] = True  # current truck pos
+            if state.drone_active[k]:
+                for lc in self._landing_nodes(state, k):  # landing candidates
+                    keep_truck[lc] = True
+
+        keep_drone = keep_truck.copy()
+        for k in range(self.K):
+            keep_drone[int(state.drone_node[k])] = True  # current drone pos
+
+        t_mask = keep_truck[src] & keep_truck[dst]
+        d_mask = keep_drone[src] & keep_drone[dst]
+
+        truck_edge_index = np.stack([src[t_mask], dst[t_mask]], axis=0).astype(
+            np.int32
+        )  # (2, E_t)
+        drone_edge_index = np.stack([src[d_mask], dst[d_mask]], axis=0).astype(
+            np.int32
+        )  # (2, E_d)
 
         return {
-            "node_features": node_features,
-            "vehicle_features": vehicle_features,
-            "truck_travel_times": np.stack(
-                [
-                    self.manhattan_dist[state.truck_node[k]] / (self.v_t * T)
-                    for k in range(self.K)
-                ],
-                axis=0,
-            ),
-            "drone_travel_times": np.stack(
-                [
-                    self.euclidean_dist[state.drone_node[k]] / (self.v_d * T)
-                    for k in range(self.K)
-                ],
-                axis=0,
-            ),
-            "edge_index": state.edge_index.copy(),
-            "edge_attr": state.edge_attr.copy(),
-            "edge_fleet": state.edge_fleet.copy(),
+            "node_features": node_features,  # (N+1, 5)
+            "vehicle_features": vehicle_features,  # (2K,  5)
+            "truck_edge_index": truck_edge_index,  # (2,   E_t)
+            "truck_edge_attr": truck_edge_attr_all[t_mask],  # (E_t, 2)
+            "drone_edge_index": drone_edge_index,  # (2,   E_d)
+            "drone_edge_attr": drone_edge_attr_all[d_mask],  # (E_d, 2)
         }
 
     # ------------------------------------------------------------------
@@ -900,61 +937,3 @@ class VRPBTWProblem(Problem):
     @property
     def backhaul_indices(self) -> np.ndarray:
         return self._backhaul_idx
-
-
-# ---------------------------------------------------------------------------
-# Instance generator
-# ---------------------------------------------------------------------------
-
-
-def generate_vrpbtw(
-    n_customers: int = 10,
-    n_fleets: int = 2,
-    grid_size: float = 100.0,
-    linehaul_ratio: float = 0.5,
-    lambda_weight: float = 0.5,
-    rng: Optional[np.random.Generator] = None,
-    **kwargs,
-) -> Dict:
-    if rng is None:
-        rng = np.random.default_rng()
-
-    depot_xy = (grid_size / 2.0, grid_size / 2.0)
-    coords = rng.uniform(0.0, grid_size, (n_customers, 2))
-    n_lin = max(1, int(n_customers * linehaul_ratio))
-    demands = np.concatenate(
-        [
-            rng.uniform(1.0, 10.0, n_lin),
-            -rng.uniform(1.0, 10.0, n_customers - n_lin),
-        ]
-    )
-    idx = rng.permutation(n_customers)
-    coords = coords[idx]
-    demands = demands[idx]
-
-    depot_arr = np.array(depot_xy)
-    dist_depot = np.linalg.norm(coords - depot_arr, axis=1)
-    earliest = dist_depot / 1.0
-    tw_open = np.maximum(0.0, earliest - rng.uniform(5.0, 15.0, n_customers))
-    tw_close = earliest + rng.uniform(20.0, 50.0, n_customers)
-    sys_dur = float(tw_close.max() + 30.0)
-    t_max = float(grid_size * np.sqrt(2) / (2.0 * 2.0))
-    customers = np.column_stack([coords, tw_open, tw_close, demands]).tolist()
-
-    return {
-        "depot": list(depot_xy),
-        "customers": customers,
-        "n_fleets": n_fleets,
-        "truck_capacity": 50.0,
-        "drone_capacity": 15.0,
-        "system_duration": sys_dur,
-        "trip_duration": t_max,
-        "truck_speed": 1.0,
-        "drone_speed": 2.0,
-        "truck_cost": 1.0,
-        "drone_cost": 0.5,
-        "launch_time": 2.0,
-        "land_time": 3.0,
-        "service_time": 5.0,
-        "lambda_weight": lambda_weight,
-    }
