@@ -28,6 +28,7 @@ import platform
 import subprocess
 import sys
 import time
+import traceback
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
@@ -49,7 +50,7 @@ class _RunningMean:
 
 class Logger:
     """
-    Unified experiment logger with checkpoint and config persistence.
+    Unified experiment logger with checkpoint, config persistence, and error tracking.
 
     Parameters
     ----------
@@ -57,11 +58,25 @@ class Logger:
     verbose     : Print to console.
     tensorboard : Enable TensorBoard SummaryWriter.
 
+    Methods
+    -------
+    log_metrics()    : Log scalar metrics with averaging
+    log_event()      : Log structured events (early stop, curriculum, etc.)
+    log_warning()    : Log warning with context
+    log_exception()  : Log exception with traceback and context
+    save_checkpoint(): Save model state
+    save_config()    : Save merged config YAML
+    save_summary()   : Save final training summary JSON
+    close()          : Close file handles
+
     Subdirectories created under dir:
     - logs/        : metrics.jsonl, tensorboard/
     - checkpoints/ : model checkpoints
     - artifacts/   : evaluation results, plots, etc.
     - config.json  : merged configuration
+
+    All entries (metrics, events, warnings, errors) are written to metrics.jsonl
+    with structured fields (step, level, message, exception_type, traceback, etc.).
     """
 
     def __init__(
@@ -136,6 +151,52 @@ class Logger:
         if self.verbose:
             kv = "  ".join(f"{k}={v}" for k, v in kwargs.items())
             print(f"  ▸ {event}  step={step:,}  {kv}", flush=True)
+
+    def log_warning(self, message: str, step: Optional[int] = None, **kwargs: Any) -> None:
+        """Log a warning event with optional context."""
+        entry = {
+            "level": "WARNING",
+            "message": message,
+            **({"step": step} if step is not None else {}),
+            **kwargs,
+        }
+        self._write_jsonl(entry)
+        if self.verbose:
+            kv = "  ".join(f"{k}={v}" for k, v in kwargs.items())
+            kv_str = f"  {kv}" if kv else ""
+            print(f"  ⚠ WARNING: {message}{kv_str}", flush=True)
+
+    def log_exception(
+        self,
+        exc: Exception,
+        message: str = "",
+        step: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Log an exception with traceback and context."""
+        exc_type = type(exc).__name__
+        exc_msg = str(exc)
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        tb_str = "".join(tb_lines)
+
+        entry = {
+            "level": "ERROR",
+            "message": message or exc_msg,
+            "exception_type": exc_type,
+            "exception_message": exc_msg,
+            "traceback": tb_str,
+            **({"step": step} if step is not None else {}),
+            **kwargs,
+        }
+        self._write_jsonl(entry)
+        if self.verbose:
+            kv = "  ".join(f"{k}={v}" for k, v in kwargs.items())
+            kv_str = f"  {kv}" if kv else ""
+            print(
+                f"  ✗ ERROR [{exc_type}]: {message or exc_msg}{kv_str}\n{tb_str}",
+                flush=True,
+                file=sys.stderr,
+            )
 
     def running_mean(self, key: str) -> float:
         return self._running[key].mean

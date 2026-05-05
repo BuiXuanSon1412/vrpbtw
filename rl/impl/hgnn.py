@@ -1,7 +1,7 @@
 """
 impl/network.py
 -----------------------
-Heterogeneous Graph Neural Network Policy (HGNN-Policy) for VRPBTW.
+Heterogeneous Graph Neural Network Actor Critic (HGNN-Actor Critic) for VRPBTW.
 
 The network receives a fully pre-processed obs dict from
 VRPBTWProblem.state_to_obs — all arrays are already normalised and the
@@ -47,7 +47,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core.policy import BasePolicy, _MHA, _FF, _make_norm
+from core.network import ActorCritic, _MHA, _FF, _make_norm
 from impl.environment import NODE_FEAT_DIM, VEH_FEAT_DIM
 
 GRAPH_EDGE_DIM = 2  # [cost, time]
@@ -137,18 +137,14 @@ class _VehicleEncoderLayer(nn.Module):
     def __init__(self, D: int, H: int, dropout: float, use_in: bool):
         super().__init__()
         self.sa = _MHA(D, H, dropout)
-        self.xa = _MHA(D, H, dropout)
         self.ff = _FF(D, dropout)
         self.norm1 = _make_norm(use_in, D)
         self.norm2 = _make_norm(use_in, D)
-        self.norm3 = _make_norm(use_in, D)
 
-    def forward(self, h: torch.Tensor, Z_node: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
         h = self.norm1(h + self.sa(h, h, h))
         h = torch.nan_to_num(h, nan=0.0)
-        h = self.norm2(h + self.xa(h, Z_node, Z_node))
-        h = torch.nan_to_num(h, nan=0.0)
-        h = self.norm3(h + self.ff(h))
+        h = self.norm2(h + self.ff(h))
         h = torch.nan_to_num(h, nan=0.0)
         return h
 
@@ -187,7 +183,7 @@ class VehicleEncoder(nn.Module):
         )
 
         for layer in self.layers:
-            h = layer(h, Z_node)
+            h = layer(h)
         return h, h.mean(dim=1)
 
 
@@ -354,7 +350,7 @@ class VehicleDecoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class HGNNPolicy(BasePolicy):
+class HGNNActorCritic(ActorCritic):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -395,14 +391,14 @@ class HGNNPolicy(BasePolicy):
             self._ortho_init(self)
 
     @classmethod
-    def from_config(cls, cfg: Dict) -> "HGNNPolicy":
+    def from_config(cls, cfg: Dict) -> "HGNNActorCritic":
         """Factory method: instantiate HGNNPolicy from config dict.
 
         Supports both old flat structure and new hierarchical structure with network key.
         """
         # Support both old (flat) and new (with network key) structure
-        policy_cfg = cfg.get("network", cfg)
-        return cls(cfg=policy_cfg)
+        network_cfg = cfg.get("layers", cfg)
+        return cls(cfg=network_cfg)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -432,14 +428,16 @@ class HGNNPolicy(BasePolicy):
         All arrays are already normalised by state_to_obs.
         Adds batch dimension if missing.
         """
-        t = lambda x, dt=torch.float32: self._to_tensor(x, device, dt)
-
-        nf = t(obs["node_features"])  # (B, N+1, 5)  or (N+1, 5)
-        vf = t(obs["vehicle_features"])  # (B, 2K,  5)  or (2K,  5)
-        t_ei = t(obs["truck_edge_index"], torch.long)  # (2, E)
-        t_ea = t(obs["truck_edge_attr"])  # (E, 2)
-        d_ei = t(obs["drone_edge_index"], torch.long)  # (2, E)
-        d_ea = t(obs["drone_edge_attr"])  # (E, 2)
+        nf = self._to_tensor(
+            obs["node_features"], device, torch.float32
+        )  # (B, N+1, 5)  or (N+1, 5)
+        vf = self._to_tensor(
+            obs["vehicle_features"], device, torch.float32
+        )  # (B, 2K,  5)  or (2K,  5)
+        t_ei = self._to_tensor(obs["truck_edge_index"], device, torch.long)  # (2, E)
+        t_ea = self._to_tensor(obs["truck_edge_attr"], device, torch.float32)  # (E, 2)
+        d_ei = self._to_tensor(obs["drone_edge_index"], device, torch.long)  # (2, E)
+        d_ea = self._to_tensor(obs["drone_edge_attr"], device, torch.float32)  # (E, 2)
 
         # Topology is shared across the batch; callers may still store it as
         # (1, 2, E) or (B, 2, E). Collapse that to the expected (2, E) form.
@@ -518,9 +516,14 @@ class HGNNPolicy(BasePolicy):
         ).squeeze(-1)
         return flat, value
 
-    def get_action_and_log_prob(
-        self, obs, action_mask=None, context=None, deterministic=False
-    ):
+    def evaluate(
+        self,
+        obs,
+        action_mask: Optional[torch.Tensor] = None,
+        actions: Optional[torch.Tensor] = None,
+        context=None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute logits/values or evaluate given actions."""
         device = next(self.parameters()).device.type
         Z_node, g_node, Z_veh, g_veh, Z_graph, g_graph, N1, V2K = self._encode(
             obs, device
@@ -546,52 +549,13 @@ class HGNNPolicy(BasePolicy):
         # Sampling and log-prob use the single joint Categorical, so the policy
         # correctly represents p(node, vehicle | feasible) rather than the
         # factorized approximation p_node * p_vehicle which ignores infeasible pairs.
-        B = ln.shape[0]
-        flat_l = (ln.unsqueeze(2) + lv.unsqueeze(1)).view(B, N1 * V2K)
-        if action_mask is not None:
-            flat_l = flat_l.masked_fill(~action_mask, float("-inf"))
-
-        dist = torch.distributions.Categorical(logits=flat_l)
-        action = flat_l.argmax(-1) if deterministic else dist.sample()
-
-        # Ensure all features are 2D (B, D) before concatenation
-        g_node_2d = g_node if g_node.dim() == 2 else g_node.flatten(1)
-        g_veh_2d = g_veh if g_veh.dim() == 2 else g_veh.flatten(1)
-        g_graph_2d = g_graph if g_graph.dim() == 2 else g_graph.flatten(1)
-        value = self.value_head(
-            torch.cat([g_node_2d, g_veh_2d, g_graph_2d], dim=-1)
-        ).squeeze(-1)
-        return action, dist.log_prob(action), value
-
-    def evaluate_actions(self, obs, actions, action_mask=None, context=None):
-        device = next(self.parameters()).device.type
-        Z_node, g_node, Z_veh, g_veh, Z_graph, g_graph, N1, V2K = self._encode(
-            obs, device
-        )
-
-        # Convert action_mask to torch tensor if it's numpy
-        if action_mask is not None and not isinstance(action_mask, torch.Tensor):
-            action_mask = torch.from_numpy(action_mask).to(device)
-            if action_mask.dim() == 1:
-                action_mask = action_mask.unsqueeze(0)
-
-        n_mask = (
-            self._node_mask(action_mask, N1, V2K) if action_mask is not None else None
-        )
-        v_mask = (
-            self._veh_mask(action_mask, N1, V2K) if action_mask is not None else None
-        )
-
-        ln = self.node_decoder(g_node, Z_veh, g_graph, Z_node, n_mask)
-        lv = self.vehicle_decoder(g_veh, Z_node, g_graph, Z_veh, v_mask)
-
-        # Same joint distribution as get_action_and_log_prob so that the
-        # importance ratio in PPO is computed under the correct normalisation.
         flat_l = (ln.unsqueeze(2) + lv.unsqueeze(1)).view(ln.shape[0], N1 * V2K)
         if action_mask is not None:
             flat_l = flat_l.masked_fill(~action_mask, float("-inf"))
 
         dist = torch.distributions.Categorical(logits=flat_l)
+        entropy = dist.entropy()
+
         # Ensure all features are 2D (B, D) before concatenation
         g_node_2d = g_node if g_node.dim() == 2 else g_node.flatten(1)
         g_veh_2d = g_veh if g_veh.dim() == 2 else g_veh.flatten(1)
@@ -599,62 +563,9 @@ class HGNNPolicy(BasePolicy):
         value = self.value_head(
             torch.cat([g_node_2d, g_veh_2d, g_graph_2d], dim=-1)
         ).squeeze(-1)
-        return dist.log_prob(actions), value, dist.entropy()
 
-    def compute_entropy(self, buffer, sample_size: int = 1):
-        """
-        Compute bilevel policy entropy on buffer data (sampled for efficiency).
-
-        For bilevel policies (node + vehicle decoders):
-          entropy = entropy_node + entropy_vehicle
-
-        Lower entropy = more confident policy (ready for harder tasks).
-        Higher entropy = more uncertain policy (needs more training).
-
-        Args:
-            buffer: RolloutBuffer with collected transitions
-            sample_size: number of transitions to sample (default 32 for speed)
-
-        Returns:
-            scalar entropy value (sum of node and vehicle entropies)
-        """
-        if buffer._ptr == 0:
-            return 0.0
-
-        n_sample = min(sample_size, buffer._ptr)
-        indices = np.random.choice(buffer._ptr, size=n_sample, replace=False)
-
-        entropies_node = []
-        entropies_vehicle = []
-
-        with torch.no_grad():
-            device = next(self.parameters()).device.type
-            for i in indices:
-                transition = buffer._data[i]
-                obs = transition.obs
-                mask = torch.tensor(transition.action_mask, dtype=torch.bool).unsqueeze(
-                    0
-                )
-
-                Z_node, g_node, Z_veh, g_veh, Z_graph, g_graph, N1, V2K = self._encode(
-                    obs, device
-                )
-
-                n_mask = self._node_mask(mask, N1, V2K) if mask is not None else None
-                v_mask = self._veh_mask(mask, N1, V2K) if mask is not None else None
-
-                ln = self.node_decoder(g_node, Z_veh, g_graph, Z_node, n_mask)
-                lv = self.vehicle_decoder(g_veh, Z_node, g_graph, Z_veh, v_mask)
-
-                dist_node = torch.distributions.Categorical(logits=ln)
-                dist_vehicle = torch.distributions.Categorical(logits=lv)
-
-                entropies_node.append(dist_node.entropy().mean().item())
-                entropies_vehicle.append(dist_vehicle.entropy().mean().item())
-
-        avg_entropy = (
-            (float(np.mean(entropies_node)) + float(np.mean(entropies_vehicle)))
-            if entropies_node
-            else 0.0
-        )
-        return avg_entropy
+        if actions is None:
+            return flat_l, value, entropy
+        else:
+            log_probs = dist.log_prob(actions)
+            return log_probs, value, entropy

@@ -41,9 +41,9 @@ import globals
 from config import load_config, merge_configs, save_config
 from core import SeedManager
 from core.registry import (
-    build_agent,
+    build_agents,
     build_environment,
-    build_evaluator,
+    build_evaluators,
     build_logger,
     build_trainer,
 )
@@ -135,7 +135,7 @@ def main() -> None:
         algo_name = algo_name.get("name", "").upper()
     else:
         algo_name = algo_name.upper()
-    net_type = cfg.get("network", {}).get("type", "hgnn")
+    net_type = cfg.get("network", {}).get("name", "hgnn")
     device = cfg.get("device", "cpu")
     print(f"  Experiment : {exp_name}")
     print(f"  Algorithm  : {algo_name}  |  Network: {net_type}  |  Device: {device}")
@@ -170,19 +170,18 @@ def main() -> None:
     print(f"  Environment: {type(env).__name__}")
 
     # Build agents from config (returns dict keyed by agent name)
-    agents = build_agent(cfg=cfg)
+    agents = build_agents(cfg=cfg)
     print(f"  Agents     : {list(agents.keys())}\n")
 
-    # Build evaluator using first available agent
-    agent = agents["agent"]
-    evaluator = build_evaluator(cfg, agent, env)
+    # Build evaluators (one per phase, or "default" for single-phase trainers)
+    evaluators = build_evaluators(cfg, agents, env)
 
     # Build trainer using factory pattern (dispatched by cfg.trainer)
     trainer = build_trainer(
         cfg=cfg,
         agents=agents,
         env=env,
-        evaluator=evaluator,
+        evaluators=evaluators,
         logger=logger,
     )
     print(f"  Trainer    : {type(trainer).__name__}\n")

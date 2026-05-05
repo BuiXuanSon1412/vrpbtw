@@ -1,31 +1,39 @@
 trainer:
   name: pomo
-  phase:
+  collector:
+    name: pomo
+    params: {}
+  agents:
+    train_agent:
+      name: pomo
+      learning_rate: 0.001
+      optimizer: adam
+      entropy_coef: 0.0
+      max_grad_norm: 0.5
+    eval_agent:
+      name: pomo
+      learning_rate: 0.001
+      optimizer: adam
+      entropy_coef: 0.0
+      max_grad_norm: 0.5
+  evaluators:
+    train_eval:
+      agent: eval_agent
+      n_episodes: 100
+      deterministic: true
+      decoding:
+        beam_width: 1
+  phases:
     training:
-      enabled: true
-      discount_factor: 0.999
       control:
         epochs: 100
-        batches_per_epoch: 100
-        instances_per_batch: 10
-        eval_instances: 20
-        logging:
-          log_interval: 1
-          checkpoint_interval: 10
-        evaluation:
-          deterministic: true
-          decoding:
-            beam_width: 1
-      agents:
-        agent:
-          name: policy
-          learning_rate: 0.001
-          optimizer: adam
-          rollout_length: 256
-          max_grad_norm: 0.5
-policy:
-  name: hgnn
-  network:
+        batches_per_epoch: 10
+        instances_per_batch: 5
+        eval_interval: 1
+        checkpoint_interval: 10
+network:
+  name: geman
+  layers:
     encoder:
       node_encoder:
         embedding_dim: 128
@@ -76,7 +84,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: 001_pomo
+  name: '101'
   description: initial experiment
 logger:
   base_dir: experiment/train

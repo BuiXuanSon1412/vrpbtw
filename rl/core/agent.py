@@ -1,395 +1,509 @@
 """
-core/agent.py
--------------
-Agent abstraction: policy only.
+core/agents.py
+--------------
+Algorithm-specific RL agents with different batch structures and loss computations.
 
-An agent maps observations to actions.  It has no opinion on how it is
-trained — that is entirely the trainer's responsibility.
+Classes
+-------
+  BaseAgent      — abstract base with update interface
+  PPOAgent       — Proximal Policy Optimization with clipping
+  ReinforceAgent — REINFORCE (policy gradient) without baseline
+  POMOAgent      — POMO-style with advantage = reward - baseline
 
-  BaseAgent    — abstract interface (network, prepare_obs, select_action,
-                                     save, load, clone)
-  PolicyAgent  — single concrete implementation; works with any trainer
+Design
+------
+Each agent implements a specific RL algorithm and defines:
+  - expected batch structure (which keys, shapes)
+  - hyperparameters (clip_eps, value_coef, entropy_coef, etc.)
+  - loss computation and update logic
 
+Batch structure varies by agent:
+  - PPOAgent: advantages, returns, old_log_probs
+  - ReinforceAgent: log_probs, returns
+  - POMOAgent: log_probs, rewards (computes baseline internally)
 """
 
 from __future__ import annotations
 
-import copy
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Optional, Tuple, Dict
+from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
+import torch.nn.utils
 import torch.optim as optim
-
-import globals
-from core.buffer import RolloutBuffer
-from core.policy import BasePolicy
 
 
 # ---------------------------------------------------------------------------
-# BaseAgent  — policy interface
+# BaseAgent (abstract)
 # ---------------------------------------------------------------------------
 
 
 class BaseAgent(ABC):
     """
-    Policy contract: obs → action.
+    Abstract base for algorithm-specific RL agents.
 
-    An agent holds a policy network and knows how to:
-      - select an action given an observation and mask (select_action)
-      - persist and restore the network weights (save / load)
-      - produce an independent copy of itself (clone)
-
-    Anything related to *training* — optimizers, loss functions, rollout
-    collection, gradient updates — belongs to the Trainer, not the Agent.
-    """
-
-    @property
-    @abstractmethod
-    def policy(self) -> BasePolicy:
-        """The policy network.  Always non-None for concrete agents."""
-        ...
-
-    @classmethod
-    @abstractmethod
-    def from_config(
-        cls,
-        cfg: dict,
-        policy: BasePolicy,
-        opt_policy: Optional[optim.Optimizer] = None,
-    ) -> "BaseAgent":
-        """Factory method: instantiate agent from config, policy, and optimizer."""
-        ...
-
-    @abstractmethod
-    def select_action(
-        self,
-        obs: Any,
-        action_mask: np.ndarray,
-        training: bool = True,
-    ) -> Tuple[int, torch.Tensor, torch.Tensor]:
-        """Return (action, log_prob, value).
-
-        Returns:
-            action: int, the selected action
-            log_prob: torch.Tensor (scalar), log probability with gradients
-            value: torch.Tensor (scalar), value estimate with gradients
-        """
-        ...
-
-    @abstractmethod
-    def save(self, path: str) -> None:
-        """Persist network weights to *path*."""
-        ...
-
-    @abstractmethod
-    def load(self, path: str) -> None:
-        """Restore network weights from *path*."""
-        ...
-
-    def clone(self) -> "BaseAgent":
-        """Deep copy — used by MetaTrainer for inner-loop fast agents."""
-        return copy.deepcopy(self)
-
-    @abstractmethod
-    def clone_policy(self, source: "BaseAgent") -> None:
-        """Clone policy from source agent into self.
-
-        Replaces self's policy with a cloned copy of source's policy.
-        Preserves all other configurations of self (optimizer, rollout_length, etc).
-
-        Args:
-            source: agent to clone policy from
-        """
-        ...
-
-    @abstractmethod
-    def update(self, loss: torch.Tensor) -> float:
-        """Update policy network from computed loss.
-
-        Args:
-            loss: scalar loss tensor with gradient graph attached
-        """
-        ...
-
-    @abstractmethod
-    def collect(self, env: Any) -> RolloutBuffer:
-        """Collect complete episodes into buffer.
-
-        Args:
-            env: environment with reset/step interface (already initialized for a task)
-
-        Returns:
-            RolloutBuffer with collected transitions
-        """
-        ...
-
-    @abstractmethod
-    def action_to_log_prob(
-        self,
-        obs: Any,
-        action_mask: np.ndarray,
-    ) -> Dict[int, torch.Tensor]:
-        """Compute log probabilities for all feasible actions.
-
-        Args:
-            obs: observation from environment
-            action_mask: binary mask of valid actions
-
-        Returns:
-            dict mapping action_id -> log_prob (torch.Tensor with requires_grad=True)
-        """
-        ...
-
-
-# ---------------------------------------------------------------------------
-# PolicyAgent  — the one concrete agent
-# ---------------------------------------------------------------------------
-
-
-class PolicyAgent(BaseAgent):
-    """
-    Policy-only agent for RL training.
-
-    Properties:
-      policy      — policy network (π_θ)
-      opt_policy  — optimizer for policy (optional)
-
-    Methods:
-      select_action(obs, mask, training) — sample or greedy action
-      update(loss) — perform gradient updates from computed loss
+    Each agent encapsulates a specific RL algorithm with its own:
+      - batch structure expectations
+      - hyperparameters
+      - loss computation and update logic
     """
 
     def __init__(
         self,
-        policy: BasePolicy,
-        opt_policy: Optional[optim.Optimizer] = None,
-        rollout_length: int = 256,
+        network: Any,
+        optimizer: Optional[optim.Optimizer] = None,
         max_grad_norm: float = 0.5,
     ):
-        self._policy = policy
-        self._optimizer = opt_policy
-        self.rollout_length = rollout_length
+        """
+        Args:
+            network: network (must have parameters() method)
+            optimizer: optimizer instance (Adam, SGD, AdamW, etc.), or None for manual updates
+            max_grad_norm: gradient clipping threshold
+        """
+        self.network = network
+        self.optimizer = optimizer
         self.max_grad_norm = max_grad_norm
 
-    @property
-    def policy(self) -> BasePolicy:
-        return self._policy
+    def act(
+        self,
+        obs: Any,
+        action_mask: torch.Tensor,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Select action using network.
 
-    @property
-    def optimizer(self) -> Optional[optim.Optimizer]:
-        return self._optimizer
+        Args:
+            obs: observation
+            action_mask: (B, action_space) bool tensor, True=valid action
+            deterministic: if True, take argmax; else sample
+
+        Returns:
+            action: (B,) int64
+            log_prob: (B,) float32
+            value: (B,) float32
+            entropy: (B,) float32 entropy of policy distribution
+        """
+        logits, values, entropy = self.network.evaluate(obs, action_mask, actions=None)
+
+        # Select action (deterministic or stochastic)
+        if deterministic:
+            action = logits.argmax(dim=-1)
+        else:
+            dist = torch.distributions.Categorical(logits=logits)
+            action = dist.sample()
+
+        # Compute log_prob from logits
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        log_prob = log_probs.gather(-1, action.unsqueeze(-1)).squeeze(-1)
+
+        return action, log_prob, values, entropy
+
+    @abstractmethod
+    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Perform a single gradient update step.
+
+        Args:
+            batch: dictionary of batch data (structure depends on algorithm)
+
+        Returns:
+            dict with metrics (loss, grad_norm, etc.)
+        """
+        ...
+
+    @classmethod
+    @abstractmethod
+    def from_config(
+        cls,
+        cfg: Dict[str, Any],
+        network: Any,
+        opt_network: Optional[optim.Optimizer] = None,
+    ) -> "BaseAgent":
+        """Factory method: instantiate agent from config, policy, and optimizer."""
+        ...
+
+    def clone(self, source: "BaseAgent") -> None:
+        """Clone policy from source agent into self.
+
+        Replaces self's policy with a cloned copy of source's policy.
+        Preserves all other configurations of self (optimizer, hyperparams, etc).
+
+        Args:
+            source: agent to clone policy from
+        """
+        self.network.load_state_dict(source.network.state_dict())
+
+
+# ---------------------------------------------------------------------------
+# PPOAgent
+# ---------------------------------------------------------------------------
+
+
+class PPOAgent(BaseAgent):
+    """
+    Proximal Policy Optimization (PPO) agent.
+
+    Uses clipped surrogate objective to constrain policy updates.
+
+    Expected batch structure:
+      - "log_probs": (B,) or (B*T,) old policy log probabilities
+      - "advantages": (B,) or (B*T,) advantage estimates
+      - "returns": (B,) or (B*T,) return estimates
+      - "masks": optional (B,) or (B*T,) validity masks
+
+    Hyperparameters:
+      - clip_eps: PPO clipping epsilon (typical: 0.2)
+      - value_coef: coefficient for value loss
+      - entropy_coef: coefficient for entropy regularization
+    """
+
+    def __init__(
+        self,
+        network: Any,
+        optimizer: Optional[optim.Optimizer] = None,
+        clip_eps: float = 0.2,
+        value_coef: float = 0.5,
+        entropy_coef: float = 0.01,
+        max_grad_norm: float = 0.5,
+    ):
+        super().__init__(network, optimizer, max_grad_norm)
+        self.clip_eps = clip_eps
+        self.value_coef = value_coef
+        self.entropy_coef = entropy_coef
 
     @classmethod
     def from_config(
         cls,
-        cfg: dict,
-        policy: BasePolicy,
-        opt_policy: Optional[optim.Optimizer] = None,
-    ) -> "PolicyAgent":
-        """Factory method: instantiate PolicyAgent from agent config, policy, and optimizer.
-
-        Agent config keys:
-        - rollout_length: length of rollout buffer
-        - max_grad_norm: gradient clipping threshold
-        """
-        rollout_length = cfg.get("rollout_length", 256)
+        cfg: Dict[str, Any],
+        network: Any,
+        opt_network: Optional[optim.Optimizer] = None,
+    ) -> "PPOAgent":
+        clip_eps = cfg.get("clip_eps", 0.2)
+        value_coef = cfg.get("value_coef", 0.5)
+        entropy_coef = cfg.get("entropy_coef", 0.01)
         max_grad_norm = cfg.get("max_grad_norm", 0.5)
         return cls(
-            policy=policy,
-            opt_policy=opt_policy,
-            rollout_length=rollout_length,
+            network=network,
+            optimizer=opt_network,
+            clip_eps=clip_eps,
+            value_coef=value_coef,
+            entropy_coef=entropy_coef,
             max_grad_norm=max_grad_norm,
         )
 
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
-
-    def select_action(
-        self,
-        obs: Any,
-        action_mask: np.ndarray,
-        training: bool = True,
-    ) -> Tuple[int, torch.Tensor, torch.Tensor]:
-        from core.utils import obs_to_tensor
-
-        obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-        mask_t = torch.tensor(
-            action_mask, dtype=torch.bool, device=globals.DEVICE
-        ).unsqueeze(0)
-        action_t, lp_t, val_t = self._policy.get_action_and_log_prob(
-            obs_t, mask_t, deterministic=not training
-        )
-        return int(action_t.item()), lp_t, val_t
-
-    def action_to_log_prob(
-        self,
-        obs: Any,
-        action_mask: np.ndarray,
-    ) -> Dict[int, torch.Tensor]:
-        """Compute log probabilities for all feasible actions.
+    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """PPO update step with clipped surrogate objective.
 
         Args:
-            obs: observation from environment
-            action_mask: binary mask of valid actions
+            batch: dict with keys observations, masks, log_probs, advantages, returns
 
         Returns:
-            dict mapping action_id -> log_prob (torch.Tensor with requires_grad=True)
+            dict with loss and metrics
         """
-        from core.utils import obs_to_tensor
+        observations = batch["observations"]
+        masks = batch["masks"]
+        old_log_probs = batch["log_probs"]
+        advantages = batch["advantages"]
+        returns = batch["returns"]
 
-        obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-        mask_t = torch.tensor(
-            action_mask, dtype=torch.bool, device=globals.DEVICE
-        ).unsqueeze(0)
-
-        # Get feasible action indices
-        feasible_actions = np.where(action_mask)[0].tolist()
-
-        if not feasible_actions:
-            return {}
-
-        # Compute log_probs for all feasible actions in one forward pass
-        log_probs_dict = {}
-        for action in feasible_actions:
-            act_t = torch.tensor([action], dtype=torch.long, device=globals.DEVICE)
-            log_prob, _, _ = self._policy.evaluate_actions(obs_t, act_t, mask_t)
-            log_probs_dict[int(action)] = log_prob  # Keep as tensor with gradients
-
-        return log_probs_dict
-
-    # ------------------------------------------------------------------
-    # Data collection
-    # ------------------------------------------------------------------
-
-    def collect(self, env: Any) -> RolloutBuffer:
-        """Collect complete episodes into buffer.
-
-        Assumes env is already initialized with a task (trainer called reset(task_id)).
-        Collects transitions until buffer is full.
-
-        Args:
-            env: environment with reset/step interface (already initialized for a task)
-
-        Returns:
-            RolloutBuffer with collected transitions
-        """
-        buffer = RolloutBuffer(capacity=self.rollout_length)
-        rollout_len = buffer.capacity
-
-        obs, info = env.reset()
-        action_mask = info["action_mask"]
-
-        while buffer._ptr < rollout_len and not buffer.is_full:
-            action, lp, val = self.select_action(obs, action_mask, training=True)
-
-            if not action_mask[action]:
-                feasible = np.where(action_mask)[0]
-                if len(feasible) > 0:
-                    action = int(np.random.choice(feasible))
-                    lp = torch.tensor(0.0, device=globals.DEVICE, requires_grad=True)
-                else:
-                    obs, info = env.get_obs_info()
-                    action_mask = info["action_mask"]
-                    continue
-
-            next_obs, reward, terminated, truncated, info = env.step(action)
-
-            buffer.add(
-                obs=obs,
-                action=action,
-                done=(terminated or truncated),
-                log_prob=lp,
-                action_mask=action_mask,
-                reward=reward,
-                value=val,
+        # Forward pass: re-evaluate actions under new policy
+        # (batch must have 'actions' key for proper PPO re-evaluation)
+        if "actions" in batch:
+            actions = batch["actions"]
+            new_log_probs, values, _ = self.network.evaluate(
+                observations, masks, actions=actions
             )
+        else:
+            # Fallback: compute values only (improper PPO without action re-evaluation)
+            logits, values, _ = self.network.evaluate(observations, masks, actions=None)
+            new_log_probs = old_log_probs
 
-            obs = next_obs
-            action_mask = info["action_mask"]
+        # Compute ratio and clipped surrogate loss
+        ratio = torch.exp(new_log_probs - old_log_probs)
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
 
-            if terminated or truncated or not action_mask.any():
-                obs, info = env.get_obs_info()
-                action_mask = info["action_mask"]
+        # Value loss (MSE between predictions and returns)
+        value_loss = torch.nn.functional.mse_loss(values, returns)
 
-        return buffer
+        # Entropy regularization
+        entropy_loss = -new_log_probs.mean()
 
-    # ------------------------------------------------------------------
-    # Training update
-    # ------------------------------------------------------------------
+        total_loss = (
+            policy_loss
+            + self.value_coef * value_loss
+            + self.entropy_coef * entropy_loss
+        )
 
-    def update(self, loss: torch.Tensor) -> float:
-        """
-        Update policy network from computed loss.
+        # Optimization step
+        grad_norm = torch.tensor(0.0, device=total_loss.device)
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            grad_norm_val = torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), self.max_grad_norm
+            )
+            grad_norm = torch.as_tensor(grad_norm_val, device=total_loss.device)
+            self.optimizer.step()
+
+        return {
+            "loss": total_loss,
+            "grad_norm": grad_norm,
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+        }
+
+
+# ---------------------------------------------------------------------------
+# ReinforceAgent
+# ---------------------------------------------------------------------------
+
+
+class ReinforceAgent(BaseAgent):
+    """
+    REINFORCE (policy gradient) agent without baseline.
+
+    Simplest policy gradient method: gradient of log policy weighted by returns.
+
+    Expected batch structure:
+      - "log_probs": (B,) or (B*T,) policy log probabilities
+      - "returns": (B,) or (B*T,) return estimates
+      - "masks": optional (B,) or (B*T,) validity masks
+
+    Hyperparameters:
+      - entropy_coef: coefficient for entropy regularization (optional)
+    """
+
+    def __init__(
+        self,
+        network: Any,
+        optimizer: Optional[optim.Optimizer] = None,
+        entropy_coef: float = 0.0,
+        max_grad_norm: float = 0.5,
+    ):
+        super().__init__(network, optimizer, max_grad_norm)
+        self.entropy_coef = entropy_coef
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: Dict[str, Any],
+        network: Any,
+        opt_network: Optional[optim.Optimizer] = None,
+    ) -> "ReinforceAgent":
+        entropy_coef = cfg.get("entropy_coef", 0.0)
+        max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        return cls(
+            network=network,
+            optimizer=opt_network,
+            entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm,
+        )
+
+    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """REINFORCE update: -mean(log_prob * return).
 
         Args:
-            loss: scalar loss tensor with gradient graph attached
+            batch: dict with keys log_probs, returns
 
         Returns:
-            grad_norm: L2 norm of gradients after clipping (or -1.0 if no update)
-
-        Uses optimizer if available, otherwise performs manual gradient update.
+            dict with loss and grad_norm metrics
         """
-        grad_norm = -1.0
-        if self._optimizer is not None:
-            self._optimizer.zero_grad()
-            loss.backward()
+        log_probs = batch["log_probs"]
+        returns = batch["returns"]
 
-            if self.max_grad_norm > 0:
-                unclipped = torch.nn.utils.clip_grad_norm_(
-                    self._policy.parameters(), self.max_grad_norm
-                ).item()
-                grad_norm = min(unclipped, self.max_grad_norm)
+        # Policy gradient loss (negative because we do gradient ascent)
+        policy_loss = -(log_probs * returns).mean()
 
-            self._optimizer.step()
-        else:
-            loss.backward()
+        # Optional entropy regularization
+        entropy_loss = -(log_probs**2).mean() if self.entropy_coef > 0 else 0.0
+        total_loss = policy_loss + self.entropy_coef * entropy_loss
 
-            if self.max_grad_norm > 0:
-                unclipped = torch.nn.utils.clip_grad_norm_(
-                    self._policy.parameters(), self.max_grad_norm
-                ).item()
-                grad_norm = min(unclipped, self.max_grad_norm)
+        # Optimization step
+        grad_norm = torch.tensor(0.0, device=total_loss.device)
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            grad_norm_val = torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), self.max_grad_norm
+            )
+            grad_norm = torch.as_tensor(grad_norm_val, device=total_loss.device)
+            self.optimizer.step()
 
-            for param in self._policy.parameters():
-                if param.grad is not None:
-                    param.data -= param.grad
+        return {
+            "loss": total_loss,
+            "grad_norm": grad_norm,
+            "policy_loss": policy_loss,
+        }
 
-        return grad_norm
 
-    # ------------------------------------------------------------------
-    # Persistence  (network weights only — trainers save optimizer state)
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# POMOAgent
+# ---------------------------------------------------------------------------
 
-    def save(self, path: str) -> None:
-        """Save network weights.  Trainers may write additional keys to the
-        same file (optimizer state, training counters) via torch.save."""
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"network_state": self._policy.state_dict()}, path)
 
-    def load(self, path: str) -> None:
-        """Load network weights.  Ignores any extra keys written by the
-        trainer so that evaluate.py can load training checkpoints directly."""
-        try:
-            ckpt = torch.load(path, map_location=globals.DEVICE, weights_only=True)
-        except Exception:
-            ckpt = torch.load(path, map_location=globals.DEVICE, weights_only=False)
-        self._policy.load_state_dict(ckpt["network_state"])
+class POMOAgent(BaseAgent):
+    """
+    POMO (Policy Optimization with Multiple Optima) agent.
 
-    def clone_policy(self, source: "BaseAgent") -> None:
-        """Clone policy from source agent into self.
+    Uses empirical advantage = reward - baseline (mean reward).
 
-        Creates independent copy of source's policy parameters.
-        Updates to self won't affect source.
-        """
-        self._policy.load_state_dict(source.policy.state_dict())
+    Expected batch structure:
+      - "log_probs": (B,) or (B*T,) policy log probabilities (can be summed)
+      - "rewards": (B,) or (B*T,) reward values
 
-    def __repr__(self) -> str:
-        n_params = sum(p.numel() for p in self._policy.parameters())
-        return (
-            f"PolicyAgent(network={type(self._policy).__name__}, "
-            f"params={n_params:,}, device={globals.DEVICE!r})"
+    Hyperparameters:
+      - entropy_coef: coefficient for entropy regularization (optional)
+    """
+
+    def __init__(
+        self,
+        network: Any,
+        optimizer: Optional[optim.Optimizer] = None,
+        entropy_coef: float = 0.0,
+        max_grad_norm: float = 0.5,
+    ):
+        super().__init__(network, optimizer, max_grad_norm)
+        self.entropy_coef = entropy_coef
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: Dict[str, Any],
+        network: Any,
+        opt_network: Optional[optim.Optimizer] = None,
+    ) -> "POMOAgent":
+        entropy_coef = cfg.get("entropy_coef", 0.0)
+        max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        return cls(
+            network=network,
+            optimizer=opt_network,
+            entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm,
         )
+
+    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """POMO update: per-instance baseline with multiple starting points.
+
+        For each instance, computes baseline as mean reward across starting points,
+        then advantage = reward - baseline. Loss per instance is mean of log_prob * advantage.
+        Batch loss is mean of all instance losses.
+
+        Args:
+            batch: dict with keys:
+                - log_probs: list of (num_starting_points,) tensors, one per instance
+                - rewards: list of (num_starting_points,) tensors, one per instance
+
+        Returns:
+            dict with loss and grad_norm metrics
+        """
+        log_probs_list = batch["log_probs"]  # List of tensors
+        rewards_list = batch["rewards"]       # List of tensors
+
+        instance_losses = []
+        total_baseline = 0.0
+        num_instances = len(log_probs_list)
+
+        # Compute loss per instance with per-instance baseline
+        for log_probs_i, rewards_i in zip(log_probs_list, rewards_list):
+            # Per-instance baseline
+            baseline_i = rewards_i.mean()
+            advantages_i = rewards_i - baseline_i
+
+            # Loss for this instance: mean(log_prob * advantage)
+            loss_i = -(log_probs_i * advantages_i).mean()
+            instance_losses.append(loss_i)
+            total_baseline += baseline_i.item()
+
+        # Batch loss: mean of instance losses
+        policy_loss = torch.stack(instance_losses).mean()
+
+        # Optional entropy regularization
+        # Entropy = -E[log_prob], higher entropy = more exploratory
+        if self.entropy_coef > 0:
+            all_log_probs = torch.cat(log_probs_list)
+            entropy_loss = -all_log_probs.mean()  # Correct: don't square
+        else:
+            entropy_loss = 0.0
+
+        total_loss = policy_loss + self.entropy_coef * entropy_loss
+
+        # Optimization step
+        grad_norm = torch.tensor(0.0, device=total_loss.device)
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            grad_norm_val = torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), self.max_grad_norm
+            )
+            grad_norm = torch.as_tensor(grad_norm_val, device=total_loss.device)
+            self.optimizer.step()
+
+        return {
+            "loss": total_loss,
+            "grad_norm": grad_norm,
+            "policy_loss": policy_loss,
+            "baseline": torch.tensor(total_baseline / max(num_instances, 1)),
+        }
+
+
+# ---------------------------------------------------------------------------
+# MetaAgent
+# ---------------------------------------------------------------------------
+
+
+class MetaAgent(BaseAgent):
+    """Meta-learning agent that aggregates losses across multiple tasks.
+
+    Computes meta-update by averaging losses from different tasks and updating
+    the shared policy on the aggregated loss.
+
+    Expected usage:
+      - PPOAgent instances compute losses on different tasks
+      - MetaAgent.update() receives list of these losses
+      - Performs meta-update on aggregated loss
+    """
+
+    def __init__(
+        self,
+        network: Any,
+        optimizer: Optional[optim.Optimizer] = None,
+        max_grad_norm: float = 0.5,
+    ):
+        super().__init__(network, optimizer, max_grad_norm)
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: Dict[str, Any],
+        network: Any,
+        opt_network: Optional[optim.Optimizer] = None,
+    ) -> "MetaAgent":
+        max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        return cls(
+            network=network,
+            optimizer=opt_network,
+            max_grad_norm=max_grad_norm,
+        )
+
+    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Update network on meta-loss (average of task losses).
+
+        Args:
+            batch: dict with key "task_losses" containing stacked loss tensor
+
+        Returns:
+            dict with meta_loss metric
+        """
+        task_losses = batch["task_losses"]
+        meta_loss = task_losses.mean()
+
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+            meta_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.network.parameters(), self.max_grad_norm
+            )
+            self.optimizer.step()
+
+        return {"meta_loss": meta_loss}

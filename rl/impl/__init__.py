@@ -1,4 +1,5 @@
 from impl.environment import VRPBTWEnv
-from impl.policy import HGNNPolicy
+from impl.hgnn import HGNNActorCritic
+from impl.geman import GEMANActorCritic
 
-__all__ = ["VRPBTWEnv", "HGNNPolicy"]
+__all__ = ["VRPBTWEnv", "HGNNActorCritic", "GEMANActorCritic"]

@@ -23,25 +23,36 @@ import torch.optim as optim
 from impl.environment import VRPBTWEnv
 
 # Networks
-from impl.policy import HGNNPolicy
+from impl.hgnn import HGNNActorCritic
+from impl.geman import GEMANActorCritic
 
 # Core
-from core.agent import PolicyAgent
-from core.policy import BasePolicy
+from core.agent import BaseAgent, PPOAgent, ReinforceAgent, POMOAgent
+from core.network import ActorCritic
 from core.trainer import BaseTrainer, MetaTrainer, POMOTrainer
 from core.evaluator import Evaluator
 from core.logger import Logger
+from core.collector import (
+    BaseCollector,
+    GAECollector,
+    MCCollector,
+    EPCollector,
+    POMOSampler,
+)
 
 # ---------------------------------------------------------------------------
 # Registry: factory method dispatch tables
 # ---------------------------------------------------------------------------
 
-_POLICY_REGISTRY: Dict[str, type] = {
-    "hgnn": HGNNPolicy,
+_NETWORK_REGISTRY: Dict[str, type] = {
+    "hgnn": HGNNActorCritic,
+    "geman": GEMANActorCritic,
 }
 
 _AGENT_REGISTRY: Dict[str, type] = {
-    "policy": PolicyAgent,
+    "ppo": PPOAgent,
+    "reinforce": ReinforceAgent,
+    "pomo": POMOAgent,
 }
 
 _TRAINER_REGISTRY: Dict[str, type] = {
@@ -60,10 +71,40 @@ _OPTIMIZER_REGISTRY: Dict[str, type | None] = {
     "unspecified": None,
 }
 
+_COLLECTOR_REGISTRY: Dict[str, type] = {
+    "gae": GAECollector,
+    "mc": MCCollector,
+    "ep": EPCollector,
+    "pomo": POMOSampler,
+}
+
 
 # ---------------------------------------------------------------------------
-# Instance generator
+# Collector
 # ---------------------------------------------------------------------------
+
+
+def build_collector(cfg: Dict[str, Any]) -> BaseCollector:
+    """Build collector from config.
+
+    Dispatches to registry based on collector type, then calls from_config.
+
+    Args:
+        cfg: config dict with 'name' and algorithm-specific params
+
+    Returns:
+        BaseCollector instance
+    """
+    collector_type = cfg.get("name", "gae")
+
+    if collector_type not in _COLLECTOR_REGISTRY:
+        raise ValueError(
+            f"Unknown collector type {collector_type!r}. "
+            f"Register it in registry.py. Known: {list(_COLLECTOR_REGISTRY.keys())}"
+        )
+
+    cls = _COLLECTOR_REGISTRY[collector_type]
+    return cls.from_config(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -98,22 +139,37 @@ def build_logger(cfg: Dict[str, Any]) -> Logger:
 # ---------------------------------------------------------------------------
 
 
-def build_evaluator(cfg: Dict[str, Any], agent: Any, env: Any) -> Evaluator:
-    """Build evaluator from config.
+def build_evaluators(
+    cfg: Dict[str, Any], agents: Dict[str, Any], env: Any
+) -> Dict[str, Evaluator]:
+    """Build evaluators from config.
 
-    Reads evaluation settings from trainer.control.evaluation.
+    Reads trainer.evaluators and builds an Evaluator for each entry.
+    Each evaluator specifies which agent to use via the 'agent' field.
+
+    Returns dict of evaluators keyed by name.
     """
     trainer_cfg = cfg.get("trainer", {})
-    control_cfg = trainer_cfg.get("control", {})
-    eval_cfg = control_cfg.get("evaluation", {})
+    evaluators_cfg = trainer_cfg.get("evaluators", {})
 
-    return Evaluator(
-        agent=agent,
-        env=env,
-        n_episodes=eval_cfg.get("n_episodes", 20),
-        deterministic=eval_cfg.get("deterministic", True),
-        beam_width=eval_cfg.get("decoding", {}).get("beam_width", 1),
-    )
+    evaluators = {}
+    for eval_name, eval_cfg in evaluators_cfg.items():
+        agent_name = eval_cfg.get("agent")
+        if not agent_name or agent_name not in agents:
+            raise ValueError(
+                f"Evaluator '{eval_name}' specifies agent '{agent_name}' "
+                f"but it does not exist in agents: {list(agents.keys())}"
+            )
+
+        evaluators[eval_name] = Evaluator(
+            agent=agents[agent_name],
+            env=env,
+            n_episodes=eval_cfg.get("n_episodes", 20),
+            deterministic=eval_cfg.get("deterministic", True),
+            beam_width=eval_cfg.get("decoding", {}).get("beam_width", 1),
+        )
+
+    return evaluators
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +181,7 @@ def build_trainer(
     cfg: Dict[str, Any],
     agents: Dict[str, Any],
     env: Any,
-    evaluator: Any,
+    evaluators: Dict[str, Any],
     logger: Any,
 ) -> BaseTrainer:
     """Build trainer from config.
@@ -143,12 +199,17 @@ def build_trainer(
 
     cls = _TRAINER_REGISTRY[trainer_type]
 
+    # Build collector from trainer config
+    collector_cfg = trainer_cfg.get("collector", {})
+    collector = build_collector(collector_cfg)
+
     return cls.from_config(
         trainer_cfg=trainer_cfg,
         agents=agents,
         env=env,
-        evaluator=evaluator,
+        evaluators=evaluators,
         logger=logger,
+        collector=collector,
     )
 
 
@@ -157,22 +218,22 @@ def build_trainer(
 # ---------------------------------------------------------------------------
 
 
-def build_policy(cfg: Dict[str, Any]) -> BasePolicy:
-    """Build policy network from config.
+def build_network(cfg: Dict[str, Any]) -> ActorCritic:
+    """Build network from config.
 
-    Dispatches to registry based on policy name, then calls from_config.
+    Dispatches to registry based on network name, then calls from_config.
     """
-    policy_cfg = cfg.get("policy", cfg.get("network", {}))  # Support both old and new
-    net_type = policy_cfg.get("name", "hgnn")
+    network_cfg = cfg.get("network", cfg.get("policy", {}))  # Support both old and new
+    net_type = network_cfg.get("name", "hgnn")
 
-    if net_type not in _POLICY_REGISTRY:
+    if net_type not in _NETWORK_REGISTRY:
         raise ValueError(
             f"Unknown network type {net_type!r}. "
-            f"Register it in registry.py. Known: {list(_POLICY_REGISTRY.keys())}"
+            f"Register it in registry.py. Known: {list(_NETWORK_REGISTRY.keys())}"
         )
 
-    cls = _POLICY_REGISTRY[net_type]
-    return cls.from_config(policy_cfg)
+    cls = _NETWORK_REGISTRY[net_type]
+    return cls.from_config(network_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -180,53 +241,55 @@ def build_policy(cfg: Dict[str, Any]) -> BasePolicy:
 # ---------------------------------------------------------------------------
 
 
-def build_agent(cfg: Dict[str, Any]) -> Dict[str, "PolicyAgent"]:
-    """Build agent(s) from config.
+def _build_single_agent(cfg: Dict[str, Any], agent_cfg: Dict[str, Any]) -> "BaseAgent":
+    """Build a single agent from agent config.
 
-    Iterates through all phases in trainer.phase and builds agents from each,
-    merging into single dict. Agent keys must be unique across phases.
+    Builds network and optimizer, then instantiates agent.
+    """
+    # Build network
+    network = build_network(cfg)
+
+    # Build optimizer with agent-specific learning rate
+    opt_type = agent_cfg.get("optimizer", "adam")
+    opt_lr = agent_cfg.get("learning_rate", 0.001)
+
+    if opt_type not in _OPTIMIZER_REGISTRY:
+        raise ValueError(
+            f"Unknown optimizer type {opt_type!r}. "
+            f"Register it in registry.py. Known: {list(_OPTIMIZER_REGISTRY.keys())}"
+        )
+
+    opt_class = _OPTIMIZER_REGISTRY[opt_type]
+    optimizer = (
+        None if opt_class is None else opt_class(network.parameters(), lr=opt_lr)
+    )
+
+    # Build agent
+    agent_type = agent_cfg.get("name", "policy")
+    if agent_type not in _AGENT_REGISTRY:
+        raise ValueError(
+            f"Unknown agent type {agent_type!r}. "
+            f"Register it in registry.py. Known: {list(_AGENT_REGISTRY.keys())}"
+        )
+
+    cls = _AGENT_REGISTRY[agent_type]
+    return cls.from_config(agent_cfg, network, optimizer)
+
+
+def build_agents(cfg: Dict[str, Any]) -> Dict[str, "BaseAgent"]:
+    """Build agents from config.
+
+    Reads trainer.agents and builds an agent for each entry.
 
     Returns dict of agents keyed by agent name.
     """
     trainer_cfg = cfg.get("trainer", {})
-    agents = {}
+    agents_cfg = trainer_cfg.get("agents", {})
 
-    # Iterate through all phases
-    phase_cfg = trainer_cfg.get("phase", {})
-    for phase_name, phase_data in phase_cfg.items():
-        agents_cfg = phase_data.get("agents", {})
-
-        for agent_name, agent_cfg in agents_cfg.items():
-            # Build policy
-            policy = build_policy(cfg)
-
-            # Build optimizer with agent-specific learning rate
-            opt_type = agent_cfg.get("optimizer", "adam")
-            opt_lr = agent_cfg.get("learning_rate", 0.001)
-
-            if opt_type not in _OPTIMIZER_REGISTRY:
-                raise ValueError(
-                    f"Unknown optimizer type {opt_type!r}. "
-                    f"Register it in registry.py. Known: {list(_OPTIMIZER_REGISTRY.keys())}"
-                )
-
-            opt_class = _OPTIMIZER_REGISTRY[opt_type]
-            optimizer = (
-                None if opt_class is None else opt_class(policy.parameters(), lr=opt_lr)
-            )
-
-            # Build agent
-            agent_type = agent_cfg.get("name", "policy")
-            if agent_type not in _AGENT_REGISTRY:
-                raise ValueError(
-                    f"Unknown agent type {agent_type!r}. "
-                    f"Register it in registry.py. Known: {list(_AGENT_REGISTRY.keys())}"
-                )
-
-            cls = _AGENT_REGISTRY[agent_type]
-            agents[agent_name] = cls.from_config(agent_cfg, policy, optimizer)
-
-    return agents
+    return {
+        agent_name: _build_single_agent(cfg, agent_cfg)
+        for agent_name, agent_cfg in agents_cfg.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +315,7 @@ def build_environment(cfg: Dict[str, Any]) -> VRPBTWEnv:
 
     cls = _ENVIRONMENT_REGISTRY[env_name]
     return cls.from_config(env_cfg)
+
+
+# ---------------------------------------------------------------------------
+# Estimator

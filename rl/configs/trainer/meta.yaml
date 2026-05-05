@@ -10,72 +10,82 @@
 trainer:
   name: meta
 
-  phase:
+  collector:
+    name: gae
+    params:
+      rollout_length: 256
+      gamma: 0.99
+      gae_lambda: 0.95
+
+  agents:
+    meta_agent:
+      name: ppo
+      learning_rate: 0.001
+      optimizer: unspecified
+      clip_eps: 0.2
+      value_coef: 0.5
+      entropy_coef: 0.01
+      max_grad_norm: 0.5
+    sub_agent:
+      name: ppo
+      learning_rate: 0.001
+      optimizer: adam
+      clip_eps: 0.2
+      value_coef: 0.5
+      entropy_coef: 0.01
+      max_grad_norm: 0.5
+    tune_agent:
+      name: ppo
+      learning_rate: 0.001
+      optimizer: adam
+      clip_eps: 0.2
+      value_coef: 0.5
+      entropy_coef: 0.01
+      max_grad_norm: 0.5
+    eval_agent:
+      name: ppo
+      learning_rate: 0.001
+      optimizer: adam
+      clip_eps: 0.2
+      value_coef: 0.5
+      entropy_coef: 0.01
+      max_grad_norm: 0.5
+
+  evaluators:
+    meta_eval:
+      agent: meta_agent
+      n_episodes: 20
+      deterministic: true
+      decoding:
+        beam_width: 1
+    tune_eval:
+      agent: tune_agent
+      n_episodes: 100
+      deterministic: true
+      decoding:
+        beam_width: 1 
+
+  phases:
     meta_learning:
-      enabled: true
-      
-      discount_factor: 0.99
-      
-      agents:
-        meta_agent:
-          name: policy
-          learning_rate: 0.001
-          optimizer: unspecified
-          rollout_length: 256
-          max_grad_norm: 0.5
-        sub_agent:
-          name: policy
-          learning_rate: 0.001
-          optimizer: adam
-          rollout_length: 256
-          max_grad_norm: 0.5
-      
       curriculum:
-        enabled: true
-        metric: entropy
-      
+        entropy_threshold: 0.5
+        check_interval: 1
       control:
-        total_timesteps: 2000000
-        logging:
-          log_interval: 5
-          eval_interval: 20
-          checkpoint_interval: 100
-        early_stopping:
-          patience: 150
-          min_delta: 0.0001
-        evaluation:
-          deterministic: true
-          n_episodes: 20
-          decoding:
-            beam_width: 1
-
-
+        epochs: 200
+        batches_per_epoch: 50
+        eval_interval: 1
+        checkpoint_interval: 10
+      early_stopping:
+        patience: 20
+        min_delta: 0.0001
 
     fine_tuning:
-      enabled: true
-      
-      discount_factor: 0.99
-      
-      agents:
-        agent:
-          name: policy
-          learning_rate: 0.001
-          optimizer: adam
-          rollout_length: 256
-          max_grad_norm: 0.5
-
       control:
-        total_timesteps: 2000000
-        logging:
-          log_interval: 5
-          eval_interval: 20
-          checkpoint_interval: 100
-        early_stopping:
-          patience: 150
-          min_delta: 0.0001
-        evaluation:
-          deterministic: true
-          n_episodes: 20
-          decoding:
-            beam_width: 1
-
+        epochs: 50
+        batches_per_epoch: 100
+        ppo_epochs: 3
+        eval_interval: 1
+        checkpoint_interval: 10
+      early_stopping:
+        patience: 10
+        min_delta: 0.0001

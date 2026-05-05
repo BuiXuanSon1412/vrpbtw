@@ -1,4 +1,4 @@
-# policy/hgnn.yaml
+# network/hgnn.yaml
 # Heterogeneous Graph Neural Network (HGNN) policy configuration
 #
 # Graph-based policy for combinatorial optimization problems.
@@ -7,9 +7,9 @@
 # - Edges: spatial proximity, vehicle-customer assignments
 # - Output: action logits and value estimate
 
-policy:
+network:
   name: hgnn
-  network:
+  layers:
     encoder:
       node_encoder:
         embedding_dim: 128

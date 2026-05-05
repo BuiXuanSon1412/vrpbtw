@@ -4,13 +4,13 @@ core/trainer.py
 Training-loop implementations.
 
 MetaTrainer — multi-task MAML with curriculum expansion
-POMOTrainer — Policy Optimization with Multiple Optima
+POMOTrainer — Policy Optimization with Multiple Optima (per-task independent training)
 
 Design principle:
   - Agent holds the policy network; each trainer computes loss via its own method
   - MetaTrainer coordinates multi-task learning with inner-loop adaptation and outer meta-updates
   - Curriculum expansion monitored via task entropy, integrated into train() method
-  - POMOTrainer optimizes over multiple starting points per instance
+  - POMOTrainer trains each sub-policy for each task independently using POMO collection
 """
 
 from __future__ import annotations
@@ -24,9 +24,7 @@ import torch
 
 from globals import DEVICE
 from core.agent import BaseAgent
-from core.buffer import RolloutBuffer
-from core.policy import BasePolicy
-from core.utils import obs_to_tensor
+from core.collector import BaseCollector
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +47,9 @@ class BaseTrainer(ABC):
         trainer_cfg: Dict[str, Any],
         agents: Dict[str, BaseAgent],
         env: Any,
-        evaluator: Any,
+        evaluators: Dict[str, Any],
         logger: Any,
+        collector: BaseCollector,
     ) -> "BaseTrainer":
         """Factory method: instantiate trainer from config.
 
@@ -58,8 +57,9 @@ class BaseTrainer(ABC):
             trainer_cfg: trainer config dict (cfg.trainer)
             agents: dict of agent instances (keyed by name)
             env: environment instance (has tasks list and reset interface)
-            evaluator: evaluator instance
+            evaluators: dict of evaluator instances (keyed by phase name, or "default" for single-phase)
             logger: logger instance
+            collector: collector instance for trajectory collection
         """
         ...
 
@@ -86,69 +86,60 @@ class MetaTrainer(BaseTrainer):
         agents: Dict[str, BaseAgent],
         env: Any,
         trainer_cfg: Dict[str, Any],
-        evaluator: Any,
+        evaluators: Dict[str, Any],
         logger: Any,
+        collector: BaseCollector,
     ):
         self.agents = agents
-        self.agent = agents["meta_agent"]  # Primary trainable agent
+        self.meta_agent = agents["meta_agent"]
+        self.sub_agent = agents["sub_agent"]
+        self.tune_agent = agents["tune_agent"]
         self.env = env
+        self.collector = collector
         self.active_tasks = {env.tasks[0]}  # Start with first (easiest) task
-        self.evaluator = evaluator
+        self.meta_evaluator = evaluators["meta_eval"]
+        self.fine_evaluator = evaluators["tune_eval"]
         self.logger = logger
 
         # Extract config from trainer structure
-        phase_cfg = trainer_cfg.get("phase", {})
+        phases_cfg = trainer_cfg.get("phases", {})
 
         # Get meta_learning phase
-        meta_phase = phase_cfg.get("meta_learning", {})
-        meta_agent_cfg = meta_phase.get("agents", {}).get("meta_agent", {})
-        sub_agent_cfg = meta_phase.get("agents", {}).get("sub_agent", {})
+        meta_phase = phases_cfg.get("meta_learning", {})
         curriculum_cfg = meta_phase.get("curriculum", {})
         meta_control_cfg = meta_phase.get("control", {})
-        meta_logging_cfg = meta_control_cfg.get("logging", {})
         meta_early_stop = meta_control_cfg.get("early_stopping", {})
 
-        # Only load curriculum and rollout settings; learning rates are already in agents
+        # Meta-learning config: epochs/batches instead of timesteps
         self.mcfg = {
-            "support_rollout_len": int(meta_agent_cfg.get("rollout_length", 256)),
-            "query_rollout_len": int(sub_agent_cfg.get("rollout_length", 256)),
             "entropy_threshold": float(curriculum_cfg.get("entropy_threshold", 0.5)),
             "curriculum_check_interval": int(curriculum_cfg.get("check_interval", 1)),
-            "discount_factor": float(meta_phase.get("discount_factor", 0.99)),
-            "total_timesteps": int(meta_control_cfg.get("total_timesteps", 2000000)),
-            "log_interval": int(meta_logging_cfg.get("log_interval", 5)),
-            "eval_interval": int(meta_logging_cfg.get("eval_interval", 20)),
-            "checkpoint_interval": int(
-                meta_logging_cfg.get("checkpoint_interval", 100)
-            ),
-            "patience": int(meta_early_stop.get("patience", 150)),
+            "epochs": int(meta_control_cfg.get("epochs", 200)),
+            "batches_per_epoch": int(meta_control_cfg.get("batches_per_epoch", 50)),
+            "eval_interval": int(meta_control_cfg.get("eval_interval", 1)),
+            "checkpoint_interval": int(meta_control_cfg.get("checkpoint_interval", 10)),
+            "patience": int(meta_early_stop.get("patience", 20)),
             "min_delta": float(meta_early_stop.get("min_delta", 0.0001)),
         }
 
         # Get fine_tuning phase config
-        fine_tune_phase = phase_cfg.get("fine_tuning", {})
+        fine_tune_phase = phases_cfg.get("fine_tuning", {})
         fine_control_cfg = fine_tune_phase.get("control", {})
-        fine_logging_cfg = fine_control_cfg.get("logging", {})
         fine_early_stop = fine_control_cfg.get("early_stopping", {})
 
+        # Fine-tuning config: epochs/batches instead of timesteps
         self.fcfg = {
-            "discount_factor": float(fine_tune_phase.get("discount_factor", 0.99)),
-            "total_timesteps": int(fine_control_cfg.get("total_timesteps", 2000000)),
-            "log_interval": int(fine_logging_cfg.get("log_interval", 5)),
-            "eval_interval": int(fine_logging_cfg.get("eval_interval", 20)),
-            "checkpoint_interval": int(
-                fine_logging_cfg.get("checkpoint_interval", 100)
-            ),
-            "patience": int(fine_early_stop.get("patience", 150)),
+            "epochs": int(fine_control_cfg.get("epochs", 50)),
+            "batches_per_epoch": int(fine_control_cfg.get("batches_per_epoch", 100)),
+            "ppo_epochs": int(fine_control_cfg.get("ppo_epochs", 3)),
+            "eval_interval": int(fine_control_cfg.get("eval_interval", 1)),
+            "checkpoint_interval": int(fine_control_cfg.get("checkpoint_interval", 10)),
+            "patience": int(fine_early_stop.get("patience", 10)),
             "min_delta": float(fine_early_stop.get("min_delta", 0.0001)),
         }
 
-        # Build training config dict (for compatibility, use meta_cfg as default)
-        self.tcfg = self.mcfg.copy()
-
         # Training state
-        self._timestep = 0
-        self._iteration = 0
+        self._total_updates = 0
         self._best_objective = float("-inf")
         self._patience_counter = 0
         self._curriculum_check_counter = 0
@@ -159,8 +150,9 @@ class MetaTrainer(BaseTrainer):
         trainer_cfg: Dict[str, Any],
         agents: Dict[str, BaseAgent],
         env: Any,
-        evaluator: Any,
+        evaluators: Dict[str, Any],
         logger: Any,
+        collector: BaseCollector,
     ) -> "MetaTrainer":
         if not env.tasks:
             raise ValueError("MetaTrainer.from_config requires env.tasks")
@@ -172,8 +164,9 @@ class MetaTrainer(BaseTrainer):
             agents=agents,
             env=env,
             trainer_cfg=trainer_cfg,
-            evaluator=evaluator,
+            evaluators=evaluators,
             logger=logger,
+            collector=collector,
         )
 
     def train(self) -> Dict[str, Any]:
@@ -183,138 +176,199 @@ class MetaTrainer(BaseTrainer):
         # Phase 1: Meta-training
         meta_summary = self.meta_train()
 
-        # Phase 2: Fine-tuning (if agent is available in fine_tuning phase)
-        if "agent" in self.agents:
-            fine_tune_summary = self.fine_tune()
-        else:
-            fine_tune_summary = {}
+        # Phase 2: Fine-tuning
+        fine_tune_summary = self.fine_tune()
 
         # Combine summaries
         summary = {
             "stop_reason": meta_summary.get("stop_reason", "completed"),
-            "total_iterations": meta_summary.get("total_iterations", 0)
-            + fine_tune_summary.get("total_iterations", 0),
-            "total_timesteps": meta_summary.get("total_timesteps", 0)
-            + fine_tune_summary.get("total_timesteps", 0),
+            "total_updates": self._total_updates,
+            "total_epochs": meta_summary.get("total_epochs", 0)
+            + fine_tune_summary.get("total_epochs", 0),
             "best_objective": max(
                 meta_summary.get("best_objective", float("-inf")),
                 fine_tune_summary.get("best_objective", float("-inf")),
             ),
             "training_time_s": round(time.time() - start_time, 1),
+            "meta_summary": meta_summary,
+            "fine_tune_summary": fine_tune_summary,
         }
         self.logger.log_event(
-            "training_complete", summary.get("total_timesteps", 0), **summary
+            "training_complete",
+            self._total_updates,
+            total_updates=self._total_updates,
+            total_epochs=summary["total_epochs"],
+            best_objective=summary["best_objective"],
         )
+        self.logger.save_summary(summary)
         self.logger.close()
         self._print_footer(summary)
         return summary
 
     def meta_train(self) -> Dict[str, Any]:
-        """Run meta-training loop and return summary."""
+        """Run meta-training loop with epoch/batch structure."""
         self._print_header()
         start_time = time.time()
-        stop_reason = "timestep_limit"
+        stop_reason = "completed"
+        epoch = -1
 
-        while self._timestep < self.tcfg["total_timesteps"]:
-            iter_start = time.time()
-            self._iteration += 1
+        try:
+            for epoch in range(self.mcfg["epochs"]):
+                epoch_start = time.time()
+                epoch_losses = []
+                epoch_task_metrics = {}
 
-            # Compute meta-loss across active tasks
-            meta_loss, task_losses, task_metrics, total_steps = (
-                self._compute_meta_loss()
-            )
+                try:
+                    for _ in range(self.mcfg["batches_per_epoch"]):
+                        # Compute task losses across active tasks
+                        task_losses, task_metrics = self._compute_task_losses()
 
-            # Update meta-policy
-            self.agent.update(meta_loss)
+                        # Update meta-policy on aggregated task losses
+                        self.meta_agent.update({"task_losses": task_losses})
+                        self._total_updates += 1
 
-            # Curriculum expansion: find task with highest entropy
-            max_entropy = None
-            max_entropy_task = None
-            for task_id, metrics_dict in task_metrics.items():
-                entropy = metrics_dict.get("entropy", 0)
-                if max_entropy is None or entropy > max_entropy:
-                    max_entropy = entropy
-                    max_entropy_task = task_id
+                        epoch_losses.extend(task_losses)
+                        for task_id, metrics_dict in task_metrics.items():
+                            if task_id not in epoch_task_metrics:
+                                epoch_task_metrics[task_id] = {}
+                            for key, val in metrics_dict.items():
+                                if key not in epoch_task_metrics[task_id]:
+                                    epoch_task_metrics[task_id][key] = []
+                                epoch_task_metrics[task_id][key].append(val)
 
-            if max_entropy is not None:
-                self._curriculum_check_counter += 1
-                if (
-                    self._curriculum_check_counter
-                    >= self.mcfg["curriculum_check_interval"]
-                ):
-                    self._curriculum_check_counter = 0
-                    if max_entropy < self.mcfg["entropy_threshold"]:
-                        # Add next task from sorted task list
-                        if len(self.active_tasks) < len(self.env.tasks):
-                            next_task = self.env.tasks[len(self.active_tasks)]
-                            self.active_tasks.add(next_task)
-                            print(
-                                f"[MetaTrainer] Curriculum expanded to {len(self.active_tasks)} tasks"
+                        # Curriculum check per batch
+                        max_entropy = None
+                        for task_id, metrics_dict in task_metrics.items():
+                            entropy = metrics_dict.get("entropy", 0)
+                            if max_entropy is None or entropy > max_entropy:
+                                max_entropy = entropy
+
+                        if max_entropy is not None:
+                            self._curriculum_check_counter += 1
+                            if (
+                                self._curriculum_check_counter
+                                >= self.mcfg["curriculum_check_interval"]
+                            ):
+                                self._curriculum_check_counter = 0
+                                if max_entropy < self.mcfg["entropy_threshold"]:
+                                    if len(self.active_tasks) < len(self.env.tasks):
+                                        next_task = self.env.tasks[
+                                            len(self.active_tasks)
+                                        ]
+                                        self.active_tasks.add(next_task)
+                                        self.logger.log_event(
+                                            "curriculum_expansion",
+                                            self._total_updates,
+                                            num_tasks=len(self.active_tasks),
+                                            task_id=str(next_task),
+                                        )
+                except Exception as e:
+                    self.logger.log_exception(
+                        e,
+                        message=f"Error during meta-training batch computation in epoch {epoch}",
+                        step=self._total_updates,
+                        epoch=epoch,
+                    )
+                    raise
+
+                # Per-epoch aggregation
+                epoch_time = time.time() - epoch_start
+                epoch_losses_array = (
+                    torch.stack(epoch_losses).detach().cpu().numpy()
+                    if epoch_losses
+                    else np.array([])
+                )
+                train_metrics = {
+                    "meta/loss_mean": float(np.mean(epoch_losses_array))
+                    if len(epoch_losses_array) > 0
+                    else 0.0,
+                    "meta/loss_std": float(np.std(epoch_losses_array))
+                    if len(epoch_losses_array) > 0
+                    else 0.0,
+                    "meta/num_active_tasks": float(len(self.active_tasks)),
+                    "meta/total_updates": float(self._total_updates),
+                    "meta/epoch_time_s": epoch_time,
+                }
+
+                # Evaluation every eval_interval epochs
+                eval_metrics = {}
+                if (epoch + 1) % self.mcfg["eval_interval"] == 0:
+                    try:
+                        median_idx = len(self.env.tasks) // 2
+                        eval_task_id = self.env.tasks[median_idx]
+                        eval_stats = self.meta_evaluator.evaluate(eval_task_id)
+                        eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
+
+                        mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                        if mean_obj > self._best_objective + self.mcfg["min_delta"]:
+                            self._best_objective = mean_obj
+                            self._patience_counter = 0
+                            self.logger.save_checkpoint(
+                                "meta_best",
+                                {
+                                    "network_state": self.meta_agent.network.state_dict(),
+                                    "epoch": epoch + 1,
+                                },
                             )
+                            self.logger.log_event(
+                                "best_checkpoint",
+                                self._total_updates,
+                                objective=f"{mean_obj:.4f}",
+                            )
+                        else:
+                            self._patience_counter += 1
 
-            self._timestep += total_steps
+                        if self._patience_counter >= self.mcfg["patience"]:
+                            stop_reason = "early_stopping"
+                            self.logger.log_event(
+                                "early_stop",
+                                self._total_updates,
+                                patience=self.mcfg["patience"],
+                            )
+                            break
+                    except Exception as e:
+                        self.logger.log_exception(
+                            e,
+                            message=f"Error during evaluation in epoch {epoch}",
+                            step=self._total_updates,
+                            epoch=epoch,
+                        )
+                        raise
 
-            # Build metrics dict
-            metrics = {
-                "train/meta_loss": float(np.mean(task_losses)) if task_losses else 0.0,
-                "train/update_count": float(self._iteration),
-                "num_active_tasks": len(self.active_tasks),
-            }
-            for task_id, task_metric in task_metrics.items():
-                for key, val in task_metric.items():
-                    if (
-                        key != "entropy"
-                    ):  # entropy is just for curriculum, don't log separately
-                        metrics[f"train/task_{task_id}_{key}"] = val
+                # Log all metrics
+                all_metrics = {**train_metrics, **eval_metrics}
+                print_keys = [
+                    "meta/loss_mean",
+                    "meta/num_active_tasks",
+                    "meta/total_updates",
+                ]
+                if eval_metrics:
+                    print_keys.extend(["eval/mean_objective"])
+                    if "eval/mean_service_rate" in eval_metrics:
+                        print_keys.append("eval/mean_service_rate")
+                    if "eval/mean_cost" in eval_metrics:
+                        print_keys.append("eval/mean_cost")
 
-            metrics["iter_time_s"] = time.time() - iter_start
-
-            if self._iteration % self.tcfg["log_interval"] == 0:
                 self.logger.log_metrics(
-                    metrics,
-                    step=self._timestep,
-                    print_keys=[
-                        "train/meta_loss",
-                        "train/update_count",
-                        "num_active_tasks",
-                    ],
+                    all_metrics,
+                    step=self._total_updates,
+                    print_keys=print_keys,
                 )
 
-            if self._iteration % self.tcfg["eval_interval"] == 0:
-                # Get median task for evaluation
-                median_idx = len(self.env.tasks) // 2
-                eval_task_id = self.env.tasks[median_idx]
-                eval_stats = self.evaluator.evaluate(eval_task_id)
-                self.logger.log_metrics(eval_stats, step=self._timestep, prefix="eval")
-
-                mean_obj = eval_stats.get("mean_objective", float("-inf"))
-                if mean_obj > self._best_objective + self.tcfg["min_delta"]:
-                    self._best_objective = mean_obj
-                    self._patience_counter = 0
-                    self.logger.save_checkpoint(
-                        "meta_best",
-                        {
-                            "network_state": self.agent.policy.state_dict(),
-                            "iteration": self._iteration,
-                        },
-                    )
-                    self.logger.log_event(
-                        "best_checkpoint", self._timestep, objective=f"{mean_obj:.4f}"
-                    )
-                else:
-                    self._patience_counter += 1
-
-                if self._patience_counter >= self.tcfg["patience"]:
-                    stop_reason = "early_stopping"
-                    self.logger.log_event(
-                        "early_stop", self._timestep, patience=self.tcfg["patience"]
-                    )
-                    break
+        except Exception as e:
+            stop_reason = "error"
+            self.logger.log_exception(
+                e,
+                message="Fatal error during meta-training",
+                step=self._total_updates,
+                epoch=epoch,
+            )
+            raise
 
         summary = {
             "stop_reason": stop_reason,
-            "total_iterations": self._iteration,
-            "total_timesteps": self._timestep,
+            "total_epochs": epoch + 1,
+            "total_updates": self._total_updates,
             "best_objective": self._best_objective,
             "training_time_s": round(time.time() - start_time, 1),
             "final_num_active_tasks": len(self.active_tasks),
@@ -322,115 +376,203 @@ class MetaTrainer(BaseTrainer):
         self.logger.save_checkpoint(
             "meta_final",
             {
-                "network_state": self.agent.policy.state_dict(),
-                "iteration": self._iteration,
+                "network_state": self.meta_agent.network.state_dict(),
+                "epoch": epoch + 1,
             },
         )
-        self.logger.log_event("meta_training_complete", self._timestep, **summary)
+        self.logger.log_event("meta_training_complete", self._total_updates, **summary)
         return summary
 
     def fine_tune(self) -> Dict[str, Any]:
         """Fine-tune policy on each task independently after meta-training.
 
-        Uses the agent from fine_tuning phase to adapt the meta-learned policy
-        to each task independently.
+        Uses the tune_agent to adapt the meta-learned policy
+        to each task independently using PPO-style optimization.
         """
         self._print_header_tune()
         start_time = time.time()
-        agent = self.agents["agent"]
+        agent = self.tune_agent
 
-        total_iterations = 0
-        total_timesteps = 0
+        total_epochs = 0
         best_objective = float("-inf")
+        task_summaries = {}
 
-        for task_id in self.env.tasks:
-            self._print_header_task(task_id)
-            task_timestep = 0
-            task_iteration = 0
-            task_best_objective = float("-inf")
-            task_patience_counter = 0
-            stop_reason = "timestep_limit"
+        try:
+            for task_id in self.env.tasks:
+                self._print_header_task(task_id)
+                task_best_objective = float("-inf")
+                task_patience_counter = 0
+                epoch = -1
 
-            while task_timestep < self.tcfg["total_timesteps"]:
-                iter_start = time.time()
-                task_iteration += 1
+                try:
+                    for epoch in range(self.fcfg["epochs"]):
+                        epoch_start = time.time()
+                        epoch_losses = []
+                        epoch_grad_norms = []
 
-                # Collect and update on this task
-                self.env.reset(task_id)
-                buf = agent.collect(self.env)
-                loss = self._compute_ppo_loss(
-                    agent.policy, buf, gamma=self.fcfg["discount_factor"]
-                )
-                agent.update(loss)
-                task_timestep += buf._ptr
+                        try:
+                            for batch_idx in range(self.fcfg["batches_per_epoch"]):
+                                # Collect trajectory
+                                self.env.retask(task_id)
+                                batch = self.collector.collect(agent, self.env)
 
-                metrics = {
-                    "tune/loss": float(loss.item()),
-                    "iter_time_s": time.time() - iter_start,
+                                # Update agent with collected batch
+                                metrics = agent.update(batch)
+                                self._total_updates += 1
+                                loss_val = metrics.get("loss", 0.0)
+                                loss_val = (
+                                    loss_val.detach()
+                                    if isinstance(loss_val, torch.Tensor)
+                                    else loss_val
+                                )
+                                epoch_losses.append(float(loss_val))
+                                grad_norm_val = metrics.get("grad_norm", -1.0)
+                                grad_norm_val = (
+                                    grad_norm_val.detach()
+                                    if isinstance(grad_norm_val, torch.Tensor)
+                                    else grad_norm_val
+                                )
+                                epoch_grad_norms.append(float(grad_norm_val))
+                        except Exception as e:
+                            self.logger.log_exception(
+                                e,
+                                message=f"Error during batch collection/update for task {task_id} in epoch {epoch}",
+                                step=self._total_updates,
+                                task=str(task_id),
+                                epoch=epoch,
+                            )
+                            raise
+
+                        # Per-epoch aggregation
+                        epoch_time = time.time() - epoch_start
+                        train_metrics = {
+                            "tune/loss_mean": float(np.mean(epoch_losses))
+                            if epoch_losses
+                            else 0.0,
+                            "tune/loss_std": float(np.std(epoch_losses))
+                            if epoch_losses
+                            else 0.0,
+                            "tune/grad_norm_mean": float(np.mean(epoch_grad_norms))
+                            if epoch_grad_norms
+                            else 0.0,
+                            "tune/grad_norm_max": float(np.max(epoch_grad_norms))
+                            if epoch_grad_norms
+                            else 0.0,
+                            "tune/total_updates": float(self._total_updates),
+                            "tune/epoch_time_s": epoch_time,
+                        }
+
+                        # Evaluation
+                        eval_metrics = {}
+                        if (epoch + 1) % self.fcfg["eval_interval"] == 0:
+                            try:
+                                eval_stats = self.fine_evaluator.evaluate(task_id)
+                                eval_metrics = {
+                                    f"eval/{k}": v for k, v in eval_stats.items()
+                                }
+
+                                mean_obj = eval_stats.get(
+                                    "mean_objective", float("-inf")
+                                )
+                                if (
+                                    mean_obj
+                                    > task_best_objective + self.fcfg["min_delta"]
+                                ):
+                                    task_best_objective = mean_obj
+                                    task_patience_counter = 0
+                                    self.logger.save_checkpoint(
+                                        f"tune_best_{task_id}",
+                                        {
+                                            "network_state": agent.network.state_dict(),
+                                            "epoch": epoch + 1,
+                                        },
+                                    )
+                                    self.logger.log_event(
+                                        "tune_best_checkpoint",
+                                        self._total_updates,
+                                        task=task_id,
+                                        objective=f"{mean_obj:.4f}",
+                                    )
+                                else:
+                                    task_patience_counter += 1
+
+                                if task_patience_counter >= self.fcfg["patience"]:
+                                    self.logger.log_event(
+                                        "tune_early_stop",
+                                        self._total_updates,
+                                        task=task_id,
+                                        patience=self.fcfg["patience"],
+                                    )
+                                    break
+                            except Exception as e:
+                                self.logger.log_exception(
+                                    e,
+                                    message=f"Error during evaluation for task {task_id} in epoch {epoch}",
+                                    step=self._total_updates,
+                                    task=str(task_id),
+                                    epoch=epoch,
+                                )
+                                raise
+
+                        # Log all metrics
+                        all_metrics = {**train_metrics, **eval_metrics}
+                        print_keys = [
+                            "tune/loss_mean",
+                            "tune/grad_norm_mean",
+                            "tune/total_updates",
+                        ]
+                        if eval_metrics:
+                            print_keys.append("eval/mean_objective")
+                            if "eval/mean_service_rate" in eval_metrics:
+                                print_keys.append("eval/mean_service_rate")
+                            if "eval/mean_cost" in eval_metrics:
+                                print_keys.append("eval/mean_cost")
+
+                        self.logger.log_metrics(
+                            all_metrics,
+                            step=self._total_updates,
+                            print_keys=print_keys,
+                        )
+                except Exception as e:
+                    self.logger.log_exception(
+                        e,
+                        message=f"Error during fine-tuning epoch loop for task {task_id}",
+                        step=self._total_updates,
+                        task=str(task_id),
+                    )
+                    raise
+
+                best_objective = max(best_objective, task_best_objective)
+                total_epochs += epoch + 1
+                task_summaries[task_id] = {
+                    "best_objective": float(task_best_objective),
+                    "epochs_completed": epoch + 1,
                 }
 
-                if task_iteration % self.tcfg["log_interval"] == 0:
-                    self.logger.log_metrics(
-                        metrics,
-                        step=task_timestep,
-                        print_keys=["tune/loss"],
-                    )
-
-                if task_iteration % self.tcfg["eval_interval"] == 0:
-                    eval_stats = self.evaluator.evaluate(task_id)
-                    self.logger.log_metrics(
-                        eval_stats, step=task_timestep, prefix="tune_eval"
-                    )
-
-                    mean_obj = eval_stats.get("mean_objective", float("-inf"))
-                    if mean_obj > task_best_objective + self.tcfg["min_delta"]:
-                        task_best_objective = mean_obj
-                        task_patience_counter = 0
-                        self.logger.save_checkpoint(
-                            f"tune_best_{task_id}",
-                            {
-                                "network_state": self.agent.policy.state_dict(),
-                                "iteration": self._iteration,
-                            },
-                        )
-                        self.logger.log_event(
-                            "tune_best_checkpoint",
-                            task_timestep,
-                            task=task_id,
-                            objective=f"{mean_obj:.4f}",
-                        )
-                    else:
-                        task_patience_counter += 1
-
-                    if task_patience_counter >= self.tcfg["patience"]:
-                        stop_reason = "early_stopping"
-                        self.logger.log_event(
-                            "tune_early_stop",
-                            task_timestep,
-                            task=task_id,
-                            patience=self.tcfg["patience"],
-                        )
-                        break
-
-            total_timesteps += task_timestep
-            total_iterations += task_iteration
-            best_objective = max(best_objective, task_best_objective)
-            self.logger.save_checkpoint(
-                f"tune_final_{task_id}",
-                {
-                    "network_state": self.agent.policy.state_dict(),
-                    "iteration": self._iteration,
-                },
+                self.logger.save_checkpoint(
+                    f"tune_final_{task_id}",
+                    {
+                        "network_state": agent.network.state_dict(),
+                        "epoch": epoch + 1,
+                    },
+                )
+        except Exception as e:
+            self.logger.log_exception(
+                e,
+                message="Fatal error during fine-tuning",
+                step=self._total_updates,
             )
+            raise
 
         summary = {
             "stop_reason": "completed",
-            "total_iterations": total_iterations,
-            "total_timesteps": total_timesteps,
+            "total_epochs": total_epochs,
+            "total_updates": self._total_updates,
             "best_objective": best_objective,
             "training_time_s": round(time.time() - start_time, 1),
+            "task_summaries": task_summaries,
         }
-        self.logger.log_event("fine_tuning_complete", total_timesteps, **summary)
+        self.logger.log_event("fine_tuning_complete", self._total_updates, **summary)
         return summary
 
     def _print_header_tune(self) -> None:
@@ -438,146 +580,69 @@ class MetaTrainer(BaseTrainer):
             f"\n{'=' * 64}\n"
             f"  Fine-Tuning Phase\n"
             f"  Tasks: {len(self.env.tasks)}\n"
-            f"  Budget/task: {self.tcfg['total_timesteps']:,} steps\n"
+            f"  Epochs/task: {self.fcfg['epochs']} × {self.fcfg['batches_per_epoch']} batches\n"
             f"{'=' * 64}"
         )
 
-    def _compute_ppo_loss(
+    def _compute_task_losses(
         self,
-        policy: "BasePolicy",
-        buffer: RolloutBuffer,
-        clip_ratio: float = 0.2,
-        value_coef: float = 0.5,
-        entropy_coef: float = 0.01,
-        gamma: float = 0.99,
-    ) -> torch.Tensor:
-        """Compute PPO loss from buffer of transitions with discount factor."""
-        n = buffer._ptr
-        if n == 0:
-            return torch.tensor(0.0, device=DEVICE, requires_grad=True)
-
-        # Compute returns (discounted cumulative)
-        returns = []
-        cumsum = 0.0
-        for t in reversed(range(n)):
-            tr = buffer._data[t]
-            cumsum = tr.reward + gamma * cumsum * (1.0 - float(tr.done))
-            returns.insert(0, cumsum)
-        returns = np.array(returns)
-
-        # Compute advantages
-        baseline = float(np.mean(returns))
-        advantages = returns - baseline
-
-        total_loss = None
-        for i, tr in enumerate(buffer._data[:n]):
-            obs_t = obs_to_tensor(tr.obs, DEVICE)
-            act_t = torch.tensor([tr.action], dtype=torch.long, device=DEVICE)
-            mask_t = torch.tensor(
-                tr.action_mask, dtype=torch.bool, device=DEVICE
-            ).unsqueeze(0)
-            adv = torch.tensor(advantages[i], dtype=torch.float32, device=DEVICE)
-            ret = torch.tensor(returns[i], dtype=torch.float32, device=DEVICE)
-            # Handle both tensor and float log_prob
-            if isinstance(tr.log_prob, torch.Tensor):
-                old_log_prob = tr.log_prob.to(DEVICE)
-            else:
-                old_log_prob = torch.tensor(
-                    tr.log_prob, dtype=torch.float32, device=DEVICE
-                )
-
-            # Evaluate current policy
-            log_prob, value, entropy = policy.evaluate_actions(obs_t, act_t, mask_t)
-
-            # PPO clipped objective
-            ratio = torch.exp(log_prob - old_log_prob)
-            surr1 = ratio * adv
-            surr2 = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * adv
-            policy_loss = -torch.min(surr1, surr2)
-
-            # Value loss
-            value_loss = 0.5 * torch.nn.functional.mse_loss(value, ret)
-
-            # Entropy bonus
-            entropy_loss = -entropy
-
-            loss_i = (
-                policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
-            ) / n
-            total_loss = loss_i if total_loss is None else total_loss + loss_i
-
-        return (
-            total_loss
-            if total_loss is not None
-            else torch.tensor(0.0, device=DEVICE, requires_grad=True)
-        )
-
-    def _compute_meta_loss(
-        self,
-    ) -> Tuple[torch.Tensor, List[float], Dict[Any, Dict[str, float]], int]:
-        """Compute second-order meta-loss across all active tasks.
+    ) -> Tuple[torch.Tensor, Dict[Any, Dict[str, float]]]:
+        """Compute task losses across all active tasks using MAML inner/outer loop.
 
         For each active task:
-          1. Collect support buffer with meta_agent
-          2. Adapt sub_agent on support buffer
-          3. Collect query buffer with adapted sub_agent
-          4. Compute query loss and entropy on adapted policy
+          1. Clone sub_agent from meta_agent (fresh copy)
+          2. Inner loop: collect support set, adapt sub_agent on support
+          3. Outer loop: collect query set, evaluate adapted sub_agent on query
 
         Returns:
-            (meta_loss, task_losses, task_metrics, total_steps)
+            (task_losses_tensor, task_metrics)
         """
-        total_steps = 0
-        task_losses: List[float] = []
+        task_losses: List[torch.Tensor] = []
         task_metrics: Dict[Any, Dict[str, float]] = {}
-
-        n_active_tasks = len(self.active_tasks)
-        meta_loss = None
 
         # Process each active task
         for task_id in self.active_tasks:
-            # Support: collect with meta_agent
-            self.env.reset(task_id)
-            buf = self.agent.collect(self.env)
-            support_loss = self._compute_ppo_loss(
-                self.agent.policy, buf, gamma=self.mcfg["discount_factor"]
+            # Clone meta_agent to sub_agent (fresh copy for this task)
+            sub_agent = self.sub_agent
+            sub_agent.clone(self.meta_agent)
+
+            # Inner loop: collect support set and adapt
+            self.env.retask(task_id)
+            support_batch = self.collector.collect(sub_agent, self.env)
+            support_metrics = sub_agent.update(support_batch)
+            support_loss = support_metrics.get("loss", torch.tensor(0.0, device=DEVICE))
+            support_loss_tensor = (
+                support_loss
+                if isinstance(support_loss, torch.Tensor)
+                else torch.tensor(support_loss, device=DEVICE)
             )
-            total_steps += buf._ptr
 
-            # Adapt: clone sub_agent with meta_agent's policy, then update on support buffer
-            sub_agent = self.agents["sub_agent"]
-            sub_agent.clone_policy(self.agent)
-            sub_agent.update(support_loss)
-
-            # Query: collect with adapted sub_agent
-            self.env.reset(task_id)
-            buf = sub_agent.collect(self.env)
-            query_loss = self._compute_ppo_loss(
-                sub_agent.policy, buf, gamma=self.mcfg["discount_factor"]
+            # Outer loop: collect query set and evaluate
+            self.env.retask(task_id)
+            query_batch = self.collector.collect(sub_agent, self.env)
+            query_metrics = sub_agent.update(query_batch)
+            query_loss = query_metrics.get("loss", torch.tensor(0.0, device=DEVICE))
+            query_loss_tensor = (
+                query_loss
+                if isinstance(query_loss, torch.Tensor)
+                else torch.tensor(query_loss, device=DEVICE)
             )
-            total_steps += buf._ptr
 
-            task_losses.append(query_loss.item())
+            task_losses.append(query_loss_tensor)
+
+            # Compute mean entropy from query batch for curriculum learning
+            entropy = 0.0
+            if "entropies" in query_batch:
+                entropy = float(query_batch["entropies"].mean().item())
+
             task_metrics[task_id] = {
-                "support_loss": support_loss.item(),
-                "query_loss": query_loss.item(),
-                "improvement": (support_loss.item() - query_loss.item()),
-                "entropy": sub_agent.policy.compute_entropy(buf),
+                "support_loss": support_loss_tensor.item(),
+                "query_loss": query_loss_tensor.item(),
+                "improvement": (support_loss_tensor - query_loss_tensor).item(),
+                "entropy": entropy,
             }
 
-            # Accumulate meta-loss
-            if meta_loss is None:
-                meta_loss = query_loss / n_active_tasks
-            else:
-                meta_loss = meta_loss + query_loss / n_active_tasks
-
-        return (
-            meta_loss
-            if meta_loss is not None
-            else torch.tensor(0.0, device=DEVICE, requires_grad=True),
-            task_losses,
-            task_metrics,
-            total_steps,
-        )
+        return torch.stack(task_losses), task_metrics
 
     def _print_header(self) -> None:
         active_task_ids = sorted(self.active_tasks)
@@ -586,7 +651,8 @@ class MetaTrainer(BaseTrainer):
             f"\n{'=' * 64}\n"
             f"  Algorithm  : MAML (Meta-Learning)\n"
             f"  Tasks      : {active_task_ids} (of {total_tasks} total)\n"
-            f"  Budget     : {self.tcfg['total_timesteps']:,} steps\n"
+            f"  Meta       : {self.mcfg['epochs']} epochs × {self.mcfg['batches_per_epoch']} batches\n"
+            f"  Fine-tune  : {self.fcfg['epochs']} epochs × {self.fcfg['batches_per_epoch']} batches\n"
             f"  Device     : {DEVICE}\n"
             f"{'=' * 64}"
         )
@@ -595,8 +661,8 @@ class MetaTrainer(BaseTrainer):
         print(
             f"\n{'=' * 64}\n"
             f"  Done ({summary['stop_reason']})\n"
-            f"  Iterations : {summary['total_iterations']:,}\n"
-            f"  Timesteps  : {summary['total_timesteps']:,}\n"
+            f"  Updates    : {summary['total_updates']:,}\n"
+            f"  Epochs     : {summary['total_epochs']:,}\n"
             f"  Best Obj   : {summary['best_objective']:.4f}\n"
             f"  Time       : {summary['training_time_s']:.1f}s\n"
             f"{'=' * 64}\n"
@@ -613,20 +679,16 @@ class MetaTrainer(BaseTrainer):
 
 class POMOTrainer(BaseTrainer):
     """
-    POMO trainer: policy optimization with multiple optima.
+    POMOTrainer: Policy Optimization with Multiple Optima.
 
-    Collects complete episodes from multiple candidate starting points for each instance,
-    then uses REINFORCEEstimator to compute policy gradients with a baseline.
-    This encourages the policy to find good solutions regardless of starting point.
+    Trains a separate sub-policy for each task independently using POMO collection.
+    For each task:
+      - Collect episodes from multiple starting points per instance
+      - Compute policy gradients via POMOAgent
+      - Train for N epochs with early stopping and checkpointing
 
-    Collection strategy (POMO):
-      - For each instance: get candidate starting states via env.get_candidate_starts()
-      - Roll out complete episode from each candidate
-      - Accumulate all transitions into a RolloutBuffer
-
-    Loss computation (delegated to REINFORCEEstimator):
-      - Compute returns and advantage = return - baseline
-      - Loss = -log_prob * advantage
+    Collection: POMOSampler (multiple starting points per task instance)
+    Agent: POMOAgent (empirical advantage = reward - baseline)
     """
 
     def __init__(
@@ -634,40 +696,36 @@ class POMOTrainer(BaseTrainer):
         agents: Dict[str, BaseAgent],
         env: Any,
         trainer_cfg: Dict[str, Any],
-        evaluator: Any,
+        evaluators: Dict[str, Any],
         logger: Any,
+        collector: BaseCollector,
     ):
         self.agents = agents
+        self.train_agent = agents["train_agent"]
         self.env = env
-        self.evaluator = evaluator
+        self.evaluator = evaluators["train_eval"]
         self.logger = logger
+        self.collector = collector
 
         # Setup task iteration from env
         if not env.tasks:
             raise ValueError("POMOTrainer requires env.tasks")
 
-        # Extract config from hierarchical structure
-        phase_cfg = trainer_cfg.get("phase", {})
-        training_phase = phase_cfg.get("training", {})
+        # Extract config from training phase
+        phases_cfg = trainer_cfg.get("phases", {})
+        training_phase = phases_cfg.get("training", {})
         control_cfg = training_phase.get("control", {})
 
-        logging_cfg = control_cfg.get("logging", {})
-
         self.tcfg = {
-            "epochs": int(control_cfg.get("epochs", 100)),
-            "batches_per_epoch": int(control_cfg.get("batches_per_epoch", 10000)),
-            "instances_per_batch": int(control_cfg.get("instances_per_batch", 64)),
-            "eval_instances": int(control_cfg.get("eval_instances", 10000)),
-            "log_interval": int(logging_cfg.get("log_interval", 50)),
-            "checkpoint_interval": int(logging_cfg.get("checkpoint_interval", 10)),
+            "epochs": int(control_cfg["epochs"]),
+            "batches_per_epoch": int(control_cfg["batches_per_epoch"]),
+            "instances_per_batch": int(control_cfg["instances_per_batch"]),
+            "eval_interval": int(control_cfg.get("eval_interval", 1)),
+            "checkpoint_interval": int(control_cfg["checkpoint_interval"]),
         }
 
-        self.pcfg = {
-            "discount_factor": float(training_phase.get("discount_factor", 0.99)),
-        }
-
-        self._timestep = 0
-        self._iteration = 0
+        self._total_updates = 0
+        self._total_instances = 0
 
     @classmethod
     def from_config(
@@ -675,236 +733,247 @@ class POMOTrainer(BaseTrainer):
         trainer_cfg: Dict[str, Any],
         agents: Dict[str, BaseAgent],
         env: Any,
-        evaluator: Any,
+        evaluators: Dict[str, Any],
         logger: Any,
+        collector: BaseCollector,
     ) -> "POMOTrainer":
         return cls(
             agents=agents,
             env=env,
             trainer_cfg=trainer_cfg,
-            evaluator=evaluator,
+            evaluators=evaluators,
             logger=logger,
+            collector=collector,
         )
 
     def train(self) -> Dict[str, Any]:
-        """Run POMO training loop with epoch-based batch training per task."""
+        """Run POMO training loop with epoch-based batch training per task.
+
+        For each task:
+          - Train for N epochs, accumulating returns from all POMO starting points
+          - Log per-epoch aggregated statistics (mean/std/percentiles)
+          - Evaluate using self.evaluator every eval_interval epochs
+          - Track best objective and save checkpoints
+        """
         start_time = time.time()
         self._print_header()
-        agent = self.agents["agent"]
+        agent = self.train_agent
 
         epochs = self.tcfg["epochs"]
         batches_per_epoch = self.tcfg["batches_per_epoch"]
         instances_per_batch = self.tcfg["instances_per_batch"]
-        eval_instances = self.tcfg["eval_instances"]
-        log_interval = self.tcfg["log_interval"]
+        eval_interval = self.tcfg["eval_interval"]
         checkpoint_interval = self.tcfg["checkpoint_interval"]
+
+        all_task_summaries = {}
 
         for task_id in self.env.tasks:
             self._print_header_task(task_id)
-            self.env.retask(task_id)  # Set up environment for this task
+            self.env.retask(task_id)
+
+            best_objective = float("-inf")
+            best_epoch = -1
 
             for epoch in range(epochs):
                 epoch_start = time.time()
                 epoch_losses = []
                 epoch_returns = []
-                grad_norm = -1.0
+                epoch_grad_norms = []
 
+                # Training phase: accumulate statistics across all batches
                 for batch_idx in range(batches_per_epoch):
-                    batch_loss = None
-                    batch_returns = []
-                    # Accumulate loss over instances in batch
+                    batch_log_probs = []  # List of tensors, one per instance
+                    batch_rewards = []    # List of tensors, one per instance
+
                     for _ in range(instances_per_batch):
                         self.env.retask(task_id)
+                        batch_data = self.collector.collect(agent, self.env)
+                        # Stack episodes for this instance
+                        if batch_data["log_probs"]:
+                            instance_log_probs = torch.stack(
+                                [torch.as_tensor(lp, device=DEVICE) for lp in batch_data["log_probs"]]
+                            )
+                            instance_rewards = torch.tensor(
+                                batch_data["rewards"], dtype=torch.float32, device=DEVICE
+                            )
+                            batch_log_probs.append(instance_log_probs)
+                            batch_rewards.append(instance_rewards)
 
-                        loss, episode_returns, _ = self._compute_pomo_loss(agent)
-                        batch_returns.extend(episode_returns)
-
-                        if batch_loss is None:
-                            batch_loss = loss
-                        else:
-                            batch_loss = batch_loss + loss
-
-                    # Update after each batch
-                    if batch_loss is not None:
-                        batch_avg_loss = batch_loss / instances_per_batch
-                        grad_norm = agent.update(batch_avg_loss)
-                    else:
-                        batch_avg_loss = None
-
-                    epoch_losses.append(
-                        float(batch_avg_loss.item())
-                        if batch_avg_loss is not None
-                        else 0.0
-                    )
-                    epoch_returns.extend(batch_returns)
-
-                    # Logging
-                    if (batch_idx + 1) % log_interval == 0:
-                        avg_loss = float(
-                            np.mean(epoch_losses[-(log_interval):])
-                            if epoch_losses
-                            else 0.0
-                        )
-                        avg_return = (
-                            float(np.mean(batch_returns)) if batch_returns else 0.0
-                        )
-                        metrics = {
-                            "train/batch_avg_loss": avg_loss,
-                            "train/batch_avg_return": avg_return,
-                            "train/grad_norm": grad_norm,
+                    # Update after batch
+                    if batch_log_probs:
+                        batch = {
+                            "log_probs": batch_log_probs,  # List of (num_starting_points,) tensors
+                            "rewards": batch_rewards,       # List of (num_starting_points,) tensors
                         }
-                        global_step = (
-                            self._iteration + epoch * batches_per_epoch + batch_idx + 1
+                        metrics = agent.update(batch)
+                        loss_val = metrics.get("loss", 0.0)
+                        loss_val = (
+                            loss_val.detach()
+                            if isinstance(loss_val, torch.Tensor)
+                            else loss_val
                         )
-                        self.logger.log_metrics(
-                            metrics,
-                            step=global_step,
-                            print_keys=[
-                                "train/batch_loss",
-                                "train/batch_avg_return",
-                                "train/grad_norm",
-                            ],
+                        epoch_losses.append(float(loss_val))
+                        grad_norm_val = metrics.get("grad_norm", -1.0)
+                        grad_norm_val = (
+                            grad_norm_val.detach()
+                            if isinstance(grad_norm_val, torch.Tensor)
+                            else grad_norm_val
                         )
-
-                # Evaluate after each epoch
-                eval_loss = None
-                eval_returns = []
-                for _ in range(eval_instances):
-                    self.env.retask(task_id)
-                    self.env.reset()
-
-                    loss, episode_returns, _ = self._compute_pomo_loss(agent)
-                    if eval_loss is None:
-                        eval_loss = loss
+                        epoch_grad_norms.append(float(grad_norm_val))
+                        self._total_updates += 1
                     else:
-                        eval_loss = eval_loss + loss
-                    eval_returns.extend(episode_returns)
+                        epoch_losses.append(0.0)
 
-                eval_metrics = {
-                    "eval/epoch_loss": float(eval_loss.item())
-                    if eval_loss is not None
+                    # Flatten instance rewards (list of tensors) into epoch_returns
+                    for instance_rewards in batch_rewards:
+                        if isinstance(instance_rewards, torch.Tensor):
+                            epoch_returns.extend(instance_rewards.detach().cpu().tolist())
+                        else:
+                            epoch_returns.extend(instance_rewards)
+                    self._total_instances += instances_per_batch
+
+                # Compute per-epoch training statistics
+                epoch_time = time.time() - epoch_start
+                train_returns = np.array(epoch_returns)
+
+                train_metrics = {
+                    "train/loss_mean": float(np.mean(epoch_losses))
+                    if epoch_losses
                     else 0.0,
-                    "eval/avg_return": float(np.mean(eval_returns))
-                    if eval_returns
+                    "train/loss_std": float(np.std(epoch_losses))
+                    if epoch_losses
                     else 0.0,
-                    "eval/std_return": float(np.std(eval_returns))
-                    if eval_returns
+                    "train/return_mean": float(np.mean(train_returns))
+                    if len(train_returns) > 0
                     else 0.0,
+                    "train/return_std": float(np.std(train_returns))
+                    if len(train_returns) > 0
+                    else 0.0,
+                    "train/return_p10": float(np.percentile(train_returns, 10))
+                    if len(train_returns) > 0
+                    else 0.0,
+                    "train/return_p50": float(np.percentile(train_returns, 50))
+                    if len(train_returns) > 0
+                    else 0.0,
+                    "train/return_p90": float(np.percentile(train_returns, 90))
+                    if len(train_returns) > 0
+                    else 0.0,
+                    "train/grad_norm_mean": float(np.mean(epoch_grad_norms))
+                    if epoch_grad_norms
+                    else 0.0,
+                    "train/grad_norm_max": float(np.max(epoch_grad_norms))
+                    if epoch_grad_norms
+                    else 0.0,
+                    "train/total_updates": float(self._total_updates),
+                    "train/total_instances": float(self._total_instances),
+                    "train/epoch_time_s": epoch_time,
                 }
+
+                # Evaluation
+                eval_metrics = {}
+                if (epoch + 1) % eval_interval == 0:
+                    eval_stats = self.evaluator.evaluate(task_id)
+                    eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
+
+                    # Track best objective
+                    mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                    if mean_obj > best_objective:
+                        best_objective = mean_obj
+                        best_epoch = epoch + 1
+                        self.logger.save_checkpoint(
+                            f"{task_id}_best",
+                            {
+                                "network_state": agent.network.state_dict(),
+                                "epoch": epoch + 1,
+                                "mean_objective": mean_obj,
+                            },
+                        )
+                        self.logger.log_event(
+                            "best_checkpoint",
+                            self._total_updates,
+                            task=task_id,
+                            epoch=epoch + 1,
+                            objective=f"{mean_obj:.4f}",
+                        )
+
+                # Log all metrics
+                all_metrics = {**train_metrics, **eval_metrics}
+                print_keys = [
+                    "train/loss_mean",
+                    "train/return_mean",
+                    "train/return_std",
+                    "train/grad_norm_mean",
+                ]
+                if eval_metrics:
+                    print_keys.extend(
+                        [
+                            "eval/mean_objective",
+                            "eval/std_objective",
+                        ]
+                    )
+                    if "eval/mean_cost" in eval_metrics:
+                        print_keys.append("eval/mean_cost")
+                    if "eval/mean_service_rate" in eval_metrics:
+                        print_keys.append("eval/mean_service_rate")
+
                 self.logger.log_metrics(
-                    eval_metrics,
-                    step=self._iteration + (epoch + 1) * batches_per_epoch,
-                    print_keys=["eval/epoch_loss", "eval/avg_return"],
+                    all_metrics,
+                    step=self._total_updates,
+                    print_keys=print_keys,
                 )
 
-                # Checkpoint
+                # Periodic checkpoint
                 if (epoch + 1) % checkpoint_interval == 0:
-                    agent = self.agents["agent"]
                     self.logger.save_checkpoint(
                         f"{task_id}_epoch_{epoch + 1}",
                         {
-                            "network_state": agent.policy.state_dict(),
-                            "iteration": self._iteration,
+                            "network_state": agent.network.state_dict(),
+                            "epoch": epoch + 1,
                         },
                     )
 
-                epoch_time = time.time() - epoch_start
-                print(
-                    f"[Task {task_id}] Epoch {epoch + 1}/{epochs} - Time: {epoch_time:.1f}s"
-                )
-
-            agent = self.agents["agent"]
+            # Final checkpoint for task
             self.logger.save_checkpoint(
                 f"{task_id}_final",
                 {
-                    "network_state": agent.policy.state_dict(),
-                    "iteration": self._iteration,
+                    "network_state": agent.network.state_dict(),
+                    "epoch": epochs,
                 },
             )
-            self._iteration += epochs * batches_per_epoch
 
+            task_summary = {
+                "best_objective": float(best_objective),
+                "best_epoch": best_epoch,
+                "final_epoch": epochs,
+            }
+            all_task_summaries[task_id] = task_summary
+            self.logger.log_event(
+                "task_complete",
+                self._total_updates,
+                task=task_id,
+                **task_summary,
+            )
+
+        # Experiment summary
         summary = {
             "stop_reason": "completed",
-            "total_iterations": self._iteration,
-            "total_timesteps": self._timestep,
+            "total_updates": self._total_updates,
+            "total_instances": self._total_instances,
             "training_time_s": round(time.time() - start_time, 1),
+            "task_summaries": all_task_summaries,
         }
-        self.logger.log_event("training_complete", self._timestep, **summary)
+
+        self.logger.log_event(
+            "training_complete",
+            self._total_updates,
+            total_updates=self._total_updates,
+            total_instances=self._total_instances,
+            training_time_s=summary["training_time_s"],
+        )
+        self.logger.save_summary(summary)
         self.logger.close()
         self._print_footer(summary)
         return summary
-
-    def _compute_pomo_loss(
-        self, agent: BaseAgent
-    ) -> Tuple[torch.Tensor, List[float], int]:
-        """Compute POMO loss for a task.
-
-        For each feasible starting action:
-          - Collect complete episode, accumulating log probabilities
-          - Get final solution objective value
-          - Compute advantage = objective - baseline
-          - Compute loss = -episode_log_prob * advantage
-
-        Returns:
-            (loss, episode_returns, n_episodes)
-        """
-        obs, info = self.env.reset()
-
-        # Get log probabilities for all feasible starting actions
-        action_log_probs = agent.action_to_log_prob(obs, info["action_mask"])
-
-        if len(action_log_probs) == 0:
-            # No feasible starting actions
-            return torch.tensor(0.0, device=DEVICE, requires_grad=True), [], 0
-
-        episode_returns = []
-        episode_log_probs = []
-        n_episodes = 0
-
-        for starting_action in action_log_probs.keys():
-            obs, info = self.env.reset()
-
-            # First step with starting action
-            episode_log_prob = action_log_probs[int(starting_action)]
-            next_obs, _, terminated, truncated, next_info = self.env.step(
-                int(starting_action)
-            )
-
-            if not terminated and not truncated and next_info["action_mask"].any():
-                obs = next_obs
-                mask = next_info["action_mask"]
-
-                # Collect trajectory, accumulating log probabilities
-                while True:
-                    action, lp, _ = agent.select_action(obs, mask, training=True)
-                    episode_log_prob = episode_log_prob + lp
-                    next_obs, _, terminated, truncated, info = self.env.step(action)
-
-                    if terminated or truncated or not info["action_mask"].any():
-                        break
-
-                    obs = next_obs
-                    mask = info["action_mask"]
-
-            # Get final solution quality (negated and normalized)
-            n_episodes += 1
-            episode_return = self.env.compute_return()
-
-            episode_returns.append(episode_return)
-            episode_log_probs.append(episode_log_prob)
-
-        # Compute baseline and per-episode advantages
-        baseline = float(np.mean(episode_returns)) if episode_returns else 0.0
-        advantages = np.array(episode_returns) - baseline
-
-        # Compute POMO loss: -sum(log_probs_in_episode) * advantage_episode
-        episode_log_probs_tensor = torch.stack(episode_log_probs)
-        advantages_tensor = torch.tensor(advantages, dtype=torch.float32, device=DEVICE)
-        total_loss = (
-            -torch.sum(episode_log_probs_tensor * advantages_tensor) / n_episodes
-        )
-
-        return total_loss, episode_returns, n_episodes
 
     def _print_header(self) -> None:
         print(
@@ -922,8 +991,8 @@ class POMOTrainer(BaseTrainer):
         print(
             f"\n{'=' * 64}\n"
             f"  Done ({summary['stop_reason']})\n"
-            f"  Iterations : {summary['total_iterations']:,}\n"
-            f"  Timesteps  : {summary['total_timesteps']:,}\n"
+            f"  Updates    : {summary['total_updates']:,}\n"
+            f"  Instances  : {summary['total_instances']:,}\n"
             f"  Time       : {summary['training_time_s']:.1f}s\n"
             f"{'=' * 64}\n"
         )

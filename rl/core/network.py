@@ -6,8 +6,7 @@ shared neural network sub-modules reused across architectures.
 
 What lives here
 ---------------
-  BaseNetwork          — abstract interface agents call (forward,
-                         get_action_and_log_prob, evaluate_actions)
+  BaseNetwork          — abstract interface agents call (act, evaluate)
   _MHA                 — multi-head attention (self + cross)
   _FF                  — position-wise feed-forward block
   _InstanceNormWrapper — InstanceNorm1d with the sequence-dim swap
@@ -17,13 +16,12 @@ What lives here
 
 from __future__ import annotations
 
-import math
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-
+import math
 
 # ---------------------------------------------------------------------------
 # Shared sub-modules
@@ -113,22 +111,69 @@ class _FF(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# BaseNetwork  (abstract)
+# Network  (abstract base)
 # ---------------------------------------------------------------------------
 
 
-class BasePolicy(nn.Module, ABC):
+class BaseNetwork(nn.Module, ABC):
+    """
+    Abstract base for all neural network policies.
+
+    Defines the minimal interface that all policy networks must implement.
+
+    Abstract methods:
+    - evaluate: compute logits/values for sampling, or evaluate given actions
+    """
+
+    @abstractmethod
+    def evaluate(
+        self,
+        obs,
+        action_mask: Optional[torch.Tensor] = None,
+        actions: Optional[torch.Tensor] = None,
+        context=None,
+    ) -> Tuple[torch.Tensor, ...]:
+        """
+        Compute logits/values for sampling, or evaluate given actions.
+
+        If actions=None: sample mode
+            Returns (logits, values)
+        If actions provided: evaluation mode
+            Returns (log_probs, values, entropy)
+
+        Args:
+            obs: observation
+            action_mask: (B, action_space) bool mask for valid actions
+            actions: optional (B,) action indices for evaluation
+            context: optional context
+
+        Returns:
+            If actions=None: (logits, values)
+                logits: (B, action_space) float32
+                values: (B,) float32
+            If actions provided: (log_probs, values, entropy)
+                log_probs: (B,) float32
+                values: (B,) float32
+                entropy: (B,) float32
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# ActorCritic  (extends Network)
+# ---------------------------------------------------------------------------
+
+
+class ActorCritic(BaseNetwork):
     """
     Abstract base for all policy + value networks.
 
-    Agents hold a BaseNetwork reference and call only these three methods.
-    Concrete architectures must subclass both nn.Module and BaseNetwork.
+    Concrete architectures must subclass ActorCritic and implement evaluate().
 
     Abstract methods
     ----------------
-    forward               → (logits, value)
-    get_action_and_log_prob → (action, log_prob, value)
-    evaluate_actions      → (log_probs, values, entropy)
+    forward          → (logits, value)
+    evaluate         → (logits, values, entropy) or (log_probs, values, entropy)
     """
 
     # ------------------------------------------------------------------
@@ -151,61 +196,26 @@ class BasePolicy(nn.Module, ABC):
         ...
 
     @abstractmethod
-    def get_action_and_log_prob(
+    def evaluate(
         self,
         obs,
         action_mask: Optional[torch.Tensor] = None,
-        context=None,
-        deterministic: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns
-        -------
-        action   : (B,) int64
-        log_prob : (B,) float32
-        value    : (B,) float32
-        """
-        ...
-
-    @abstractmethod
-    def evaluate_actions(
-        self,
-        obs,
-        actions: torch.Tensor,
-        action_mask: Optional[torch.Tensor] = None,
+        actions: Optional[torch.Tensor] = None,
         context=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Used in PPO update.
+        Compute logits/values for sampling, or evaluate given actions.
 
-        Returns
-        -------
-        log_probs : (B,) float32
-        values    : (B,) float32
-        entropy   : (B,) float32
+        If actions=None: return (logits, values, entropy)
+        If actions provided: return (log_probs, values, entropy)
         """
         ...
-
-    def compute_entropy(self, buffer) -> float:
-        """
-        Compute policy entropy on buffer data for curriculum monitoring.
-
-        Default implementation returns 0.0; override in subclasses for
-        problem-specific entropy metrics.
-
-        Args:
-            buffer: RolloutBuffer with collected transitions
-
-        Returns:
-            scalar entropy value
-        """
-        return 0.0
 
     # ------------------------------------------------------------------
     # Shared helpers available to all subclasses
     # ------------------------------------------------------------------
 
-    def to_device(self, device: str) -> "BasePolicy":
+    def to_device(self, device: str) -> "ActorCritic":
         return self.to(torch.device(device))
 
     @staticmethod

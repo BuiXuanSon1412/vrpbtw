@@ -1,10 +1,8 @@
 # train.yaml
-# Default training composition: Vanilla PPO baseline
+# Default training composition: POMO (Policy Optimization with Multiple Optima)
 #
 # For other training modes, use:
-#   train_base.yaml   - Vanilla PPO
-#   train_pomo.yaml   - POMO with multiple starts
-#   train_meta.yaml   - MAML with curriculum learning
+#   train_meta.yaml   - MAML with curriculum learning and fine-tuning
 
 device: cpu
 
@@ -15,9 +13,9 @@ reproducibility:
     torch_seed: 42
 
 experiment:
-  name: 001_pomo
+  name: "101"
   description: initial experiment
-  
+
 logger:
   base_dir: experiment/train
   verbose: true
@@ -25,5 +23,7 @@ logger:
 
 _include:
   - trainer: trainer/pomo.yaml
-  - policy: policy/hgnn.yaml
+  - network: network/geman.yaml
   - environment: environment/vrpbtw.yaml
+
+

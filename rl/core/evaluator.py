@@ -144,23 +144,21 @@ class Evaluator:
 
         done = False
         while not done:
-            action, _, _ = self.agent.select_action(
-                obs, mask, training=not self.deterministic
-            )
-
-            # The independent decoder samples node and vehicle heads
-            # separately, so the combined flat action may be infeasible
-            # even if each head individually looked feasible.
-            # Remap to a random feasible action when this happens.
+            # Check for feasible actions before calling agent
             feasible = np.where(mask)[0]
             if len(feasible) == 0:
                 break
-            if action not in feasible:
-                action = int(np.random.choice(feasible))
+
+            obs_t = obs_to_tensor(obs, device=DEVICE)
+            mask_t = torch.tensor(mask, dtype=torch.bool, device=DEVICE).unsqueeze(0)
+            action, _, _, _ = self.agent.act(
+                obs_t, mask_t, deterministic=self.deterministic
+            )
+            action = int(action.item())
 
             obs, reward, terminated, truncated, info = self.env.step(action)
             mask = info["action_mask"]
-            ep_reward += reward
+            ep_reward += reward if reward is not None else 0.0
             actions.append(action)
             done = terminated or truncated
 
@@ -230,7 +228,7 @@ class Evaluator:
     def _get_log_probs(self, obs: Any, mask: np.ndarray) -> np.ndarray:
         """Extract per-action log-probabilities from the policy network."""
 
-        network = self.agent.policy
+        network = self.agent.network
         if network is None:
             lp = np.full(len(mask), -1e9, dtype=np.float32)
             lp[mask] = 0.0

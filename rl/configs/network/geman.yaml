@@ -1,0 +1,43 @@
+# network/geman.yaml
+# GEMAN Actor-Critic Policy Configuration
+#
+# Standard Transformer encoder architecture.
+# Both NodeEncoder and VehicleEncoder follow the standard pattern:
+# - Self-attention → Add & Norm
+# - Feed-forward → Add & Norm
+#
+# Encoding order:
+# 1. Node encoding (self-attention + feed-forward only)
+# 2. Vehicle encoding (self-attention + feed-forward only)
+# 3. Graph encoding (multi-relational GNN)
+
+network:
+  name: geman
+  layers:
+    encoder:
+      node_encoder:
+        embedding_dim: 128
+        n_heads: 4
+        n_layers: 3
+        dropout: 0.1
+        use_instance_norm: true
+      vehicle_encoder:
+        embedding_dim: 128
+        n_heads: 4
+        n_layers: 3
+        dropout: 0.1
+        use_instance_norm: true
+      graph_encoder:
+        embedding_dim: 128
+        n_layers: 3
+        dropout: 0.1
+
+    decoder:
+      node_decoder:
+        embedding_dim: 128
+        clip: 10.0
+        activation: relu
+      vehicle_decoder:
+        embedding_dim: 128
+        clip: 10.0
+        activation: relu

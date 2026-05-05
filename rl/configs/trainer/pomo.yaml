@@ -1,39 +1,44 @@
 # trainer/pomo.yaml
-# POMO (Policy Optimization with Multiple Optima) training configuration
+# POMOTrainer: Policy Optimization with Multiple Optima
 #
-# POMO improves policy learning for combinatorial optimization by:
-# - Starting from multiple candidate initial states per instance
-# - Collecting N parallel rollouts from different starting points
-# - Using REINFORCE with shared baseline (advantage = reward - mean_reward)
-# - Provides richer gradient signal and policy invariance
+# POMOTrainer trains a separate sub-policy for each task independently.
+# Each task gets its own policy optimization loop with POMO collection
+# (multiple starting points per instance) and gradient updates.
+
 trainer:
   name: pomo
 
-  phase:
+  collector:
+    name: pomo
+    params: {}
+
+  agents:
+    train_agent:
+      name: pomo
+      learning_rate: 0.001
+      optimizer: adam
+      entropy_coef: 0.01
+      max_grad_norm: 0.5
+    eval_agent:
+      name: pomo
+      learning_rate: 0.001
+      optimizer: adam
+      entropy_coef: 0.01
+      max_grad_norm: 0.5
+
+  evaluators:
+    train_eval:
+      agent: eval_agent
+      n_episodes: 100
+      deterministic: true
+      decoding:
+        beam_width: 1
+
+  phases:
     training:
-      enabled: true
-      
-      discount_factor: 0.999
-      
       control:
         epochs: 100
-        batches_per_epoch: 100
-        instances_per_batch: 10
-        eval_instances: 20
-        logging:
-          log_interval: 1
-          checkpoint_interval: 10
-        evaluation:
-          deterministic: true
-          decoding:
-            beam_width: 1
-
-      agents:
-        agent:
-          name: policy
-          learning_rate: 0.001
-          optimizer: adam
-          rollout_length: 256
-          max_grad_norm: 0.5
-
-      
+        batches_per_epoch: 10
+        instances_per_batch: 5
+        eval_interval: 1
+        checkpoint_interval: 10
