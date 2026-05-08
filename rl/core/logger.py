@@ -118,6 +118,7 @@ class Logger:
         self,
         metrics: Dict[str, Any],
         step: int,
+        total_steps: Optional[int] = None,
         prefix: str = "",
         print_keys: Optional[List[str]] = None,
     ) -> None:
@@ -143,7 +144,8 @@ class Logger:
                     f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
                     for k, v in display.items()
                 )
-                print(f"[{elapsed:7.1f}s | step={step:>9,}]  {row}", flush=True)
+                progress = f"update {step}/{total_steps}" if total_steps else f"update {step}"
+                print(f"[{elapsed:7.1f}s | {progress}]  {row}", flush=True)
 
     def log_event(self, event: str, step: int, **kwargs: Any) -> None:
         entry = {"event": event, "step": step, **kwargs}

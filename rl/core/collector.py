@@ -69,121 +69,6 @@ class BaseCollector(ABC):
 
 
 # ---------------------------------------------------------------------------
-# BaseSequentialCollector
-# ---------------------------------------------------------------------------
-
-
-class BaseSequentialCollector(BaseCollector):
-    """Common logic for sequential rollout-based collectors.
-
-    Subclasses implement _compute_returns() and _compute_advantages()
-    to define their specific advantage estimation method.
-    """
-
-    def __init__(self, rollout_length: int = 256, gamma: float = 0.99):
-        self.rollout_length = rollout_length
-        self.gamma = gamma
-
-    def collect(
-        self,
-        agent: BaseAgent,
-        env: Any,
-    ) -> dict:
-        """Collect complete episodes and return batch dict.
-
-        Args:
-            agent: agent instance
-            env: environment (already initialized with a task)
-
-        Returns:
-            dict with keys: observations, masks, log_probs, advantages, returns, entropies
-        """
-        observations = []
-        masks = []
-        actions = []
-        log_probs = []
-        values = []
-        entropies = []
-        rewards = []
-        dones = []
-
-        obs, info = env.reset()
-        action_mask = info["action_mask"]
-
-        while len(log_probs) < self.rollout_length:
-            obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-            mask_t = torch.tensor(
-                action_mask, dtype=torch.bool, device=globals.DEVICE
-            ).unsqueeze(0)
-            action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
-            action = int(action_t.item())
-
-            next_obs, reward, terminated, truncated, info = env.step(action)
-
-            observations.append(obs_t)
-            masks.append(mask_t)
-            actions.append(action_t)
-            log_probs.append(lp)
-            values.append(val)
-            entropies.append(ent)
-            rewards.append(reward)
-            dones.append(terminated or truncated)
-
-            obs = next_obs
-            action_mask = info["action_mask"]
-
-            if terminated or truncated or not action_mask.any():
-                obs, info = env.get_obs_info()
-                action_mask = info["action_mask"]
-                # Safety: if no feasible actions after reset, break collection
-                if not action_mask.any():
-                    break
-
-        # Convert to tensors
-        observations_tensor = torch.cat(observations, dim=0)
-        masks_tensor = torch.cat(masks, dim=0)
-        actions_tensor = torch.cat(actions, dim=0)
-        log_probs_tensor = torch.stack(log_probs)
-        values_tensor = torch.stack(values)
-        entropies_tensor = torch.stack(entropies)
-        rewards_tensor = torch.tensor(
-            rewards, dtype=torch.float32, device=globals.DEVICE
-        )
-        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=globals.DEVICE)
-
-        # Compute returns and advantages using subclass method
-        returns = self._compute_returns(rewards_tensor, dones_tensor)
-        advantages = self._compute_advantages(values_tensor, returns, dones_tensor)
-
-        return {
-            "observations": observations_tensor,
-            "masks": masks_tensor,
-            "actions": actions_tensor,
-            "log_probs": log_probs_tensor,
-            "advantages": advantages,
-            "returns": returns,
-            "entropies": entropies_tensor,
-        }
-
-    @abstractmethod
-    def _compute_returns(
-        self, rewards: torch.Tensor, dones: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute returns from rewards and done flags."""
-        ...
-
-    @abstractmethod
-    def _compute_advantages(
-        self,
-        values: torch.Tensor,
-        returns: torch.Tensor,
-        dones: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute advantages given values and returns."""
-        ...
-
-
-# ---------------------------------------------------------------------------
 # GAECollector
 # ---------------------------------------------------------------------------
 
@@ -223,7 +108,7 @@ def _compute_gae(
     return advantages, returns
 
 
-class GAECollector(BaseSequentialCollector):
+class GAECollector(BaseCollector):
     """Generalized Advantage Estimation collector.
 
     Computes advantages using exponential-weighted moving average over TD residuals.
@@ -235,7 +120,8 @@ class GAECollector(BaseSequentialCollector):
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
     ):
-        super().__init__(rollout_length, gamma)
+        self.rollout_length = rollout_length
+        self.gamma = gamma
         self.gae_lambda = gae_lambda
 
     @classmethod
@@ -355,11 +241,15 @@ class GAECollector(BaseSequentialCollector):
 # ---------------------------------------------------------------------------
 
 
-class MCCollector(BaseSequentialCollector):
+class MCCollector(BaseCollector):
     """Monte Carlo collector.
 
     Computes returns as discounted sum of rewards. Advantages are return - value.
     """
+
+    def __init__(self, rollout_length: int = 256, gamma: float = 0.99):
+        self.rollout_length = rollout_length
+        self.gamma = gamma
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "MCCollector":
@@ -368,6 +258,78 @@ class MCCollector(BaseSequentialCollector):
             rollout_length=params.get("rollout_length", 256),
             gamma=params.get("gamma", 0.99),
         )
+
+    def collect(
+        self,
+        agent: BaseAgent,
+        env: Any,
+    ) -> dict:
+        """Collect complete episodes and return batch dict."""
+        observations = []
+        masks = []
+        actions = []
+        log_probs = []
+        values = []
+        entropies = []
+        rewards = []
+        dones = []
+
+        obs, info = env.reset()
+        action_mask = info["action_mask"]
+
+        while len(log_probs) < self.rollout_length:
+            obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+            mask_t = torch.tensor(
+                action_mask, dtype=torch.bool, device=globals.DEVICE
+            ).unsqueeze(0)
+            action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
+            action = int(action_t.item())
+
+            next_obs, reward, terminated, truncated, info = env.step(action)
+
+            observations.append(obs_t)
+            masks.append(mask_t)
+            actions.append(action_t)
+            log_probs.append(lp)
+            values.append(val)
+            entropies.append(ent)
+            rewards.append(reward)
+            dones.append(terminated or truncated)
+
+            obs = next_obs
+            action_mask = info["action_mask"]
+
+            if terminated or truncated or not action_mask.any():
+                obs, info = env.get_obs_info()
+                action_mask = info["action_mask"]
+                if not action_mask.any():
+                    break
+
+        # Convert to tensors, squeezing batch dimension from agent.act() returns
+        observations_tensor = torch.cat(observations, dim=0)
+        masks_tensor = torch.cat(masks, dim=0)
+        actions_tensor = torch.cat(actions, dim=0)
+        log_probs_tensor = torch.stack([lp.squeeze(0) for lp in log_probs])
+        values_tensor = torch.stack([v.squeeze(0) for v in values])
+        entropies_tensor = torch.stack([e.squeeze(0) for e in entropies])
+        rewards_tensor = torch.tensor(
+            rewards, dtype=torch.float32, device=globals.DEVICE
+        )
+        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=globals.DEVICE)
+
+        # Compute returns and advantages
+        returns = self._compute_returns(rewards_tensor, dones_tensor)
+        advantages = self._compute_advantages(values_tensor, returns, dones_tensor)
+
+        return {
+            "observations": observations_tensor,
+            "masks": masks_tensor,
+            "actions": actions_tensor,
+            "log_probs": log_probs_tensor,
+            "advantages": advantages,
+            "returns": returns,
+            "entropies": entropies_tensor,
+        }
 
     def _compute_returns(
         self, rewards: torch.Tensor, dones: torch.Tensor
@@ -395,12 +357,16 @@ class MCCollector(BaseSequentialCollector):
 # ---------------------------------------------------------------------------
 
 
-class EPCollector(BaseSequentialCollector):
+class EPCollector(BaseCollector):
     """Episodic reward collector.
 
     Uses environment-computed returns and value-based advantages.
     Suitable for combinatorial optimization problems.
     """
+
+    def __init__(self, rollout_length: int = 256, gamma: float = 0.99):
+        self.rollout_length = rollout_length
+        self.gamma = gamma
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "EPCollector":
@@ -564,6 +530,7 @@ class POMOSampler(BaseCollector):
 
         episode_log_probs = []
         episode_returns = []
+        episode_entropies = []
 
         # print(len(feasible_actions))
         for starting_action, starting_log_prob in action_log_probs.items():
@@ -571,6 +538,7 @@ class POMOSampler(BaseCollector):
 
             # First step with starting action
             episode_log_prob = starting_log_prob
+            step_entropies = []
             next_obs, _, terminated, truncated, next_info = env.step(
                 int(starting_action)
             )
@@ -579,15 +547,18 @@ class POMOSampler(BaseCollector):
                 obs = next_obs
                 mask = next_info["action_mask"]
 
-                # Collect rest of trajectory, accumulating log probabilities
+                # Collect rest of trajectory, accumulating log probabilities and entropies
                 while True:
                     obs_t = obs_to_tensor(obs, device=globals.DEVICE)
                     mask_t = torch.tensor(
                         mask, dtype=torch.bool, device=globals.DEVICE
                     ).unsqueeze(0)
-                    action_t, lp, _, _ = agent.act(obs_t, mask_t, deterministic=False)
+                    action_t, lp, _, entropy = agent.act(
+                        obs_t, mask_t, deterministic=False
+                    )
                     action = int(action_t.item())
                     episode_log_prob = episode_log_prob + lp
+                    step_entropies.append(entropy)
                     next_obs, _, terminated, truncated, info = env.step(action)
 
                     if terminated or truncated or not info["action_mask"].any():
@@ -596,12 +567,20 @@ class POMOSampler(BaseCollector):
                     obs = next_obs
                     mask = info["action_mask"]
 
-            # Get final episode return
+            # Get final episode return and entropy
             episode_return = env.compute_return()
             episode_log_probs.append(episode_log_prob)
             episode_returns.append(episode_return)
 
+            # Compute episode-level entropy as mean of step-level entropies
+            if step_entropies:
+                episode_entropy = torch.stack(step_entropies).mean()
+            else:
+                episode_entropy = torch.tensor(0.0, device=globals.DEVICE)
+            episode_entropies.append(episode_entropy)
+
         return {
             "log_probs": episode_log_probs,
             "rewards": episode_returns,
+            "entropies": episode_entropies,
         }

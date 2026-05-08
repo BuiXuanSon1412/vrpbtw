@@ -84,9 +84,10 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: '101'
+  name: test_gradient_flow
   description: initial experiment
 logger:
   base_dir: experiment/train
   verbose: true
   tensorboard: false
+name: test_gradient_flow

@@ -784,6 +784,7 @@ class POMOTrainer(BaseTrainer):
                 for batch_idx in range(batches_per_epoch):
                     batch_log_probs = []  # List of tensors, one per instance
                     batch_rewards = []    # List of tensors, one per instance
+                    batch_entropies = []  # List of tensors, one per instance
 
                     for _ in range(instances_per_batch):
                         self.env.retask(task_id)
@@ -791,19 +792,24 @@ class POMOTrainer(BaseTrainer):
                         # Stack episodes for this instance
                         if batch_data["log_probs"]:
                             instance_log_probs = torch.stack(
-                                [torch.as_tensor(lp, device=DEVICE) for lp in batch_data["log_probs"]]
+                                [torch.as_tensor(lp, device=DEVICE).squeeze(0) for lp in batch_data["log_probs"]]
                             )
                             instance_rewards = torch.tensor(
                                 batch_data["rewards"], dtype=torch.float32, device=DEVICE
                             )
+                            instance_entropies = torch.stack(
+                                [torch.as_tensor(ent, device=DEVICE).squeeze(0) for ent in batch_data.get("entropies", [])]
+                            )
                             batch_log_probs.append(instance_log_probs)
                             batch_rewards.append(instance_rewards)
+                            batch_entropies.append(instance_entropies)
 
                     # Update after batch
                     if batch_log_probs:
                         batch = {
-                            "log_probs": batch_log_probs,  # List of (num_starting_points,) tensors
-                            "rewards": batch_rewards,       # List of (num_starting_points,) tensors
+                            "log_probs": batch_log_probs,   # List of (num_starting_points_i,) tensors
+                            "rewards": batch_rewards,       # List of (num_starting_points_i,) tensors
+                            "entropies": batch_entropies,   # List of (num_starting_points_i,) tensors
                         }
                         metrics = agent.update(batch)
                         loss_val = metrics.get("loss", 0.0)
@@ -835,6 +841,15 @@ class POMOTrainer(BaseTrainer):
                 # Compute per-epoch training statistics
                 epoch_time = time.time() - epoch_start
                 train_returns = np.array(epoch_returns)
+
+                # Debug: epoch summary
+                epoch_losses_array = np.array(epoch_losses) if epoch_losses else np.array([])
+                epoch_grad_norms_array = np.array(epoch_grad_norms) if epoch_grad_norms else np.array([])
+                print(f"Epoch {epoch + 1:3d} | "
+                      f"loss: {np.mean(epoch_losses_array):8.6f}±{np.std(epoch_losses_array):8.6f} | "
+                      f"return: {np.mean(train_returns):8.4f}±{np.std(train_returns):8.4f} | "
+                      f"grad_norm: {np.mean(epoch_grad_norms_array):8.4f}±{np.std(epoch_grad_norms_array):8.4f} | "
+                      f"time: {epoch_time:6.1f}s")
 
                 train_metrics = {
                     "train/loss_mean": float(np.mean(epoch_losses))
@@ -919,6 +934,7 @@ class POMOTrainer(BaseTrainer):
                 self.logger.log_metrics(
                     all_metrics,
                     step=self._total_updates,
+                    total_steps=self.tcfg["epochs"] * self.tcfg["batches_per_epoch"],
                     print_keys=print_keys,
                 )
 
@@ -947,6 +963,15 @@ class POMOTrainer(BaseTrainer):
                 "final_epoch": epochs,
             }
             all_task_summaries[task_id] = task_summary
+
+            # Task completion summary
+            print(f"\n{'-' * 64}")
+            print(f"Task {task_id} Complete")
+            print(f"  Best objective: {best_objective:.4f} (epoch {best_epoch})")
+            print(f"  Total epochs: {epochs}")
+            print(f"  Total updates: {self._total_updates}")
+            print(f"{'-' * 64}\n")
+
             self.logger.log_event(
                 "task_complete",
                 self._total_updates,

@@ -83,7 +83,7 @@ class BaseAgent(ABC):
             value: (B,) float32
             entropy: (B,) float32 entropy of policy distribution
         """
-        logits, values, entropy = self.network.evaluate(obs, action_mask, actions=None)
+        logits, value, entropy = self.network.evaluate(obs, action_mask, actions=None)
 
         # Select action (deterministic or stochastic)
         if deterministic:
@@ -96,10 +96,10 @@ class BaseAgent(ABC):
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
         log_prob = log_probs.gather(-1, action.unsqueeze(-1)).squeeze(-1)
 
-        return action, log_prob, values, entropy
+        return action, log_prob, value, entropy
 
     @abstractmethod
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Perform a single gradient update step.
 
         Args:
@@ -190,7 +190,7 @@ class PPOAgent(BaseAgent):
             max_grad_norm=max_grad_norm,
         )
 
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """PPO update step with clipped surrogate objective.
 
         Args:
@@ -300,7 +300,7 @@ class ReinforceAgent(BaseAgent):
             max_grad_norm=max_grad_norm,
         )
 
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """REINFORCE update: -mean(log_prob * return).
 
         Args:
@@ -382,7 +382,7 @@ class POMOAgent(BaseAgent):
             max_grad_norm=max_grad_norm,
         )
 
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """POMO update: per-instance baseline with multiple starting points.
 
         For each instance, computes baseline as mean reward across starting points,
@@ -391,42 +391,47 @@ class POMOAgent(BaseAgent):
 
         Args:
             batch: dict with keys:
-                - log_probs: list of (num_starting_points,) tensors, one per instance
-                - rewards: list of (num_starting_points,) tensors, one per instance
+                - log_probs: list of (num_starting_points_i,) tensors, one per instance
+                - rewards: list of (num_starting_points_i,) tensors, one per instance
+                - entropies: list of (num_starting_points_i,) tensors, one per instance
 
         Returns:
             dict with loss and grad_norm metrics
         """
-        log_probs_list = batch["log_probs"]  # List of tensors
-        rewards_list = batch["rewards"]       # List of tensors
+        log_probs = batch["log_probs"]      # List of (num_starting_points_i,) tensors
+        rewards = batch["rewards"]           # List of (num_starting_points_i,) tensors
+        entropies = batch["entropies"]       # List of (num_starting_points_i,) tensors
 
         instance_losses = []
+        policy_losses = []
         total_baseline = 0.0
-        num_instances = len(log_probs_list)
+        num_instances = len(log_probs)
+        entropy_values = []
 
-        # Compute loss per instance with per-instance baseline
-        for log_probs_i, rewards_i in zip(log_probs_list, rewards_list):
+        # Compute loss per instance with per-instance baseline and entropy
+        for log_probs_i, rewards_i, entropies_i in zip(log_probs, rewards, entropies):
             # Per-instance baseline
             baseline_i = rewards_i.mean()
             advantages_i = rewards_i - baseline_i
 
-            # Loss for this instance: mean(log_prob * advantage)
-            loss_i = -(log_probs_i * advantages_i).mean()
+            # Loss for this instance: mean(log_prob * advantage) - entropy_coef * mean(entropy)
+            policy_loss_i = -(log_probs_i * advantages_i).mean()
+            entropy_bonus_i = entropies_i.mean()
+            loss_i = policy_loss_i - self.entropy_coef * entropy_bonus_i
+
             instance_losses.append(loss_i)
+            policy_losses.append(policy_loss_i)
             total_baseline += baseline_i.item()
+            entropy_values.append(entropy_bonus_i)
 
-        # Batch loss: mean of instance losses
-        policy_loss = torch.stack(instance_losses).mean()
+        # Batch loss: mean of instance losses (already includes entropy regularization)
+        total_loss = torch.stack(instance_losses).mean()
 
-        # Optional entropy regularization
-        # Entropy = -E[log_prob], higher entropy = more exploratory
-        if self.entropy_coef > 0:
-            all_log_probs = torch.cat(log_probs_list)
-            entropy_loss = -all_log_probs.mean()  # Correct: don't square
-        else:
-            entropy_loss = 0.0
+        # Compute policy loss for logging
+        policy_loss = torch.stack(policy_losses).mean()
 
-        total_loss = policy_loss + self.entropy_coef * entropy_loss
+        # Compute mean entropy bonus across instances for logging
+        entropy_bonus = torch.stack(entropy_values).mean() if entropy_values else torch.tensor(0.0, device=total_loss.device)
 
         # Optimization step
         grad_norm = torch.tensor(0.0, device=total_loss.device)
@@ -439,10 +444,22 @@ class POMOAgent(BaseAgent):
             grad_norm = torch.as_tensor(grad_norm_val, device=total_loss.device)
             self.optimizer.step()
 
+        # Debug: loss components and gradient info
+        instance_losses_vals = [l.item() for l in instance_losses]
+        print(f"  POMOAgent: n_instances={num_instances}, "
+              f"total_loss={total_loss.item():.6f}, "
+              f"policy_loss={policy_loss.item():.6f}, "
+              f"entropy_bonus={entropy_bonus.item():.6f}, "
+              f"loss_min={min(instance_losses_vals):.6f}, "
+              f"loss_max={max(instance_losses_vals):.6f}, "
+              f"grad_norm={grad_norm.item():.4f}, "
+              f"baseline_mean={total_baseline / max(num_instances, 1):.4f}")
+
         return {
             "loss": total_loss,
             "grad_norm": grad_norm,
             "policy_loss": policy_loss,
+            "entropy_bonus": entropy_bonus,
             "baseline": torch.tensor(total_baseline / max(num_instances, 1)),
         }
 
@@ -486,7 +503,7 @@ class MetaAgent(BaseAgent):
             max_grad_norm=max_grad_norm,
         )
 
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Update network on meta-loss (average of task losses).
 
         Args:
