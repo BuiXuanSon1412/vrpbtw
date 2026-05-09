@@ -47,6 +47,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import globals
 from core.network import ActorCritic, _MHA, _FF, _make_norm
 from impl.vrpbtw import NODE_FEAT_DIM, VEH_FEAT_DIM
 
@@ -482,7 +483,7 @@ class HGNNActorCritic(ActorCritic):
     # ------------------------------------------------------------------
 
     def forward(self, obs, action_mask=None, context=None):
-        device = next(self.parameters()).device.type
+        device = globals.DEVICE
         Z_node, g_node, Z_veh, g_veh, Z_graph, g_graph, N1, V2K = self._encode(
             obs, device
         )
@@ -524,7 +525,7 @@ class HGNNActorCritic(ActorCritic):
         context=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute logits/values or evaluate given actions."""
-        device = next(self.parameters()).device.type
+        device = globals.DEVICE
         Z_node, g_node, Z_veh, g_veh, Z_graph, g_graph, N1, V2K = self._encode(
             obs, device
         )

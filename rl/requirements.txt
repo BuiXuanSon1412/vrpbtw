@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
 about-time==4.2.1
 absl-py==2.4.0
 alive-progress==3.3.0
