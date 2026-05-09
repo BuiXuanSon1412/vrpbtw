@@ -228,6 +228,8 @@ def build_network(cfg: Dict[str, Any]) -> ActorCritic:
     Dispatches to registry based on network name, then calls from_config.
     Moves network to globals.DEVICE automatically.
     """
+    import torch
+
     network_cfg = cfg.get("network", cfg.get("policy", {}))  # Support both old and new
     net_type = network_cfg.get("name", "hgnn")
 
@@ -239,7 +241,8 @@ def build_network(cfg: Dict[str, Any]) -> ActorCritic:
 
     cls = _NETWORK_REGISTRY[net_type]
     network = cls.from_config(network_cfg)
-    network.to(globals.DEVICE)
+    device = torch.device(globals.DEVICE)
+    network = network.to(device)
     return network
 
 
