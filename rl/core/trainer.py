@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 
-from globals import DEVICE
+import globals
 from core.agent import BaseAgent
 from core.collector import BaseCollector
 
@@ -610,22 +610,22 @@ class MetaTrainer(BaseTrainer):
             self.env.retask(task_id)
             support_batch = self.collector.collect(sub_agent, self.env)
             support_metrics = sub_agent.update(support_batch)
-            support_loss = support_metrics.get("loss", torch.tensor(0.0, device=DEVICE))
+            support_loss = support_metrics.get("loss", torch.tensor(0.0, device=globals.DEVICE))
             support_loss_tensor = (
                 support_loss
                 if isinstance(support_loss, torch.Tensor)
-                else torch.tensor(support_loss, device=DEVICE)
+                else torch.tensor(support_loss, device=globals.DEVICE)
             )
 
             # Outer loop: collect query set and evaluate
             self.env.retask(task_id)
             query_batch = self.collector.collect(sub_agent, self.env)
             query_metrics = sub_agent.update(query_batch)
-            query_loss = query_metrics.get("loss", torch.tensor(0.0, device=DEVICE))
+            query_loss = query_metrics.get("loss", torch.tensor(0.0, device=globals.DEVICE))
             query_loss_tensor = (
                 query_loss
                 if isinstance(query_loss, torch.Tensor)
-                else torch.tensor(query_loss, device=DEVICE)
+                else torch.tensor(query_loss, device=globals.DEVICE)
             )
 
             task_losses.append(query_loss_tensor)
@@ -653,7 +653,7 @@ class MetaTrainer(BaseTrainer):
             f"  Tasks      : {active_task_ids} (of {total_tasks} total)\n"
             f"  Meta       : {self.mcfg['epochs']} epochs × {self.mcfg['batches_per_epoch']} batches\n"
             f"  Fine-tune  : {self.fcfg['epochs']} epochs × {self.fcfg['batches_per_epoch']} batches\n"
-            f"  Device     : {DEVICE}\n"
+            f"  Device     : {globals.DEVICE}\n"
             f"{'=' * 64}"
         )
 
@@ -792,13 +792,13 @@ class POMOTrainer(BaseTrainer):
                         # Stack episodes for this instance
                         if batch_data["log_probs"]:
                             instance_log_probs = torch.stack(
-                                [torch.as_tensor(lp, device=DEVICE).squeeze(0) for lp in batch_data["log_probs"]]
+                                [torch.as_tensor(lp, device=globals.DEVICE).squeeze(0) for lp in batch_data["log_probs"]]
                             )
                             instance_rewards = torch.tensor(
-                                batch_data["rewards"], dtype=torch.float32, device=DEVICE
+                                batch_data["rewards"], dtype=torch.float32, device=globals.DEVICE
                             )
                             instance_entropies = torch.stack(
-                                [torch.as_tensor(ent, device=DEVICE).squeeze(0) for ent in batch_data.get("entropies", [])]
+                                [torch.as_tensor(ent, device=globals.DEVICE).squeeze(0) for ent in batch_data.get("entropies", [])]
                             )
                             batch_log_probs.append(instance_log_probs)
                             batch_rewards.append(instance_rewards)
@@ -1005,7 +1005,7 @@ class POMOTrainer(BaseTrainer):
             f"\n{'=' * 64}\n"
             f"  Algorithm  : POMO (Multiple Optima)\n"
             f"  Tasks      : {len(self.env.tasks)}\n"
-            f"  Device     : {DEVICE}\n"
+            f"  Device     : {globals.DEVICE}\n"
             f"{'=' * 64}"
         )
 

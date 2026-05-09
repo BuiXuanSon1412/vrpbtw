@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from globals import DEVICE
+import globals
 from core.agent import BaseAgent
 from core.environment import Environment, Solution, SolutionPool
 from core.utils import obs_to_tensor
@@ -149,8 +149,8 @@ class Evaluator:
             if len(feasible) == 0:
                 break
 
-            obs_t = obs_to_tensor(obs, device=DEVICE)
-            mask_t = torch.tensor(mask, dtype=torch.bool, device=DEVICE).unsqueeze(0)
+            obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+            mask_t = torch.tensor(mask, dtype=torch.bool, device=globals.DEVICE).unsqueeze(0)
             action, _, _, _ = self.agent.act(
                 obs_t, mask_t, deterministic=self.deterministic
             )
@@ -234,16 +234,16 @@ class Evaluator:
             lp[mask] = 0.0
             return lp
 
-        obs_t = obs_to_tensor(obs, DEVICE)
+        obs_t = obs_to_tensor(obs, globals.DEVICE)
         if isinstance(obs_t, dict):
             obs_t = {
-                k: (v.to(DEVICE) if isinstance(v, torch.Tensor) else v)
+                k: (v.to(globals.DEVICE) if isinstance(v, torch.Tensor) else v)
                 for k, v in obs_t.items()
             }
         else:
-            obs_t = obs_t.to(DEVICE)
+            obs_t = obs_t.to(globals.DEVICE)
 
-        mask_t = torch.tensor(mask[np.newaxis], dtype=torch.bool, device=DEVICE)
+        mask_t = torch.tensor(mask[np.newaxis], dtype=torch.bool, device=globals.DEVICE)
 
         with torch.no_grad():
             logits, _ = network.forward(obs_t, mask_t)

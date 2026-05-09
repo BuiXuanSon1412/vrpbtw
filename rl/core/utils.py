@@ -18,7 +18,7 @@ from typing import Any, Optional, Union
 import torch
 import numpy as np
 
-from globals import DEVICE
+import globals
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ def obs_to_tensor(
     import torch
 
     if device is None:
-        device = DEVICE
+        device = globals.DEVICE
 
     if isinstance(obs, dict):
         result: dict = {}
