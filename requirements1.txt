@@ -35,7 +35,7 @@ pyparsing
 python-dateutil
 six
 sympy
-torch
+torch==2.9.0
 triton
 typing_extensions
 pandas
