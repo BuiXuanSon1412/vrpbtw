@@ -8,13 +8,13 @@ trainer:
       name: pomo
       learning_rate: 0.001
       optimizer: adam
-      entropy_coef: 0.01
+      entropy_coef: 0.1
       max_grad_norm: 0.5
     eval_agent:
       name: pomo
       learning_rate: 0.001
       optimizer: adam
-      entropy_coef: 0.01
+      entropy_coef: 0.1
       max_grad_norm: 0.5
   evaluators:
     train_eval:
@@ -28,7 +28,7 @@ trainer:
       control:
         epochs: 100
         batches_per_epoch: 10
-        instances_per_batch: 5
+        instances_per_batch: 20
         eval_interval: 1
         checkpoint_interval: 10
 network:

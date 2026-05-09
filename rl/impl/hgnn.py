@@ -48,7 +48,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from core.network import ActorCritic, _MHA, _FF, _make_norm
-from impl.environment import NODE_FEAT_DIM, VEH_FEAT_DIM
+from impl.vrpbtw import NODE_FEAT_DIM, VEH_FEAT_DIM
 
 GRAPH_EDGE_DIM = 2  # [cost, time]
 GRAPH_NODE_DIM = 4  # [x, y, tw_open, tw_close] — demand excluded; GraphEncoder

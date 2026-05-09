@@ -8,13 +8,13 @@ trainer:
       name: pomo
       learning_rate: 0.001
       optimizer: adam
-      entropy_coef: 0.01
+      entropy_coef: 0.1
       max_grad_norm: 0.5
     eval_agent:
       name: pomo
       learning_rate: 0.001
       optimizer: adam
-      entropy_coef: 0.01
+      entropy_coef: 0.1
       max_grad_norm: 0.5
   evaluators:
     train_eval:
@@ -61,7 +61,7 @@ network:
         clip: 10.0
         activation: relu
 environment:
-  name: vrpbtw
+  name: mvrpbtw
   properties:
     max_coord: 100.0
     capacity_truck: 200
@@ -84,10 +84,9 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: entropy_proper
-  description: initial experiment
+  name: '102'
+  description: mvrpbtw experiment
 logger:
   base_dir: experiment/train
   verbose: true
   tensorboard: false
-name: entropy_proper

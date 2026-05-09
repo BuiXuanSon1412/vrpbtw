@@ -20,7 +20,8 @@ from typing import Any, Dict
 import torch.optim as optim
 
 # Problems
-from impl.environment import VRPBTWEnv
+from impl.vrpbtw import VRPBTWEnv
+from impl.mvrpbtw import MVRPBTWEnv
 
 # Networks
 from impl.hgnn import HGNNActorCritic
@@ -62,6 +63,7 @@ _TRAINER_REGISTRY: Dict[str, type] = {
 
 _ENVIRONMENT_REGISTRY: Dict[str, type] = {
     "vrpbtw": VRPBTWEnv,
+    "mvrpbtw": MVRPBTWEnv,
 }
 
 _OPTIMIZER_REGISTRY: Dict[str, type | None] = {

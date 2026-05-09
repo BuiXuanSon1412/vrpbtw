@@ -13,8 +13,8 @@ reproducibility:
     torch_seed: 42
 
 experiment:
-  name: "101"
-  description: initial experiment
+  name: "102"
+  description: mvrpbtw experiment
 
 logger:
   base_dir: experiment/train
@@ -24,6 +24,6 @@ logger:
 _include:
   - trainer: trainer/pomo.yaml
   - network: network/geman.yaml
-  - environment: environment/vrpbtw.yaml
+  - environment: environment/mvrpbtw.yaml
 
 

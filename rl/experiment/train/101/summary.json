@@ -1,12 +1,12 @@
 {
   "stop_reason": "completed",
-  "total_updates": 10,
-  "total_instances": 10,
-  "training_time_s": 118.2,
+  "total_updates": 100,
+  "total_instances": 1000,
+  "training_time_s": 2227.7,
   "task_summaries": {
     "002_N10_F2_R": {
-      "best_objective": 14950.3486328125,
-      "best_epoch": 5,
+      "best_objective": 14798.42578125,
+      "best_epoch": 8,
       "final_epoch": 10
     }
   }
