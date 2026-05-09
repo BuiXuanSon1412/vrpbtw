@@ -40,6 +40,7 @@ from typing import Any, Optional, Dict
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import globals
 from config import load_config, merge_configs
 from core import Evaluator, SeedManager
 from core.registry import build_agent, build_environment
@@ -265,6 +266,9 @@ def main() -> None:
 
     if args.device:
         cfg["device"] = args.device
+
+    # Set global device for all rl components
+    globals.DEVICE = cfg.get("device", "cpu")
 
     print(f"  Training Experiment: {training_exp_name}")
     print(f"  Evaluation Experiment: {eval_exp_name}")

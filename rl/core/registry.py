@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Dict
 import torch.optim as optim
 
+import globals
+
 # Problems
 from impl.vrpbtw import VRPBTWEnv
 from impl.mvrpbtw import MVRPBTWEnv
@@ -224,6 +226,7 @@ def build_network(cfg: Dict[str, Any]) -> ActorCritic:
     """Build network from config.
 
     Dispatches to registry based on network name, then calls from_config.
+    Moves network to globals.DEVICE automatically.
     """
     network_cfg = cfg.get("network", cfg.get("policy", {}))  # Support both old and new
     net_type = network_cfg.get("name", "hgnn")
@@ -235,7 +238,9 @@ def build_network(cfg: Dict[str, Any]) -> ActorCritic:
         )
 
     cls = _NETWORK_REGISTRY[net_type]
-    return cls.from_config(network_cfg)
+    network = cls.from_config(network_cfg)
+    network.to(globals.DEVICE)
+    return network
 
 
 # ---------------------------------------------------------------------------

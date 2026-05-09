@@ -316,7 +316,7 @@ class ReinforceAgent(BaseAgent):
         policy_loss = -(log_probs * returns).mean()
 
         # Optional entropy regularization
-        entropy_loss = -(log_probs**2).mean() if self.entropy_coef > 0 else 0.0
+        entropy_loss = -(log_probs**2).mean() if self.entropy_coef > 0 else torch.tensor(0.0, device=policy_loss.device)
         total_loss = policy_loss + self.entropy_coef * entropy_loss
 
         # Optimization step
@@ -460,7 +460,7 @@ class POMOAgent(BaseAgent):
             "grad_norm": grad_norm,
             "policy_loss": policy_loss,
             "entropy_bonus": entropy_bonus,
-            "baseline": torch.tensor(total_baseline / max(num_instances, 1)),
+            "baseline": torch.tensor(total_baseline / max(num_instances, 1), device=total_loss.device),
         }
 
 
