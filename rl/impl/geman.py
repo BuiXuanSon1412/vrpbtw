@@ -455,7 +455,9 @@ class GEMANActorCritic(ActorCritic):
         # GraphEncoder receives [x, y, tw_open, tw_close] only — demand is a
         # delivery semantic, not a routing-structure signal.  Dropping it keeps
         # the graph encoder focused on spatial-temporal topology.
-        nf_gnn = torch.cat([nf[:, :, :2], nf[:, :, 3:]], dim=-1)  # (B, N+1, 4)
+        # nf format: [x, y, linehaul_demand, backhaul_demand, tw_open, tw_close]
+        # Extract indices [0, 1, 4, 5] = [x, y, tw_open, tw_close]
+        nf_gnn = torch.cat([nf[:, :, :2], nf[:, :, 4:]], dim=-1)  # (B, N+1, 4)
         Z_graph, g_graph = self.graph_encoder(nf_gnn, t_ei, t_ea, d_ei, d_ea)
 
         return Z_node, g_node, Z_veh, g_veh, Z_graph, g_graph, N1, V2K

@@ -13,8 +13,8 @@ reproducibility:
     torch_seed: 42
 
 experiment:
-  name: "102"
-  description: mvrpbtw experiment
+  name: "106"
+  description: mvrpbtw experiment - drone launch with constraint-based feasibility
 
 logger:
   base_dir: experiment/train

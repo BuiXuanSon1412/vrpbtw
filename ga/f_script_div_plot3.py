@@ -89,7 +89,7 @@ def main():
         plot_one(ax, num_nodes)
 
         # Không dùng Title theo yêu cầu
-        output_path = output_dir / f"div_convergence_{num_nodes}_nodes.pdf"
+        output_path = output_dir / f"div_convergence_{num_nodes}_nodes.png"
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, bbox_inches="tight")

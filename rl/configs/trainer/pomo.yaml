@@ -37,7 +37,7 @@ trainer:
   phases:
     training:
       control:
-        epochs: 100
+        epochs: 10
         batches_per_epoch: 10
         instances_per_batch: 5
         eval_interval: 1

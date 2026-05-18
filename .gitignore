@@ -3,6 +3,6 @@ __pycache__/
 *.pt
 *.png
 result/
-test/
+#test/
 script/
 *.zip

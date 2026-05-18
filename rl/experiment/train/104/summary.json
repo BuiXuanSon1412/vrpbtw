@@ -1,0 +1,13 @@
+{
+  "stop_reason": "completed",
+  "total_updates": 100,
+  "total_instances": 500,
+  "training_time_s": 1338.2,
+  "task_summaries": {
+    "002_N10_F2_R": {
+      "best_objective": 12102.2314453125,
+      "best_epoch": 7,
+      "final_epoch": 10
+    }
+  }
+}

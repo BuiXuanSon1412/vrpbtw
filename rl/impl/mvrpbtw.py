@@ -25,13 +25,18 @@ class MVRPBTWEnv(VRPBTWEnv):
     """
     Multi-phase VRPBTW without phase constraint enforcement.
 
-    Inherits all methods from VRPBTWEnv but overrides:
-    - _truck_phase_ok: Always returns True (no phase check)
-    - _drone_phase_ok: Always returns True (no phase check)
+    Inherits all methods from VRPBTWEnv but:
+    - Sets phased=False (no phase switching)
+    - Overrides _truck_phase_ok: Always returns True (no phase check)
+    - Overrides _drone_phase_ok: Always returns True (no phase check)
 
     Phase state is still tracked in state (truck_phase, drone_phase) for
-    reference and logging, but does not restrict feasibility.
+    reference and logging, but does not restrict feasibility or trigger updates.
     """
+
+    def __init__(self, cfg: dict):
+        super().__init__(cfg)
+        self.phased = False
 
     def _truck_phase_ok(self, state: VRPBTWState, k: int, j: int) -> bool:
         """

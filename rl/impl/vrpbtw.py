@@ -22,8 +22,8 @@ At termination:
 
 Constants
 ---------
-NODE_FEAT_DIM  = 5   [x, y, demand, tw_open, tw_close]
-VEH_FEAT_DIM   = 5   [x, y, load, time, deadline]
+NODE_FEAT_DIM  = 6   [x, y, linehaul_demand, backhaul_demand, tw_open, tw_close]
+VEH_FEAT_DIM   = 6   [x, y, linehaul_bound, backhaul_bound, time, deadline]
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ from core.environment import (
 # Feature-dimension constants
 # ---------------------------------------------------------------------------
 
-NODE_FEAT_DIM = 5
-VEH_FEAT_DIM = 5
+NODE_FEAT_DIM = 6
+VEH_FEAT_DIM = 6
 
 TRUCK = 0
 DRONE = 1
@@ -62,14 +62,9 @@ class VRPBTWState:
     # Per fleet (K,)
     truck_node: np.ndarray
     truck_prev_node: np.ndarray  # (K,) previous truck node (second-most-recent)
-    truck_time: np.ndarray
-    truck_load: np.ndarray
     truck_phase: np.ndarray
 
     drone_node: np.ndarray
-    drone_time: np.ndarray
-    drone_load: np.ndarray
-    drone_launch_time: np.ndarray
     drone_active: np.ndarray
     drone_launch_node: np.ndarray  # (K,) truck node at which drone k last launched
     drone_phase: (
@@ -81,34 +76,59 @@ class VRPBTWState:
 
     # Incremental objective accumulators
     current_cost: float  # total travel cost so far
-    current_max_tard: float  # max tardiness across served customers so far
+
+    # Policy inputs: per-vehicle load bounds (K, 2)
+    current_truck_load: np.ndarray  # [max_linehaul_can_serve, min_backhaul_can_serve]
+    current_drone_load: np.ndarray  # same structure
+
+    # Global load tracking: per-position/per-trip loads
+    truck_load: List[List[float]]  # [k][pos] load carried from pos to pos+1
+    drone_load: List[List[List[float]]]  # [k][trip][pos] same for drone trips
 
     # Routes (for logging + evaluate())
     truck_routes: List[List[int]]
-    drone_route_nodes: List[List[int]]
-    drone_route_mask: List[List[int]]
+    drone_trips_node: List[List[List[int]]]  # [k][trip][pos] node IDs
+    drone_trips_mask: List[List[List[int]]]  # [k][trip][pos] 0=non-customer 1=customer
+
+    # Explicit time tracking per node/trip
+    truck_arrive: List[List[float]]  # [k][i] arrival at truck_routes[k][i]
+    truck_depart: List[
+        List[float]
+    ]  # [k][i] departure (service_end) at truck_routes[k][i]
+    drone_arrive: List[
+        List[List[float]]
+    ]  # [k][t][i] arrival at drone_trips_node[k][t][i]
+    drone_depart: List[
+        List[List[float]]
+    ]  # [k][t][i] departure at drone_trips_node[k][t][i]
 
 
 def _copy_state(s: VRPBTWState) -> VRPBTWState:
     return VRPBTWState(
         truck_node=s.truck_node.copy(),
         truck_prev_node=s.truck_prev_node.copy(),
-        truck_time=s.truck_time.copy(),
-        truck_load=s.truck_load.copy(),
         truck_phase=s.truck_phase.copy(),
         drone_node=s.drone_node.copy(),
-        drone_time=s.drone_time.copy(),
-        drone_load=s.drone_load.copy(),
-        drone_launch_time=s.drone_launch_time.copy(),
         drone_active=s.drone_active.copy(),
         drone_launch_node=s.drone_launch_node.copy(),
         drone_phase=s.drone_phase.copy(),
         served=s.served.copy(),
         current_cost=s.current_cost,
-        current_max_tard=s.current_max_tard,
+        current_truck_load=s.current_truck_load.copy(),
+        current_drone_load=s.current_drone_load.copy(),
+        truck_load=[list(r) for r in s.truck_load],
+        drone_load=[[list(t) for t in trips] for trips in s.drone_load],
         truck_routes=[list(r) for r in s.truck_routes],
-        drone_route_nodes=[list(r) for r in s.drone_route_nodes],
-        drone_route_mask=[list(m) for m in s.drone_route_mask],
+        drone_trips_node=[[list(t) for t in trips] for trips in s.drone_trips_node],
+        drone_trips_mask=[[list(m) for m in trips] for trips in s.drone_trips_mask],
+        truck_arrive=[[t for t in times] for times in s.truck_arrive],
+        truck_depart=[[t for t in times] for times in s.truck_depart],
+        drone_arrive=[
+            [[t for t in times] for times in trips] for trips in s.drone_arrive
+        ],
+        drone_depart=[
+            [[t for t in times] for times in trips] for trips in s.drone_depart
+        ],
     )
 
 
@@ -166,6 +186,9 @@ class VRPBTWEnv(Environment):
         self.time_window_scaling_factor: float = float(
             cfg.get("time_window_scaling_factor", 1.0)
         )
+
+        # Phase constraint enforcement: True for VRPBTW, False for MVRPBTW
+        self.phased: bool = True
 
         self._linehaul_idx: np.ndarray = np.array([], dtype=np.int32)
         self._backhaul_idx: np.ndarray = np.array([], dtype=np.int32)
@@ -424,23 +447,88 @@ class VRPBTWEnv(Environment):
         return VRPBTWState(
             truck_node=np.zeros(K, dtype=np.int32),
             truck_prev_node=np.zeros(K, dtype=np.int32),
-            truck_time=np.zeros(K, dtype=np.float32),
-            truck_load=np.full(K, self.Q_t, dtype=np.float32),
             truck_phase=np.zeros(K, dtype=np.int32),
             drone_node=np.zeros(K, dtype=np.int32),
-            drone_time=np.zeros(K, dtype=np.float32),
-            drone_load=np.full(K, self.Q_d, dtype=np.float32),
-            drone_launch_time=np.zeros(K, dtype=np.float32),
             drone_active=np.zeros(K, dtype=bool),
             drone_launch_node=np.zeros(K, dtype=np.int32),
             drone_phase=np.zeros(K, dtype=np.int32),
             served=served,
             current_cost=0.0,
-            current_max_tard=0.0,
+            current_truck_load=np.stack(
+                [
+                    np.full(K, self.Q_t, dtype=np.float32),
+                    np.full(K, -self.Q_t, dtype=np.float32),
+                ],
+                axis=1,
+            ),
+            current_drone_load=np.stack(
+                [
+                    np.full(K, self.Q_d, dtype=np.float32),
+                    np.full(K, -self.Q_d, dtype=np.float32),
+                ],
+                axis=1,
+            ),
+            truck_load=[[0.0] for _ in range(K)],
+            drone_load=[[] for _ in range(K)],
             truck_routes=[[DEPOT] for _ in range(K)],
-            drone_route_nodes=[[] for _ in range(K)],
-            drone_route_mask=[[] for _ in range(K)],
+            drone_trips_node=[[] for _ in range(K)],
+            drone_trips_mask=[[] for _ in range(K)],
+            truck_arrive=[[0.0] for _ in range(K)],
+            truck_depart=[[0.0] for _ in range(K)],
+            drone_arrive=[[] for _ in range(K)],
+            drone_depart=[[] for _ in range(K)],
         )
+
+    # ------------------------------------------------------------------
+    # Time accessors (derived from time arrays)
+    # ------------------------------------------------------------------
+
+    def _truck_current_time(self, state: VRPBTWState, k: int) -> float:
+        """Get truck k's current time (departure from last node)."""
+        return state.truck_depart[k][-1] if state.truck_depart[k] else 0.0
+
+    def _drone_current_time(self, state: VRPBTWState, k: int) -> float:
+        """Get drone k's current time (last recorded time in current trip)."""
+        if (
+            state.drone_active[k]
+            and state.drone_depart[k]
+            and state.drone_depart[k][-1]
+        ):
+            return state.drone_depart[k][-1][-1]
+        return 0.0
+
+    def _drone_launch_time(self, state: VRPBTWState, k: int) -> float:
+        """Get drone k's launch time (departure from launch node in current trip)."""
+        if (
+            state.drone_active[k]
+            and state.drone_depart[k]
+            and state.drone_depart[k][-1]
+        ):
+            return state.drone_depart[k][-1][0]
+        return 0.0
+
+    # ------------------------------------------------------------------
+    # Update current load bounds (policy inputs)
+    # ------------------------------------------------------------------
+
+    def _update_current_loads(self, state: VRPBTWState, k: int) -> None:
+        """Recompute current_truck_load and current_drone_load from truck_load / drone_load."""
+        # Truck
+        loads = state.truck_load[k]
+        if loads:
+            state.current_truck_load[k][0] = self.Q_t - max(loads)  # remaining linehaul
+            state.current_truck_load[k][1] = -(
+                self.Q_t - loads[-1]
+            )  # remaining backhaul (negative)
+
+        # Drone (inactive = full capacity)
+        if state.drone_active[k] and state.drone_load[k] and state.drone_load[k][-1]:
+            dloads = state.drone_load[k][-1]
+            state.current_drone_load[k][0] = self.Q_d - max(dloads)
+            state.current_drone_load[k][1] = -(self.Q_d - dloads[-1])
+        else:
+            state.current_drone_load[k][0] = self.Q_d
+            state.current_drone_load[k][1] = -self.Q_d
 
     # ------------------------------------------------------------------
     # Action encoding / decoding
@@ -466,23 +554,41 @@ class VRPBTWEnv(Environment):
         V = 2 * self.K
         mask = np.zeros(N1 * V, dtype=bool)
 
+        # Check if there are any feasible serving nodes across all vehicles
+        has_feasible_serving = False
+
         for v_idx in range(V):
             k, vtype = self.vehicle_fleet_type(v_idx)
             if vtype == TRUCK:
                 for j in range(1, N1):
                     if self._truck_feasible(state, k, j):
                         mask[self.encode_action(j, v_idx)] = True
-                if self._truck_return_feasible(state, k):
-                    mask[self.encode_action(DEPOT, v_idx)] = True
+                        has_feasible_serving = True
             else:
                 if state.drone_active[k]:
+                    # Check extending to unserved customers
                     for j in range(1, N1):
                         if self._drone_extend_feasible(state, k, j):
                             mask[self.encode_action(j, v_idx)] = True
+                            has_feasible_serving = True
+                    # Check landing at nodes on truck route
+                    for land_idx in self._landing_nodes(state, k):
+                        if self._drone_land_feasible(state, k, land_idx):
+                            land_node = state.truck_routes[k][land_idx]
+                            mask[self.encode_action(land_node, v_idx)] = True
+                            has_feasible_serving = True
                 else:
                     for j in range(1, N1):
                         if self._drone_launch_feasible(state, k, j):
                             mask[self.encode_action(j, v_idx)] = True
+                            has_feasible_serving = True
+
+        # Only allow return-to-depot if there are NO feasible serving nodes
+        if not has_feasible_serving:
+            for v_idx in range(V):
+                k, vtype = self.vehicle_fleet_type(v_idx)
+                if vtype == TRUCK and self._truck_return_feasible(state, k):
+                    mask[self.encode_action(DEPOT, v_idx)] = True
 
         return ActionMask.from_bool_array(mask)
 
@@ -498,9 +604,9 @@ class VRPBTWEnv(Environment):
         launch_node = int(state.drone_launch_node[k])
         route = state.truck_routes[k]
 
-        # Find the last position of the launch node in the truck route
+        # Find the first position of the launch node in the truck route (where drone was launched)
         launch_idx = -1
-        for i in range(len(route) - 1, -1, -1):
+        for i in range(len(route)):
             if route[i] == launch_node:
                 launch_idx = i
                 break
@@ -520,21 +626,25 @@ class VRPBTWEnv(Environment):
 
         for land_idx in landing_indices:
             land_node = state.truck_routes[k][land_idx]
-            # Check if drone can reach j then land_node and return in time
             t_to_j = self.euclidean_dist[from_node, j] / self.v_d
             t_j_to_land = self.euclidean_dist[j, land_node] / self.v_d
-            elapsed = self._elapsed_trip_time(state, k)
-
-            if elapsed + t_to_j + t_j_to_land > self.t_max:
-                continue
 
             # Calculate drone landing time
-            arrive_j = state.drone_time[k] + t_to_j
+            arrive_j = (
+                self._drone_current_time(state, k)
+                + self.launch_time
+                + t_to_j
+                + self.land_time
+            )
             service_end = max(arrive_j, self.tw_open[j]) + self.service_times[j]
-            drone_land_time = service_end + t_j_to_land + self.land_time
+            trip_start = state.drone_depart[k][-1][0]
+            trip_end = service_end + self.launch_time + t_j_to_land + self.land_time
+
+            if trip_end - trip_start > self.t_max:
+                continue
 
             # Check if truck can still service subsequent nodes
-            if self._late_land_feasible(state, k, land_idx, drone_land_time):
+            if self._late_land_feasible(state, k, land_idx, trip_end):
                 return True
 
         return False
@@ -600,11 +710,19 @@ class VRPBTWEnv(Environment):
             return False
         if not self._truck_phase_ok(state, k, j):
             return False
-        new_load = state.truck_load[k] - self.demands[j]
-        if new_load < 0 or new_load > self.Q_t:
-            return False
+        # Check capacity using current load bounds
+        demand = self.demands[j]
+        if demand > 0:  # linehaul
+            if demand > state.current_truck_load[k][0]:
+                return False
+        else:  # backhaul
+            if demand < state.current_truck_load[k][1]:
+                return False
         from_node = int(state.truck_node[k])
-        arrive = state.truck_time[k] + self.manhattan_dist[from_node, j] / self.v_t
+        arrive = (
+            self._truck_current_time(state, k)
+            + self.manhattan_dist[from_node, j] / self.v_t
+        )
         service_end = max(arrive, self.tw_open[j]) + self.service_times[j]
         if service_end > self.tw_close[j]:
             return False
@@ -614,11 +732,16 @@ class VRPBTWEnv(Environment):
         from_node = int(state.truck_node[k])
         if from_node == DEPOT:
             return False
-        arrive = state.truck_time[k] + self.manhattan_dist[from_node, DEPOT] / self.v_t
+        arrive = (
+            self._truck_current_time(state, k)
+            + self.manhattan_dist[from_node, DEPOT] / self.v_t
+        )
         return arrive <= self.T_max
 
     def _elapsed_trip_time(self, state: VRPBTWState, k: int) -> float:
-        return float(state.drone_time[k] - state.drone_launch_time[k])
+        return float(
+            self._drone_current_time(state, k) - self._drone_launch_time(state, k)
+        )
 
     def _min_return_time(self, state: VRPBTWState, k: int, from_node: int) -> float:
         """Minimum flight time from from_node to any unserved node.
@@ -634,65 +757,77 @@ class VRPBTWEnv(Environment):
         return float(np.min(distances)) / self.v_d
 
     def _drone_launch_feasible(self, state: VRPBTWState, k: int, j: int) -> bool:
+        """Check if drone k can launch to serve node j.
+
+        Performs early checks, then uses _compute_drone_launch_time for constraint checking.
+        """
+        # Early feasibility checks
         if state.drone_active[k] or state.served[j]:
             return False
         if not self._truck_phase_ok(state, k, j):
             return False
-        new_load = state.drone_load[k] - self.demands[j]
-        if new_load < 0 or new_load > self.Q_d:
-            return False
 
-        # Drone launches from prev_truck_node, visits j, lands at current truck_node
-        launch_node = int(state.truck_prev_node[k])
-        land_node = int(state.truck_node[k])
-        drone_at = int(state.drone_node[k])
+        # Check capacity using current load bounds
+        demand = self.demands[j]
+        if demand > 0:  # linehaul
+            if demand > state.current_drone_load[k][0]:
+                return False
+        else:  # backhaul
+            if demand < state.current_drone_load[k][1]:
+                return False
 
         # Drone must be at current truck location or depot
+        drone_at = int(state.drone_node[k])
+        land_node = int(state.truck_node[k])
         if drone_at != DEPOT and drone_at != land_node:
             return False
 
-        # Time for drone to reach j from launch_node
-        t_to_j = self.euclidean_dist[launch_node, j] / self.v_d
-        depart_t = state.drone_time[k] + self.launch_time
-        arrive_j = depart_t + t_to_j
-        service_end = max(arrive_j, self.tw_open[j]) + self.service_times[j]
+        # Prevent duplicate trips: don't launch if a trip with same (launch, land) already exists
+        launch_node = int(state.truck_prev_node[k])
+        for existing_trip in state.drone_trips_node[k]:
+            if (
+                existing_trip
+                and int(existing_trip[0]) == launch_node
+                and int(existing_trip[-1]) == land_node
+            ):
+                return False
 
-        # Check time window at j
-        if service_end > self.tw_close[j]:
-            return False
-
-        # Time for drone to return from j to land_node
-        t_back = self.euclidean_dist[j, land_node] / self.v_d
-        drone_land_time = service_end + t_back + self.land_time
-
-        # Check drone duration constraint
-        if self.launch_time + t_to_j + t_back > self.t_max:
-            return False
-
-        # Check if truck can still service subsequent nodes without being late
-        land_idx = len(state.truck_routes[k]) - 1
-        return self._late_land_feasible(state, k, land_idx, drone_land_time)
+        # Detailed constraint checking using launch time computation
+        launch_time = self._compute_trip_start(state, k, j)
+        return launch_time > float("-inf")
 
     def _drone_extend_feasible(self, state: VRPBTWState, k: int, j: int) -> bool:
         if not state.drone_active[k] or state.served[j]:
             return False
         if not self._drone_phase_ok(state, k, j):
             return False
-        new_load = state.drone_load[k] - self.demands[j]
-        if new_load < 0 or new_load > self.Q_d:
-            return False
+        # Check capacity using current load bounds
+        demand = self.demands[j]
+        if demand > 0:  # linehaul
+            if demand > state.current_drone_load[k][0]:
+                return False
+        else:  # backhaul
+            if demand < state.current_drone_load[k][1]:
+                return False
         from_node = int(state.drone_node[k])
         t_to_j = self.euclidean_dist[from_node, j] / self.v_d
-        arrive_j = state.drone_time[k] + t_to_j
+        arrive_j = (
+            self._drone_current_time(state, k)
+            + self.launch_time
+            + t_to_j
+            + self.land_time
+        )
         service_end = max(arrive_j, self.tw_open[j]) + self.service_times[j]
         if service_end > self.tw_close[j]:
             return False
         t_back = self._min_return_time(state, k, j)
-        elapsed = self._elapsed_trip_time(state, k)
-        if elapsed + t_to_j + t_back > self.t_max:
+
+        trip_start = state.drone_depart[k][-1][0]
+        trip_end = service_end + self.launch_time + t_back + self.land_time
+        if trip_end - trip_start > self.t_max:
             return False
 
-        # NEW: Check if drone can still land somewhere after extending to j
+        # Check if drone can still land somewhere after extending to j
         return self._has_feasible_landing_after_extend(state, k, j)
 
     def _drone_land_feasible(self, state: VRPBTWState, k: int, land_idx: int) -> bool:
@@ -707,79 +842,167 @@ class VRPBTWEnv(Environment):
         land_node = state.truck_routes[k][land_idx]
         from_node = int(state.drone_node[k])
         t_back = self.euclidean_dist[from_node, land_node] / self.v_d
-        elapsed = self._elapsed_trip_time(state, k)
 
-        if elapsed + t_back > self.t_max:
+        trip_start = state.drone_depart[k][-1][0]
+        trip_end = (
+            self._drone_current_time(state, k)
+            + self.launch_time
+            + t_back
+            + self.land_time
+        )
+
+        if trip_end - trip_start > self.t_max:
             return False
-
-        drone_land_time = state.drone_time[k] + t_back + self.land_time
-        if drone_land_time > self.T_max:
+        if trip_end > self.T_max:
             return False
 
         # Check if late landing would cause truck to miss future customers
-        return self._late_land_feasible(state, k, land_idx, drone_land_time)
+        return self._late_land_feasible(state, k, land_idx, trip_end)
 
-    # ------------------------------------------------------------------
-    # Auto-landing
-    # ------------------------------------------------------------------
-
-    def _auto_land_drone(self, state: VRPBTWState, k: int) -> bool:
+    def _compute_max_truck_delay(
+        self, state: VRPBTWState, k: int, land_idx: int
+    ) -> float:
         """
-        Auto-land drone at earliest feasible landing node.
-        Returns True if drone was landed, False if no feasible landing exists.
+        Compute maximum time truck can wait at landing node without pushing any subsequent service end above tw_close.
+
+        Truck waits at land_idx (its current position) for drone to land. This delay propagates
+        to all subsequent nodes, so we must find the tightest constraint.
+
+        Args:
+            state: current state
+            k: fleet index
+            land_idx: index of landing node in truck_routes[k] (usually len(routes)-1)
+
+        Returns:
+            Maximum delay in seconds; inf if no constraint, negative if impossible.
         """
-        if not state.drone_active[k]:
-            return False
+        route = state.truck_routes[k]
+        max_delay = float("inf")
 
-        landing_indices = self._landing_nodes(state, k)
-        for land_idx in landing_indices:
-            land_node = state.truck_routes[k][land_idx]
-            if self._drone_land_feasible(state, k, land_idx):
-                self._apply_drone_land(state, k, land_node)
-                return True
+        # Simulate truck's remaining route from land_idx onwards
+        truck_time = state.truck_depart[k][land_idx]
+        current_node = route[land_idx]
 
-        return False
+        for i in range(land_idx + 1, len(route)):
+            next_node = route[i]
+            dist = self.manhattan_dist[current_node, next_node]
+            travel_time = dist / self.v_t
+            arrive_next = truck_time + travel_time
+            service_end_next = (
+                max(arrive_next, self.tw_open[next_node])
+                + self.service_times[next_node]
+            )
 
-    # ------------------------------------------------------------------
-    # Infeasible action handling
-    # ------------------------------------------------------------------
+            # If truck delays by delta at land_idx, service_end_next becomes:
+            # service_end_next + delta must not exceed tw_close[next_node]
+            delay_slack = self.tw_close[next_node] - service_end_next
+            max_delay = min(max_delay, delay_slack)
 
-    def _compute_drone_trip_cost(self, state: VRPBTWState, k: int) -> float:
-        """Compute total euclidean distance cost of current drone trip."""
-        cost = 0.0
-        prev = DEPOT
-        for node in state.drone_route_nodes[k]:
-            cost += self.euclidean_dist[prev, node]
-            prev = node
-        return cost
+            truck_time = service_end_next
+            current_node = next_node
 
-    def _rollback_drone_trip(self, state: VRPBTWState, k: int) -> float:
+        # Also check return to depot
+        dist_to_depot = self.manhattan_dist[current_node, DEPOT]
+        travel_time = dist_to_depot / self.v_t
+        arrive_depot = truck_time + travel_time
+        delay_slack = self.T_max - arrive_depot
+        max_delay = min(max_delay, delay_slack)
+
+        return max_delay
+
+    def _compute_trip_start(self, state: VRPBTWState, k: int, j: int) -> float:
         """
-        Rollback entire drone trip: undo served nodes, reset drone to inactive.
+        Compute optimal drone launch time for serving node j.
 
-        Returns the distance cost incurred by the trip (for reward calculation).
+        Tries three cases in preference order:
+        1. Launch at truck_depart[launch_idx] (no truck delay, preferred)
+        2. Launch at truck_arrive[launch_idx] (earliest, no delay, alternative)
+        3. Delayed launch where truck waits at launch_node (last resort)
+
+        For each case, checks:
+        - Drone can reach j within time window
+        - Drone can return and land before truck departs
+        - Trip duration fits within t_max
+        - Truck can service subsequent nodes after late landing
+
+        Returns:
+            Launch time (seconds from episode start) if feasible, -inf otherwise.
         """
-        trip_cost = self._compute_drone_trip_cost(state, k)
+        launch_node = int(state.truck_prev_node[k])
+        land_node = int(state.truck_node[k])
+        launch_idx = state.truck_routes[k].index(launch_node)
+        land_idx = len(state.truck_routes[k]) - 1
 
-        # Unserve all nodes visited on this trip
-        for node in state.drone_route_nodes[k]:
-            if node != DEPOT and 1 <= node < len(state.served):
-                state.served[node] = False
+        earliest_launch = state.truck_arrive[k][launch_idx]
+        original_truck_depart = state.truck_depart[k][land_idx]
 
-        # Reset drone to inactive state at truck location with truck's current time
-        state.drone_active[k] = False
-        state.drone_node[k] = state.truck_node[k]
-        state.drone_load[k] = self.Q_d
-        state.drone_time[k] = state.truck_time[k]
+        # Flight and service times
+        t_to_j = self.euclidean_dist[launch_node, j] / self.v_d
+        t_back = self.euclidean_dist[j, land_node] / self.v_d
+        service_time_j = self.service_times[j]
 
-        # Clear trip routes
-        state.drone_route_nodes[k] = []
-        state.drone_route_mask[k] = []
+        # Helper: check if drone can serve j and land given a depart_t and truck_land_depart
+        def is_feasible_at(depart_t: float, truck_land_depart_val: float) -> bool:
+            arrive_j = depart_t + self.launch_time + t_to_j + self.land_time
 
-        # Revert trip cost
-        state.current_cost -= trip_cost
+            # Time window at j
+            if arrive_j > self.tw_close[j]:
+                return False
 
-        return trip_cost
+            serve_start = max(arrive_j, self.tw_open[j])
+            service_end = serve_start + service_time_j
+
+            # Trip duration and end time
+            trip_start = depart_t
+            trip_end = service_end + self.launch_time + t_back + self.land_time
+            trip_duration = trip_end - trip_start
+
+            if trip_duration > self.t_max or trip_end > self.T_max:
+                return False
+
+            # Must land before truck departs
+            if trip_end > truck_land_depart_val:
+                return False
+
+            # Check if truck can service subsequent nodes after late landing
+            return self._late_land_feasible(state, k, land_idx, trip_end)
+
+        # Case 1: Launch at truck_depart[launch_idx] (no truck delay)
+        launch_time_case1 = state.truck_depart[k][launch_idx]
+        if is_feasible_at(launch_time_case1, original_truck_depart):
+            return launch_time_case1
+
+        # Case 2: Launch at truck_arrive[launch_idx] (earliest, still no delay)
+        launch_time_case2 = earliest_launch
+        if launch_time_case2 < launch_time_case1:
+            if is_feasible_at(launch_time_case2, original_truck_depart):
+                return launch_time_case2
+
+        # Case 3: Delayed launch (truck waits at landing_node for drone to land)
+        max_truck_delay = self._compute_max_truck_delay(state, k, land_idx)
+        if max_truck_delay > 0:
+            # Truck can delay by up to max_truck_delay
+            delayed_truck_depart = original_truck_depart + max_truck_delay
+
+            # Find latest feasible depart_t within delayed window
+            # depart_t + launch_time + t_to_j + land_time + service + launch_time + t_back + land_time <= delayed_truck_depart
+            # depart_t <= delayed_truck_depart - 2*launch_time - t_to_j - t_back - 2*land_time - service
+            latest_launch_for_delay = (
+                delayed_truck_depart
+                - 2 * self.launch_time
+                - t_to_j
+                - service_time_j
+                - t_back
+                - 2 * self.land_time
+            )
+
+            # Constrain to be >= earliest_launch
+            candidate_launch_case3 = max(earliest_launch, latest_launch_for_delay)
+            if candidate_launch_case3 <= delayed_truck_depart:
+                if is_feasible_at(candidate_launch_case3, delayed_truck_depart):
+                    return candidate_launch_case3
+
+        return float("-inf")
 
     # ------------------------------------------------------------------
     # apply_action
@@ -789,6 +1012,10 @@ class VRPBTWEnv(Environment):
         node, v_idx = self.decode_action(action)
         k, vtype = self.vehicle_fleet_type(v_idx)
 
+        # Compute objective before action for potential-based shaping
+        prev_served = int(state.served[1:].sum())
+        prev_obj = self._compute_objective(state.current_cost, prev_served)
+
         state = _copy_state(state)
 
         # Apply action (assumed feasible — policy ensures this)
@@ -796,78 +1023,43 @@ class VRPBTWEnv(Environment):
             self._apply_truck(state, k, node)
         else:  # DRONE
             if state.drone_active[k]:
-                self._apply_drone_extend(state, k, node)
+                # Landing if node is on truck's route, else extend
+                if node in state.truck_routes[k]:
+                    self._apply_drone_land(state, k, node)
+                else:
+                    self._apply_drone_extend(state, k, node)
             else:
                 self._apply_drone_launch(state, k, node)
 
-        # Auto-land any drone with no feasible extends
-        for k in range(self.K):
-            if state.drone_active[k]:
-                has_extends = any(
-                    self._drone_extend_feasible(state, k, j)
-                    for j in range(1, self.n_customers + 1)
-                )
-                if not has_extends:
-                    self._auto_land_drone(state, k)
-
         terminated = self._is_terminated(state)
+
+        # Compute reward: potential-based shaping = -(f_next - f_prev)
+        curr_served = int(state.served[1:].sum())
+        curr_obj = self._compute_objective(state.current_cost, curr_served)
+        normalized_factor = (
+            2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
+        )
+
+        reward = -(curr_obj - prev_obj) / normalized_factor
 
         next_mask = (
             self.get_action_mask(state)
             if not terminated
             else ActionMask.all_valid(self.action_space_size)
         )
-        if not terminated and next_mask.is_empty():
-            # Remove incomplete drone trips before terminating
-            for k in range(self.K):
-                if state.drone_active[k]:
-                    launch_node = int(state.drone_launch_node[k])
-                    route = state.drone_route_nodes[k]
-                    mask = state.drone_route_mask[k]
-
-                    # Find where this trip started (last occurrence of launch_node marked as 0)
-                    launch_idx = -1
-                    for i in range(len(route) - 1, -1, -1):
-                        if route[i] == launch_node and mask[i] == 0:
-                            launch_idx = i
-                            break
-
-                    if launch_idx >= 0:
-                        # Unserve customers served in incomplete trip
-                        for i in range(launch_idx + 1, len(route)):
-                            if mask[i] == 1:
-                                node = route[i]
-                                state.served[node] = False
-
-                        # Remove incomplete trip from route
-                        state.drone_route_nodes[k] = state.drone_route_nodes[k][
-                            : launch_idx + 1
-                        ]
-                        state.drone_route_mask[k] = state.drone_route_mask[k][
-                            : launch_idx + 1
-                        ]
-
-                    # Reset drone to idle at launch node, load based on phase
-                    phase = int(state.truck_phase[k])
-                    state.drone_active[k] = False
-                    state.drone_phase[k] = phase
-                    state.drone_node[k] = launch_node
-                    state.drone_load[k] = self.Q_d if phase == 0 else 0.0
-
-            terminated = True
 
         return StepResult(
             next_state=state,
             terminated=terminated,
             truncated=False,
             action_mask=next_mask,
+            reward=reward,
             info={
                 "node": node,
                 "fleet": k,
                 "vehicle": "truck" if vtype == TRUCK else "drone",
-                "served_count": int(state.served[1:].sum()),
+                "served_count": curr_served,
                 "current_cost": state.current_cost,
-                "current_max_tard": state.current_max_tard,
             },
         )
 
@@ -878,98 +1070,209 @@ class VRPBTWEnv(Environment):
     def _apply_truck(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.truck_node[k])
         dist = self.manhattan_dist[from_node, j]
-        arrive = state.truck_time[k] + dist / self.v_t
+        arrive = self._truck_current_time(state, k) + dist / self.v_t
         serve_start = max(arrive, self.tw_open[j]) if j != DEPOT else arrive
         tardiness = max(arrive - self.tw_close[j], 0.0) if j != DEPOT else 0.0
 
-        state.truck_time[k] = serve_start + self.service_times[j]
+        service_end = serve_start + self.service_times[j]
         state.truck_prev_node[k] = from_node
         state.truck_node[k] = j
-        state.truck_load[k] -= self.demands[j]
         state.truck_routes[k].append(j)
+
+        # Track arrival and departure times at this node
+        state.truck_arrive[k].append(arrive)
+        state.truck_depart[k].append(service_end)
+
         if j != DEPOT:
             state.served[j] = True
-            self._update_phase(state, k)
+            self._update_truck_phase(state, k)
 
         state.current_cost += self.c_t * dist
+
+        # Update load arrays
         if j != DEPOT:
-            state.current_max_tard = max(state.current_max_tard, tardiness)
+            demand = self.demands[j]
+            state.truck_load[k].append(state.truck_load[k][-1])  # inherit previous load
+            if demand > 0:  # linehaul: all previous positions carry j's goods
+                for i in range(len(state.truck_load[k]) - 1):
+                    state.truck_load[k][i] += demand
+            else:  # backhaul: only the new position accumulates pickup
+                state.truck_load[k][-1] -= demand  # -= negative = +=
+        self._update_current_loads(state, k)
 
     def _apply_drone_launch(self, state: VRPBTWState, k: int, j: int) -> None:
-        from_node = int(state.drone_node[k])
-        dist = self.euclidean_dist[from_node, j]
-        depart_t = state.drone_time[k] + self.launch_time
-        arrive_j = depart_t + dist / self.v_d
-        serve_start = max(arrive_j, self.tw_open[j])
-        tardiness = max(arrive_j - self.tw_close[j], 0.0)
         launch_node = int(state.truck_prev_node[k])
+        land_node = int(state.truck_node[k])
         state.drone_launch_node[k] = launch_node
 
-        state.drone_launch_time[k] = state.drone_time[k]
-        state.drone_time[k] = serve_start + self.service_times[j]
+        # Compute optimal launch time using preference-order logic
+        depart_t = self._compute_trip_start(state, k, j)
+        assert depart_t > float("-inf"), (
+            f"Launch should be feasible (policy guarantees)"
+        )
+
+        launch_idx = state.truck_routes[k].index(launch_node)
+        land_idx = len(state.truck_routes[k]) - 1
+
+        # Compute arrival and service times based on depart_t
+        t_to_j = (
+            self.launch_time
+            + (self.euclidean_dist[launch_node, j] / self.v_d)
+            + self.land_time
+        )
+        arrive_j = depart_t + t_to_j
+        serve_start = max(arrive_j, self.tw_open[j])
+        service_end = serve_start + self.service_times[j]
+        dist = self.euclidean_dist[launch_node, j]
+
         state.drone_node[k] = j
-        state.drone_load[k] -= self.demands[j]
         state.drone_active[k] = True
         state.drone_phase[k] = int(state.truck_phase[k])
         state.served[j] = True
-        self._update_phase(state, k)
-
-        state.drone_route_nodes[k].extend([launch_node, j])
-        state.drone_route_mask[k].extend([0, 1])
 
         state.current_cost += self.c_d * dist
-        state.current_max_tard = max(state.current_max_tard, tardiness)
+
+        # Start new trip with launch_node and j
+        state.drone_trips_node[k].append([launch_node, j])
+        state.drone_trips_mask[k].append([0, 1])
+        state.drone_load[k].append([0.0])  # launch_node starts at 0
+        state.drone_load[k][-1].append(
+            state.drone_load[k][-1][-1]
+        )  # j inherits launch_node's load (0)
+
+        # Track drone times aligned with drone_trips_node[k][-1]
+        # [launch_node, j] -> arrivals=[0.0, arrive_j], departures=[depart_t, service_end]
+        state.drone_arrive[k].append(
+            [0.0, arrive_j]
+        )  # 0.0 for launch_node (no arrival), arrive_j for j
+        state.drone_depart[k].append(
+            [depart_t, service_end]
+        )  # depart_t from launch_node, service_end from j
+
+        # Update loads based on demand type
+        demand = self.demands[j]
+        if demand > 0:  # linehaul
+            for i in range(launch_idx + 1):  # truck positions up to launch_node
+                state.truck_load[k][i] += demand
+            for i in range(
+                len(state.drone_load[k][-1]) - 1
+            ):  # all trip positions except j
+                state.drone_load[k][-1][i] += demand
+        else:  # backhaul
+            state.drone_load[k][-1][-1] -= demand  # j accumulates pickup
+
+        self._update_current_loads(state, k)
 
     def _apply_drone_extend(self, state: VRPBTWState, k: int, j: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, j]
-        arrive_j = state.drone_time[k] + dist / self.v_d
+        arrive_j = (
+            self._drone_current_time(state, k)
+            + self.launch_time
+            + (dist / self.v_d)
+            + self.land_time
+        )
         serve_start = max(arrive_j, self.tw_open[j])
         tardiness = max(arrive_j - self.tw_close[j], 0.0)
+        service_end = serve_start + self.service_times[j]
 
-        state.drone_time[k] = serve_start + self.service_times[j]
         state.drone_node[k] = j
-        state.drone_load[k] -= self.demands[j]
         state.served[j] = True
-        self._update_phase(state, k)
 
-        state.drone_route_nodes[k].append(j)
-        state.drone_route_mask[k].append(1)
+        # Extend trip with new customer node - keep arrays aligned with drone_trips_node[k][-1]
+        state.drone_arrive[k][-1].append(arrive_j)
+        state.drone_depart[k][-1].append(service_end)
 
         state.current_cost += self.c_d * dist
-        state.current_max_tard = max(state.current_max_tard, tardiness)
+
+        # Extend current trip
+        state.drone_trips_node[k][-1].append(j)
+        state.drone_trips_mask[k][-1].append(1)
+        state.drone_load[k][-1].append(
+            state.drone_load[k][-1][-1]
+        )  # j inherits previous load
+
+        # Update loads based on demand type
+        demand = self.demands[j]
+        if demand > 0:  # linehaul
+            launch_node_val = int(state.drone_launch_node[k])
+            launch_idx = state.truck_routes[k].index(launch_node_val)
+            for i in range(launch_idx + 1):  # truck up to launch_node
+                state.truck_load[k][i] += demand
+            for i in range(
+                len(state.drone_load[k][-1]) - 1
+            ):  # all trip positions except j
+                state.drone_load[k][-1][i] += demand
+        else:  # backhaul
+            state.drone_load[k][-1][-1] -= demand  # j accumulates pickup
+
+        self._update_current_loads(state, k)
 
     def _apply_drone_land(self, state: VRPBTWState, k: int, land: int) -> None:
         from_node = int(state.drone_node[k])
         dist = self.euclidean_dist[from_node, land]
-        arrive = state.drone_time[k] + dist / self.v_d + self.land_time
-        if land == int(state.truck_node[k]):
-            arrive = max(arrive, state.truck_time[k])
+        arrive = (
+            self._drone_current_time(state, k)
+            + self.launch_time
+            + (dist / self.v_d)
+            + self.land_time
+        )
 
-        state.drone_time[k] = arrive
         state.drone_node[k] = land
         state.drone_active[k] = False
-        state.drone_phase[k] = int(state.truck_phase[k])
-        state.drone_load[k] = self.Q_d
-        state.drone_launch_time[k] = arrive
-
-        state.drone_route_nodes[k].append(land)
-        state.drone_route_mask[k].append(0)
+        self._update_drone_phase(state, k)
 
         # Landing has no tardiness — cost only
         state.current_cost += self.c_d * dist
+
+        # Close current trip
+        state.drone_trips_node[k][-1].append(land)
+        state.drone_trips_mask[k][-1].append(0)
+
+        # Track arrival/departure at landing node - keep arrays aligned with drone_trips_node[k][-1]
+        state.drone_arrive[k][-1].append(arrive)  # arrival at landing node
+        state.drone_depart[k][-1].append(
+            0.0
+        )  # 0.0 for departure (unset - only set if landing node becomes launch node of next trip)
+
+        # Update truck departure times based on drone trip completion
+        # At launch node: truck depart time should be >= drone depart time at launch node
+        launch_node = int(state.drone_trips_node[k][-1][0])
+        launch_idx = state.truck_routes[k].index(launch_node)
+        drone_depart_at_launch = state.drone_depart[k][-1][0]
+        state.truck_depart[k][launch_idx] = max(state.truck_depart[k][launch_idx], drone_depart_at_launch)
+
+        # At land node: truck depart time should be >= drone arrive time at land node
+        land_idx = state.truck_routes[k].index(land)
+        state.truck_depart[k][land_idx] = max(state.truck_depart[k][land_idx], arrive)
+
+        # Transfer drone backhaul load to truck positions from landing onwards
+        landing_load = state.drone_load[k][-1][-1]  # last drone node's load
+        for i in range(land_idx, len(state.truck_load[k])):
+            state.truck_load[k][i] += landing_load
+        state.drone_load[k][-1].append(0.0)  # close trip
+
+        self._update_current_loads(state, k)
 
     # ------------------------------------------------------------------
     # Phase update
     # ------------------------------------------------------------------
 
-    def _update_phase(self, state: VRPBTWState, k: int) -> None:
-        if (
-            state.truck_phase[k] == 0
-            and len(self._linehaul_idx) > 0
-            and state.served[self._linehaul_idx].all()
-        ):
-            state.truck_phase[k] = 1
+    def _update_truck_phase(self, state: VRPBTWState, k: int) -> None:
+        """Update truck phase: switches to 1 when all feasible nodes are backhaul (if phased=True)."""
+        if not self.phased or state.truck_phase[k] == 1:
+            return
+        # Check if any unserved linehaul customer is still feasible
+        for j in self._linehaul_idx:
+            if not state.served[j] and self._truck_feasible(state, k, j):
+                return  # Still have feasible linehaul, stay in phase 0
+        # All feasible customers are backhaul, switch to phase 1
+        state.truck_phase[k] = 1
+
+    def _update_drone_phase(self, state: VRPBTWState, k: int) -> None:
+        """Update drone phase on landing: sync to truck's current phase (if phased=True)."""
+        if self.phased:
+            state.drone_phase[k] = int(state.truck_phase[k])
 
     # ------------------------------------------------------------------
     # Termination
@@ -1058,51 +1361,58 @@ class VRPBTWEnv(Environment):
         # Served linehaul/backhaul nodes also leave the l_idx/b_idx index sets
         # in NodeEncoder, stopping them from influencing routing cross-attention.
         effective_demand = np.where(state.served, 0.0, self.demands).astype(np.float32)
+        linehaul_demand = np.where(self.demands > 0, effective_demand, 0.0)
+        backhaul_demand = np.where(self.demands < 0, effective_demand, 0.0)
         node_features = np.stack(
             [
                 self.coords[:, 0] / max_dist,
                 self.coords[:, 1] / max_dist,
-                effective_demand / max_capacity,
+                linehaul_demand / max_capacity,
+                backhaul_demand / max_capacity,
                 self.tw_open / T,
                 self.tw_close / T,
             ],
             axis=1,
-        ).astype(np.float32)  # (N+1, 5)
+        ).astype(np.float32)  # (N+1, 6)
 
         # ── Vehicle features ─────────────────────────────────────────────
         truck_rows = []
         drone_rows = []
         for k in range(self.K):
-            # Truck k
+            # Truck k: [x, y, linehaul_bound, backhaul_bound, time, deadline]
             tx, ty = self.coords[state.truck_node[k]]
-            t_rem = float(state.truck_load[k]) / max_capacity
-            t_open = float(state.truck_time[k]) / T
+            t_lh = float(state.current_truck_load[k][0]) / self.Q_t
+            t_bh = float(state.current_truck_load[k][1]) / self.Q_t
+            t_open = float(self._truck_current_time(state, k)) / T
             t_close = self.T_max / T  # system deadline normalized by time scale
             truck_rows.append(
                 np.array(
-                    [tx / max_dist, ty / max_dist, t_rem, t_open, t_close],
+                    [tx / max_dist, ty / max_dist, t_lh, t_bh, t_open, t_close],
                     dtype=np.float32,
                 )
             )
 
-            # Drone k
+            # Drone k: [x, y, linehaul_bound, backhaul_bound, time, deadline]
             dx, dy = self.coords[state.drone_node[k]]
-            d_rem = float(state.drone_load[k]) / max_capacity
-            d_close = float(state.drone_launch_time[k] + self.t_max) / T
+            d_lh = float(state.current_drone_load[k][0]) / self.Q_d
+            d_bh = float(state.current_drone_load[k][1]) / self.Q_d
+            d_close = float(self._drone_launch_time(state, k) + self.t_max) / T
             if state.drone_active[k]:
-                d_open = float(state.drone_time[k]) / T  # already flying
+                d_open = float(self._drone_current_time(state, k)) / T  # already flying
             else:
-                d_open = float(state.truck_time[k]) / T  # boards when truck arrives
+                d_open = (
+                    float(self._truck_current_time(state, k)) / T
+                )  # boards when truck arrives
             drone_rows.append(
                 np.array(
-                    [dx / max_dist, dy / max_dist, d_rem, d_open, d_close],
+                    [dx / max_dist, dy / max_dist, d_lh, d_bh, d_open, d_close],
                     dtype=np.float32,
                 )
             )
 
         # Vehicle index order matches encode_action()/vehicle_fleet_type():
         # [truck_0..truck_{K-1}, drone_0..drone_{K-1}]
-        vehicle_features = np.stack(truck_rows + drone_rows, axis=0)  # (2K, 5)
+        vehicle_features = np.stack(truck_rows + drone_rows, axis=0)  # (2K, 6)
 
         # ── Candidate edges: all ordered (i, j), i != j ─────────────────────
         src, dst = np.meshgrid(np.arange(N1), np.arange(N1), indexing="ij")
@@ -1201,25 +1511,27 @@ class VRPBTWEnv(Environment):
                 total_cost += self.c_t * dist
                 prev = j
 
-            t_d, prev_d, in_trip = 0.0, DEPOT, False
-            for node, is_cust in zip(
-                state.drone_route_nodes[k], state.drone_route_mask[k]
+            t_d, prev_d = 0.0, DEPOT
+            for trip_nodes, trip_mask in zip(
+                state.drone_trips_node[k], state.drone_trips_mask[k]
             ):
-                dist = self.euclidean_dist[prev_d, node]
-                total_cost += self.c_d * dist
-                if not in_trip and not is_cust:
-                    t_d = max(t_d + dist / self.v_d, 0.0)
-                elif not in_trip and is_cust:
-                    t_d += self.launch_time + dist / self.v_d
-                    t_d = max(t_d, self.tw_open[node]) + self.service_times[node]
-                    in_trip = True
-                elif in_trip and is_cust:
-                    t_d += dist / self.v_d
-                    t_d = max(t_d, self.tw_open[node]) + self.service_times[node]
-                else:
-                    t_d += dist / self.v_d + self.land_time
-                    in_trip = False
-                prev_d = node
+                in_trip = False
+                for node, is_cust in zip(trip_nodes, trip_mask):
+                    dist = self.euclidean_dist[prev_d, node]
+                    total_cost += self.c_d * dist
+                    if not in_trip and not is_cust:
+                        t_d = max(t_d + dist / self.v_d, 0.0)
+                    elif not in_trip and is_cust:
+                        t_d += self.launch_time + dist / self.v_d
+                        t_d = max(t_d, self.tw_open[node]) + self.service_times[node]
+                        in_trip = True
+                    elif in_trip and is_cust:
+                        t_d += dist / self.v_d
+                        t_d = max(t_d, self.tw_open[node]) + self.service_times[node]
+                    else:
+                        t_d += dist / self.v_d + self.land_time
+                        in_trip = False
+                    prev_d = node
 
         served_count = int(state.served[1:].sum())
         return total_cost, served_count
@@ -1239,8 +1551,12 @@ class VRPBTWEnv(Environment):
                 "served_count": served_count,
                 "n_customers": self.n_customers,
                 "truck_routes": [list(r) for r in state.truck_routes],
-                "drone_route_nodes": [list(r) for r in state.drone_route_nodes],
-                "drone_route_mask": [list(m) for m in state.drone_route_mask],
+                "drone_trips_node": [
+                    [list(t) for t in trips] for trips in state.drone_trips_node
+                ],
+                "drone_trips_mask": [
+                    [list(m) for m in trips] for trips in state.drone_trips_mask
+                ],
                 "unserved": int((~state.served[1:]).sum()),
             },
         )
