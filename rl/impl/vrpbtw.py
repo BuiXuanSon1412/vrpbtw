@@ -67,6 +67,7 @@ class VRPBTWState:
     drone_node: np.ndarray
     drone_active: np.ndarray
     drone_launch_node: np.ndarray  # (K,) truck node at which drone k last launched
+    drone_land_node: np.ndarray  # (K,) proactive landing node for current drone trip
     drone_phase: (
         np.ndarray
     )  # (K,) phase when drone k launched (locked for trip duration)
@@ -111,6 +112,7 @@ def _copy_state(s: VRPBTWState) -> VRPBTWState:
         drone_node=s.drone_node.copy(),
         drone_active=s.drone_active.copy(),
         drone_launch_node=s.drone_launch_node.copy(),
+        drone_land_node=s.drone_land_node.copy(),
         drone_phase=s.drone_phase.copy(),
         served=s.served.copy(),
         current_cost=s.current_cost,
@@ -451,6 +453,7 @@ class VRPBTWEnv(Environment):
             drone_node=np.zeros(K, dtype=np.int32),
             drone_active=np.zeros(K, dtype=bool),
             drone_launch_node=np.zeros(K, dtype=np.int32),
+            drone_land_node=np.zeros(K, dtype=np.int32),
             drone_phase=np.zeros(K, dtype=np.int32),
             served=served,
             current_cost=0.0,
@@ -614,43 +617,58 @@ class VRPBTWEnv(Environment):
         # Return indices of all nodes from launch_idx+1 to end (inclusive)
         return list(range(launch_idx + 1, len(route)))
 
-    def _has_feasible_landing_after_extend(
-        self, state: VRPBTWState, k: int, j: int
-    ) -> bool:
+    def _get_feasible_land_nodes(
+        self, state: VRPBTWState, k: int, j: int, depart_t: float
+    ) -> List[int]:
         """
-        Check if drone can land somewhere after extending to node j.
-        Returns True if at least one feasible landing node exists.
+        Get list of feasible landing node indices after serving customer j.
+
+        Args:
+            state: current state
+            k: fleet index
+            j: customer node to serve
+            depart_t: departure time at current drone position
+
+        Returns:
+            List of indices into truck_routes[k] where drone can land.
         """
         from_node = int(state.drone_node[k])
         landing_indices = self._landing_nodes(state, k)
+        feasible_indices = []
+
+        # Determine trip start: if drone is active, use current trip start; otherwise new trip starts at depart_t
+        if state.drone_active[k] and state.drone_depart[k]:
+            trip_start = state.drone_depart[k][-1][0]
+        else:
+            trip_start = depart_t
 
         for land_idx in landing_indices:
             land_node = state.truck_routes[k][land_idx]
             t_to_j = self.euclidean_dist[from_node, j] / self.v_d
             t_j_to_land = self.euclidean_dist[j, land_node] / self.v_d
 
-            # Calculate drone landing time
-            arrive_j = (
-                self._drone_current_time(state, k)
-                + self.launch_time
-                + t_to_j
-                + self.land_time
-            )
+            # Calculate drone arrival at j and service end
+            arrive_j = depart_t + self.launch_time + t_to_j + self.land_time
             service_end = max(arrive_j, self.tw_open[j]) + self.service_times[j]
-            trip_start = state.drone_depart[k][-1][0]
-            trip_end = service_end + self.launch_time + t_j_to_land + self.land_time
 
-            if trip_end - trip_start > self.t_max:
+            # Calculate trip end time
+            trip_end = max(
+                service_end + self.launch_time + t_j_to_land + self.land_time,
+                state.truck_arrive[k][land_idx],
+            )
+
+            # Check trip duration constraint and system time constraint
+            if trip_end - trip_start > self.t_max or trip_end > self.T_max:
                 continue
 
             # Check if truck can still service subsequent nodes
-            if self._late_land_feasible(state, k, land_idx, trip_end):
-                return True
+            if self._service_rate_feasible(state, k, land_idx, trip_end):
+                feasible_indices.append(land_idx)
 
-        return False
+        return feasible_indices
 
-    def _late_land_feasible(
-        self, state: VRPBTWState, k: int, land_idx: int, drone_land_time: float
+    def _service_rate_feasible(
+        self, state: VRPBTWState, k: int, land_idx: int, trip_end: float
     ) -> bool:
         """
         If drone lands at truck_routes[k][land_idx] at drone_land_time (possibly late),
@@ -660,7 +678,7 @@ class VRPBTWEnv(Environment):
         """
         route = state.truck_routes[k]
         land_node = route[land_idx]
-        t = drone_land_time
+        t = max(trip_end, state.truck_depart[k][land_idx])
         node = land_node
 
         # Simulate remaining route from landing node onwards
@@ -743,19 +761,6 @@ class VRPBTWEnv(Environment):
             self._drone_current_time(state, k) - self._drone_launch_time(state, k)
         )
 
-    def _min_return_time(self, state: VRPBTWState, k: int, from_node: int) -> float:
-        """Minimum flight time from from_node to any unserved node.
-
-        Returns the minimum time for drone to reach a landing node (where truck can be).
-        If no feasible landing node exists, returns infinity.
-        """
-        unserved_nodes = ~state.served
-        reachable_nodes = np.where(unserved_nodes)[0]
-        if len(reachable_nodes) == 0:
-            return float("inf")
-        distances = self.euclidean_dist[from_node, reachable_nodes]
-        return float(np.min(distances)) / self.v_d
-
     def _drone_launch_feasible(self, state: VRPBTWState, k: int, j: int) -> bool:
         """Check if drone k can launch to serve node j.
 
@@ -794,7 +799,7 @@ class VRPBTWEnv(Environment):
 
         # Detailed constraint checking using launch time computation
         launch_time = self._compute_trip_start(state, k, j)
-        return launch_time > float("-inf")
+        return launch_time < float("inf")
 
     def _drone_extend_feasible(self, state: VRPBTWState, k: int, j: int) -> bool:
         if not state.drone_active[k] or state.served[j]:
@@ -820,15 +825,10 @@ class VRPBTWEnv(Environment):
         service_end = max(arrive_j, self.tw_open[j]) + self.service_times[j]
         if service_end > self.tw_close[j]:
             return False
-        t_back = self._min_return_time(state, k, j)
-
-        trip_start = state.drone_depart[k][-1][0]
-        trip_end = service_end + self.launch_time + t_back + self.land_time
-        if trip_end - trip_start > self.t_max:
-            return False
 
         # Check if drone can still land somewhere after extending to j
-        return self._has_feasible_landing_after_extend(state, k, j)
+        depart_t = self._drone_current_time(state, k)
+        return len(self._get_feasible_land_nodes(state, k, j, depart_t)) > 0
 
     def _drone_land_feasible(self, state: VRPBTWState, k: int, land_idx: int) -> bool:
         """Check if drone can land at truck_routes[k][land_idx] without losing customers.
@@ -857,152 +857,235 @@ class VRPBTWEnv(Environment):
             return False
 
         # Check if late landing would cause truck to miss future customers
-        return self._late_land_feasible(state, k, land_idx, trip_end)
-
-    def _compute_max_truck_delay(
-        self, state: VRPBTWState, k: int, land_idx: int
-    ) -> float:
-        """
-        Compute maximum time truck can wait at landing node without pushing any subsequent service end above tw_close.
-
-        Truck waits at land_idx (its current position) for drone to land. This delay propagates
-        to all subsequent nodes, so we must find the tightest constraint.
-
-        Args:
-            state: current state
-            k: fleet index
-            land_idx: index of landing node in truck_routes[k] (usually len(routes)-1)
-
-        Returns:
-            Maximum delay in seconds; inf if no constraint, negative if impossible.
-        """
-        route = state.truck_routes[k]
-        max_delay = float("inf")
-
-        # Simulate truck's remaining route from land_idx onwards
-        truck_time = state.truck_depart[k][land_idx]
-        current_node = route[land_idx]
-
-        for i in range(land_idx + 1, len(route)):
-            next_node = route[i]
-            dist = self.manhattan_dist[current_node, next_node]
-            travel_time = dist / self.v_t
-            arrive_next = truck_time + travel_time
-            service_end_next = (
-                max(arrive_next, self.tw_open[next_node])
-                + self.service_times[next_node]
-            )
-
-            # If truck delays by delta at land_idx, service_end_next becomes:
-            # service_end_next + delta must not exceed tw_close[next_node]
-            delay_slack = self.tw_close[next_node] - service_end_next
-            max_delay = min(max_delay, delay_slack)
-
-            truck_time = service_end_next
-            current_node = next_node
-
-        # Also check return to depot
-        dist_to_depot = self.manhattan_dist[current_node, DEPOT]
-        travel_time = dist_to_depot / self.v_t
-        arrive_depot = truck_time + travel_time
-        delay_slack = self.T_max - arrive_depot
-        max_delay = min(max_delay, delay_slack)
-
-        return max_delay
+        return self._service_rate_feasible(state, k, land_idx, trip_end)
 
     def _compute_trip_start(self, state: VRPBTWState, k: int, j: int) -> float:
         """
-        Compute optimal drone launch time for serving node j.
+        Compute optimal drone launch time for serving node j (RELAXATION VERSION from RELAX-SYNC-GUIDE.txt).
 
-        Tries three cases in preference order:
-        1. Launch at truck_depart[launch_idx] (no truck delay, preferred)
-        2. Launch at truck_arrive[launch_idx] (earliest, no delay, alternative)
-        3. Delayed launch where truck waits at launch_node (last resort)
-
-        For each case, checks:
-        - Drone can reach j within time window
-        - Drone can return and land before truck departs
-        - Trip duration fits within t_max
-        - Truck can service subsequent nodes after late landing
+        Drone trip does not change departure/arrival timestamps of subsequent truck nodes.
+        Implements 8 scenarios based on arrival timing conditions.
 
         Returns:
-            Launch time (seconds from episode start) if feasible, -inf otherwise.
+            Launch time (seconds from episode start) if feasible, inf otherwise.
         """
         launch_node = int(state.truck_prev_node[k])
         land_node = int(state.truck_node[k])
         launch_idx = state.truck_routes[k].index(launch_node)
         land_idx = len(state.truck_routes[k]) - 1
 
-        earliest_launch = state.truck_arrive[k][launch_idx]
-        original_truck_depart = state.truck_depart[k][land_idx]
+        # Compute drone and truck flight times
+        d_launch_to_j = (
+            self.launch_time
+            + (self.euclidean_dist[launch_node, j] / self.v_d)
+            + self.land_time
+        )
+        d_j_to_land = (
+            self.launch_time
+            + (self.euclidean_dist[j, land_node] / self.v_d)
+            + self.land_time
+        )
+        t_launch_to_land = self.manhattan_dist[launch_node, land_node] / self.v_t
 
-        # Flight and service times
-        t_to_j = self.euclidean_dist[launch_node, j] / self.v_d
-        t_back = self.euclidean_dist[j, land_node] / self.v_d
-        service_time_j = self.service_times[j]
+        d_launch_depart = float("inf")
 
-        # Helper: check if drone can serve j and land given a depart_t and truck_land_depart
-        def is_feasible_at(depart_t: float, truck_land_depart_val: float) -> bool:
-            arrive_j = depart_t + self.launch_time + t_to_j + self.land_time
+        # Case 1: (*) d_launch_depart + d_launch_to_j < tw_open[j]
+        #         (**) d_launch_depart < truck_depart[k][launch_idx]
+        #         (***) tw_open[j] + service_times[j] + d_j_to_land < truck_depart[k][launch_idx] + t_launch_to_land
+        min_d_launch_depart = max(
+            state.truck_depart[k][launch_idx] + t_launch_to_land - self.t_max,
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx],
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and state.truck_depart[k][launch_idx] + t_launch_to_land
+            <= state.truck_depart[k][land_idx]
+            and self.tw_open[j] + self.service_times[j] + d_j_to_land
+            < state.truck_depart[k][launch_idx] + t_launch_to_land
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-            # Time window at j
-            if arrive_j > self.tw_close[j]:
-                return False
+        # Case 2: (*) d_launch_depart + d_launch_to_j < tw_open[j]
+        #         (**) d_launch_depart < truck_depart[k][launch_idx]
+        #         (***) tw_open[j] + service_times[j] + d_j_to_land >= truck_depart[k][launch_idx] + t_launch_to_land
+        min_d_launch_depart = max(
+            state.truck_depart[k][launch_idx] + t_launch_to_land - self.t_max,
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx],
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and state.truck_depart[k][launch_idx] + t_launch_to_land
+            <= state.truck_depart[k][land_idx]
+            and self.tw_open[j] + self.service_times[j] + d_j_to_land
+            >= state.truck_depart[k][launch_idx] + t_launch_to_land
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-            serve_start = max(arrive_j, self.tw_open[j])
-            service_end = serve_start + service_time_j
+        # Case 3: (*) d_launch_depart + d_launch_to_j < tw_open[j]
+        #         (**) d_launch_depart >= truck_depart[k][launch_idx]
+        #         (***) tw_open[j] + service_times[j] + d_j_to_land < d_launch_depart + t_launch_to_land
+        min_d_launch_depart = max(
+            state.truck_depart[k][launch_idx],
+            self.tw_open[j] + self.service_times[j] + d_j_to_land - t_launch_to_land,
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            state.truck_depart[k][land_idx] - t_launch_to_land,
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and t_launch_to_land <= self.t_max
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-            # Trip duration and end time
-            trip_start = depart_t
-            trip_end = service_end + self.launch_time + t_back + self.land_time
-            trip_duration = trip_end - trip_start
+        # Case 4: (*) d_launch_depart + d_launch_to_j < tw_open[j]
+        #         (**) d_launch_depart >= truck_depart[k][launch_idx]
+        #         (***) tw_open[j] + service_times[j] + d_j_to_land >= d_launch_depart + t_launch_to_land
+        min_d_launch_depart = max(
+            state.truck_depart[k][launch_idx],
+            self.tw_open[j] + self.service_times[j] + d_j_to_land - t_launch_to_land,
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            self.tw_open[j] - d_launch_to_j,
+            self.tw_open[j] + self.service_times[j] + d_j_to_land - t_launch_to_land,
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and state.truck_depart[k][launch_idx] + t_launch_to_land
+            <= state.truck_depart[k][land_idx]
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-            if trip_duration > self.t_max or trip_end > self.T_max:
-                return False
+        # Case 5: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
+        #         (**) d_launch_depart < truck_depart[k][launch_idx]
+        #         (***) d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land < truck_depart[k][launch_idx] + t_launch_to_land
+        min_d_launch_depart = max(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx] + t_launch_to_land - self.t_max,
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            state.truck_depart[k][launch_idx],
+            state.truck_depart[k][launch_idx]
+            + t_launch_to_land
+            - d_launch_to_j
+            - self.service_times[j]
+            - d_j_to_land,
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and state.truck_depart[k][launch_idx] + t_launch_to_land
+            <= state.truck_depart[k][land_idx]
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-            # Must land before truck departs
-            if trip_end > truck_land_depart_val:
-                return False
+        # Case 6: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
+        #         (**) d_launch_depart < truck_depart[k][launch_idx]
+        #         (***) d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land >= truck_depart[k][launch_idx] + t_launch_to_land
+        min_d_launch_depart = max(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx] + t_launch_to_land - self.t_max,
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            state.truck_depart[k][launch_idx],
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            state.truck_depart[k][land_idx]
+            - d_launch_to_j
+            - self.service_times[j]
+            - d_j_to_land,
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and state.truck_depart[k][launch_idx] + t_launch_to_land
+            <= state.truck_depart[k][land_idx]
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-            # Check if truck can service subsequent nodes after late landing
-            return self._late_land_feasible(state, k, land_idx, trip_end)
+        # Case 7: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
+        #         (**) d_launch_depart >= truck_depart[k][launch_idx]
+        #         (***) d_launch_to_j + service_times[j] + d_j_to_land < t_launch_to_land
+        min_d_launch_depart = max(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx],
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            state.truck_depart[k][land_idx] - t_launch_to_land,
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and d_launch_to_j + self.service_times[j] + d_j_to_land < t_launch_to_land
+            and t_launch_to_land <= self.t_max
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-        # Case 1: Launch at truck_depart[launch_idx] (no truck delay)
-        launch_time_case1 = state.truck_depart[k][launch_idx]
-        if is_feasible_at(launch_time_case1, original_truck_depart):
-            return launch_time_case1
+        # Case 8: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
+        #         (**) d_launch_depart >= truck_depart[k][launch_idx]
+        #         (***) d_launch_to_j + service_times[j] + d_j_to_land >= t_launch_to_land
+        min_d_launch_depart = max(
+            self.tw_open[j] - d_launch_to_j,
+            state.truck_depart[k][launch_idx],
+            state.truck_arrive[k][launch_idx],
+        )
+        max_d_launch_depart = min(
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0),
+            state.truck_depart[k][land_idx]
+            - d_launch_to_j
+            - self.service_times[j]
+            - d_j_to_land,
+            self.tw_close[j] - self.service_times[j] - d_launch_to_j,
+        )
+        if (
+            min_d_launch_depart <= max_d_launch_depart
+            and d_launch_to_j + self.service_times[j] + d_j_to_land >= t_launch_to_land
+            and d_launch_to_j + self.service_times[j] + d_j_to_land <= self.t_max
+        ):
+            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
 
-        # Case 2: Launch at truck_arrive[launch_idx] (earliest, still no delay)
-        launch_time_case2 = earliest_launch
-        if launch_time_case2 < launch_time_case1:
-            if is_feasible_at(launch_time_case2, original_truck_depart):
-                return launch_time_case2
+        if d_launch_depart >= float("inf"):
+            return d_launch_depart
 
-        # Case 3: Delayed launch (truck waits at landing_node for drone to land)
-        max_truck_delay = self._compute_max_truck_delay(state, k, land_idx)
-        if max_truck_delay > 0:
-            # Truck can delay by up to max_truck_delay
-            delayed_truck_depart = original_truck_depart + max_truck_delay
+        d_j_arrive = d_launch_depart + d_launch_to_j
 
-            # Find latest feasible depart_t within delayed window
-            # depart_t + launch_time + t_to_j + land_time + service + launch_time + t_back + land_time <= delayed_truck_depart
-            # depart_t <= delayed_truck_depart - 2*launch_time - t_to_j - t_back - 2*land_time - service
-            latest_launch_for_delay = (
-                delayed_truck_depart
-                - 2 * self.launch_time
-                - t_to_j
-                - service_time_j
-                - t_back
-                - 2 * self.land_time
-            )
+        d_launch_depart = min(
+            d_launch_depart + max(self.tw_open[j] - d_j_arrive, 0),
+            state.truck_depart[k][launch_idx]
+            + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0),
+        )
 
-            # Constrain to be >= earliest_launch
-            candidate_launch_case3 = max(earliest_launch, latest_launch_for_delay)
-            if candidate_launch_case3 <= delayed_truck_depart:
-                if is_feasible_at(candidate_launch_case3, delayed_truck_depart):
-                    return candidate_launch_case3
-
-        return float("-inf")
+        return d_launch_depart
 
     # ------------------------------------------------------------------
     # apply_action
@@ -1104,12 +1187,11 @@ class VRPBTWEnv(Environment):
         launch_node = int(state.truck_prev_node[k])
         land_node = int(state.truck_node[k])
         state.drone_launch_node[k] = launch_node
+        state.drone_land_node[k] = land_node
 
         # Compute optimal launch time using preference-order logic
         depart_t = self._compute_trip_start(state, k, j)
-        assert depart_t > float("-inf"), (
-            f"Launch should be feasible (policy guarantees)"
-        )
+        assert depart_t < float("inf"), "Launch should be feasible (policy guarantees)"
 
         launch_idx = state.truck_routes[k].index(launch_node)
         land_idx = len(state.truck_routes[k]) - 1
@@ -1129,6 +1211,15 @@ class VRPBTWEnv(Environment):
         state.drone_active[k] = True
         state.drone_phase[k] = int(state.truck_phase[k])
         state.served[j] = True
+
+        # Use slack at landing node to delay truck departure at launch
+        state.truck_depart[k][launch_idx] += max(
+            self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0
+        )
+        t_launch_to_land = self.manhattan_dist[launch_node, land_node] / self.v_t
+        state.truck_arrive[k][land_idx] = (
+            state.truck_depart[k][launch_idx] + t_launch_to_land
+        )
 
         state.current_cost += self.c_d * dist
 
@@ -1160,6 +1251,12 @@ class VRPBTWEnv(Environment):
                 state.drone_load[k][-1][i] += demand
         else:  # backhaul
             state.drone_load[k][-1][-1] -= demand  # j accumulates pickup
+
+        # Update proactive landing node to nearest feasible landing after launching to j
+        feasible_land_indices = self._get_feasible_land_nodes(state, k, j, service_end)
+        if feasible_land_indices:
+            route = state.truck_routes[k]
+            state.drone_land_node[k] = int(route[feasible_land_indices[0]])
 
         self._update_current_loads(state, k)
 
@@ -1206,6 +1303,13 @@ class VRPBTWEnv(Environment):
         else:  # backhaul
             state.drone_load[k][-1][-1] -= demand  # j accumulates pickup
 
+        # Update proactive landing node to nearest feasible landing after extending to j
+        depart_t = service_end
+        feasible_land_indices = self._get_feasible_land_nodes(state, k, j, depart_t)
+        if feasible_land_indices:
+            route = state.truck_routes[k]
+            state.drone_land_node[k] = int(route[feasible_land_indices[0]])
+
         self._update_current_loads(state, k)
 
     def _apply_drone_land(self, state: VRPBTWState, k: int, land: int) -> None:
@@ -1240,7 +1344,9 @@ class VRPBTWEnv(Environment):
         launch_node = int(state.drone_trips_node[k][-1][0])
         launch_idx = state.truck_routes[k].index(launch_node)
         drone_depart_at_launch = state.drone_depart[k][-1][0]
-        state.truck_depart[k][launch_idx] = max(state.truck_depart[k][launch_idx], drone_depart_at_launch)
+        state.truck_depart[k][launch_idx] = max(
+            state.truck_depart[k][launch_idx], drone_depart_at_launch
+        )
 
         # At land node: truck depart time should be >= drone arrive time at land node
         land_idx = state.truck_routes[k].index(land)

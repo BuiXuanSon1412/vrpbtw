@@ -1,0 +1,432 @@
+# relaxation version
+description: drone trip does not change departure/arrival timestamps of any subsequent nodes in truck route
+          -> drone trip does not change departure / arrival timestamp of land node in truck route 
+
+find the minimum of d_launch_depart?
+
+## explanation (do not implement because of d_launch_depart is unspecified)
+
+t_launch_depart = max(truck_depart[k][launch_idx], d_launch_depart)
+t_land_arrive = t_launch_depart + t_launch_to_land
+              = max(truck_depart[k][launch_idx], d_launch_depart) + t_launch_to_land
+
+d_j_arrive = d_launch_depart + d_launch_to_j
+d_j_depart = max(d_j_arrive, tw_open[j]) + service_times[j]
+d_land_arrive   = max(
+                    d_j_depart + d_j_to_land, 
+                    t_land_arrive)
+                = max(
+                    max(d_launch_depart + d_launch_to_j, tw_open[j]) + service_times[j] + d_j_to_land,
+                    max(truck_depart[k][launch_idx], d_launch_depart) + t_launch_to_land
+                  )
+
+
+## constraints
+
+(1) drone trip duration limit
+    d_land_arrive - d_launch_depart <= t_max
+
+    max(
+      max(d_launch_depart + d_launch_to_j, tw_open[j]) + service_times[j] + d_j_to_land, 
+      max(d_launch_depart, truck_depart[k][launch_idx]) + t_launch_to_land
+    ) 
+    - d_launch_depart <= t_max
+
+(2) drone k departs in range [truck_arrive[k][launch_idx], t_launch_depart]
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) drone k arrives before truck departs at land node
+    d_land_arrive <= truck_depart[k][land_idx]
+
+    max(
+      max(d_launch_depart + d_launch_to_j, tw_open[j]) + service_times[j] + d_j_to_land, 
+      max(d_launch_depart, truck_depart[k][launch_idx]) + t_launch_to_land
+    )
+    <= truck_depart[k][land_idx]
+
+
+(4) drone k serve node j
+    d_j_arrive <= tw_close[j] - service_times[j]
+  
+    d_launch_depart + d_launch_to_j <= tw_close[j] - service_times[j]
+
+ 
+## implementation
+
+initialize:
+    d_launch_depart = -inf
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j < tw_open[j]
+->  d_launch_depart < tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart < truck_depart[k][launch_idx]
+
+(***) 
+    tw_open[j] + service_times[j] + d_j_to_land < truck_depart[k][launch_idx] + t_launch_to_land
+
+(1) 
+    d_launch_depart >= truck_depart[k][launch_idx] + t_launch_to_land - t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    truck_depart[k][launch_idx] + t_launch_to_land <= truck_depart[k][land_idx]
+
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    truck_depart[k][launch_idx] + t_launch_to_land - t_max,
+    truck_arrive[k][launch_idx]
+  ) 
+  max_d_launch_depart = min(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx],
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    tw_close[j] - service_times[j] - d_launch_to_j
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (3) && (***):
+    d_launch_depart = min_d_launch_depart
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j < tw_open[j]
+->  d_launch_depart < tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart < truck_depart[k][launch_idx]
+
+(***) 
+    tw_open[j] + service_times[j] + d_j_to_land >= truck_depart[k][launch_idx] + t_launch_to_land
+
+(1) 
+    d_launch_depart >= truck_depart[k][launch_idx] + t_launch_to_land - t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    truck_depart[k][launch_idx] + t_launch_to_land <= truck_depart[k][land_idx]
+
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    truck_depart[k][launch_idx] + t_launch_to_land - t_max,
+    truck_arrive[k][launch_idx]
+  ) 
+  max_d_launch_depart = min(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx],
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    tw_close[j] - service_times[j] - d_launch_to_j
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (3) && (***):
+    d_launch_depart = min_d_launch_depart
+
+
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j < tw_open[j]
+    d_launch_depart < tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart >= truck_depart[k][launch_idx]
+
+(***) 
+    tw_open[j] + service_times[j] + d_j_to_land < d_launch_depart + t_launch_to_land
+->  d_launch_depart > tw_open[j] + service_times[j] + d_j_to_land - t_launch_to_land 
+
+
+(1) 
+    d_launch_depart >= d_launch_depart + t_launch_to_land - t_max
+->  t_launch_to_land <= t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    d_launch_depart + t_launch_to_land <= truck_depart[k][land_idx]
+->  d_launch_depart <= truck_depart[k][land_idx] - t_launch_to_land
+
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    truck_depart[k][launch_idx],
+    tw_open[j] + service_times[j] + d_j_to_land - t_launch_to_land,
+    truck_arrive[k][launch_idx]
+  ) 
+  max_d_launch_depart = min(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    truck_depart[k][land_idx] - t_launch_to_land,
+    tw_close[j] - service_times[j] - d_launch_to_j,
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (1):
+    d_launch_depart = min_d_launch_depart
+
+
+
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j < tw_open[j]
+    d_launch_depart < tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart >= truck_depart[k][launch_idx]
+
+(***) 
+    tw_open[j] + service_times[j] + d_j_to_land >= d_launch_depart + t_launch_to_land
+    
+    d_launch_depart <= tw_open[j] + service_times[j] + d_j_to_land - t_launch_to_land 
+
+
+(1) 
+    d_launch_depart >=  tw_open[j] + service_times[j] + d_j_to_land - t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    tw_open[j] + service_times[j] + d_j_to_land <= truck_depart[k][land_idx]
+    
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    truck_depart[k][launch_idx],
+    tw_open[j] + service_times[j] + d_j_to_land - t_launch_to_land,
+    d_launch_depart + t_launch_to_land - t_max,
+    truck_arrive[k][launch_idx]
+  ) 
+  max_d_launch_depart = min(
+    tw_open[j] - d_launch_to_j,
+    tw_open[j] + service_times[j] + d_j_to_land - t_launch_to_land,
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    tw_close[j] - service_times[j] - d_launch_to_j,
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (3):
+    d_launch_depart = min_d_launch_depart
+
+
+------------------------------------------------------------------------------------------------
+
+
+(*) d_launch_depart + d_launch_to_j >= tw_open[j]
+->  d_launch_depart >= tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart < truck_depart[k][launch_idx]
+
+(***) 
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land < truck_depart[k][launch_idx] + t_launch_to_land
+->  d_launch_depart < truck_depart[k][launch_idx] + t_launch_to_land - d_launch_to_j - service_times[j] - d_j_to_land
+
+(1) 
+    d_launch_depart >=  truck_depart[k][launch_idx] + t_launch_to_land - t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    truck_depart[k][launch_idx] + t_launch_to_land <= truck_depart[k][land_idx]
+
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx] + t_launch_to_land - t_max,
+    truck_arrive[k][launch_idx],
+  ) 
+  max_d_launch_depart = min(
+    truck_depart[k][launch_idx],
+    truck_depart[k][launch_idx] + t_launch_to_land - d_launch_to_j - service_times[j] - d_j_to_land,
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    tw_close[j] - service_times[j] - d_launch_to_j
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (3):
+    d_launch_depart = min_d_launch_depart
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j >= tw_open[j]
+->  d_launch_depart >= tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart < truck_depart[k][launch_idx]
+
+(***) 
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land >= truck_depart[k][launch_idx] + t_launch_to_land
+->  d_launch_depart >= truck_depart[k][launch_idx] + t_launch_to_land - d_launch_to_j - service_times[j] - d_j_to_land
+
+
+(1) 
+    d_launch_depart >= d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land - t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land <= truck_depart[k][land_idx]
+->  d_launch_depart <= truck_depart[k][land_idx] - d_launch_to_j - service_times[j] - d_j_to_land
+ 
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx] + t_launch_to_land - d_launch_to_j - service_times[j] - d_j_to_land,
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land - t_max,
+    truck_arrive[k][launch_idx]
+  ) 
+  max_d_launch_depart = min(
+    truck_depart[k][launch_idx],
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    truck_depart[k][land_idx] - d_launch_to_j - service_times[j] - d_j_to_land,
+    tw_close[j] - service_times[j] - d_launch_to_j
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart:
+    d_launch_depart = min_d_launch_depart
+
+
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j >= tw_open[j]
+    d_launch_depart >= tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart >= truck_depart[k][launch_idx]
+
+(***) 
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land < d_launch_depart + t_launch_to_land
+->  d_launch_to_j + service_times[j] + d_j_to_land < t_launch_to_land
+
+
+(1) 
+    d_launch_depart >= d_launch_depart + t_launch_to_land - t_max
+->  t_launch_to_land <= t_max
+
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    d_launch_depart + t_launch_to_land <= truck_depart[k][land_idx]
+->  d_launch_depart <= truck_depart[k][land_idx] - t_launch_to_land
+
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx],
+    truck_arrive[k][launch_idx]
+  ) 
+  max_d_launch_depart = min(
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    truck_depart[k][land_idx] - t_launch_to_land,
+    tw_close[j] - service_times[j] - d_launch_to_j,
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (***) && (1):
+    d_launch_depart = min_d_launch_depart
+
+
+
+
+------------------------------------------------------------------------------------------------
+
+(*) d_launch_depart + d_launch_to_j >= tw_open[j]
+    d_launch_depart >= tw_open[j] - d_launch_to_j
+
+(**)  
+    d_launch_depart >= truck_depart[k][launch_idx]
+
+(***) 
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land >= d_launch_depart + t_launch_to_land
+->  d_launch_to_j + service_times[j] + d_j_to_land >= t_launch_to_land
+
+
+(1) 
+    d_launch_depart >= d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land - t_max
+->  d_launch_to_j + service_times[j] + d_j_to_land <= t_max
+(2)
+    d_launch_depart >= truck_arrive[k][launch_idx]
+    d_launch_depart <= truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0)
+
+(3) 
+    d_launch_depart + d_launch_to_j + service_times[j] + d_j_to_land <= truck_depart[k][land_idx]
+->  d_launch_depart <= truck_depart[k][land_idx] - d_launch_to_j - service_times[j] - d_j_to_land 
+(4)
+    d_launch_depart <= tw_close[j] - service_times[j] - d_launch_to_j
+
+
+
+
+implement:
+  
+  min_d_launch_depart = max(
+    tw_open[j] - d_launch_to_j,
+    truck_depart[k][launch_idx],
+    truck_arrive[k][launch_idx]
+  )
+
+  max_d_launch_depart = min(
+    truck_depart[k][launch_idx] + max(tw_open[land] - truck_arrive[k][land_idx], 0),
+    truck_depart[k][land_idx] - d_launch_to_j - service_times[j] - d_j_to_land,
+    tw_close[j] - service_times[j] - d_launch_to_j,
+  )
+  
+  if min_d_launch_depart <= max_d_launch_depart && (***) && (1):
+    d_launch_depart = min_d_launch_depart
+
+

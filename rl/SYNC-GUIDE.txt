@@ -1,0 +1,35 @@
+fix on '_compute_trip_start': 
+_ consider departure time of drone at launch node 'd_launch_depart'. 
+_ t_a_to_b: total launch_time, land_time and travelling time of truck from a to b excluding waiting time
+_ d_a_to_b: total launch_time, land_time and travelling time of drone from a to b excluding waiting time
+_ t_a_depart / t_a_arrive: truck's departure / arrival timestamps at node a
+_ d_a_depart / d_a_arrive: drone's departure / arrival timestamps at node a
+
+find of minimum of d_launch_depart = ?
+
+t_launch_depart = max(truck_depart[k][launch_idx], d_launch_depart)
+d_j_arrive = d_launch_depart + d_launch_to_j
+d_j_depart = max(d_j_arrive, tw_open[j]) + service_times[j]
+            = max(d_launch_depart + d_launch_to_j, tw_open[j]) + service_times[j]
+t_land_arrive = t_launch_depart + t_launch_to_land 
+d_land_arrive = max(d_j_depart + d_j_to_land, t_land_arrive)
+
+
+# constraints
+1. drone trip duration limit
+  d_land_arrive - d_launch_depart <= t_max
+-> max(d_j_depart + d_j_to_land, t_land_arrive) - d_launch_depart <= t_max
+-> max(max(d_launch_depart + d_launch_to_j, tw_open[j]) + service_times[j] + d_j_to_land, max(truck_depart[k][launch_idx], d_launch_depart) + t_launch_to_land) - d_launch_depart <= t_max 
+
+2. drone k serve node j
+  d_j_arrive <= tw_close[j] - service_times[j]
+-> d_launch_depart + d_launch_to_j <= tw_close[j] - service_times[j]
+
+3. truck k serve land node
+  t_land_arrive <= tw_close[land] - service_times[land]
+
+4. drone k arrives after truck arrives at launch node 
+  d_launch_depart >= truck_arrive[k][launch_idx]
+
+
+
