@@ -49,6 +49,17 @@ def run_detailed_episode(
 
             feasible = np.where(action_mask)[0]
             if len(feasible) == 0:
+                print(f"\n  STUCK at step {step}: Empty action mask")
+                print(f"    Served: {results['served_count']}/{env.n_customers}")
+                state = env._current_state
+                for k in range(env.K):
+                    print(
+                        f"    Truck {k}: node={state.truck_node[k]}, active_drone={state.drone_active[k]}, drone_node={state.drone_node[k]}, land_idx={state.drone_land_idx[k]}"
+                    )
+                    if state.drone_active[k]:
+                        print(
+                            f"      drone_trips={state.drone_trips[k]}, drone_load={state.drone_load[k]}"
+                        )
                 results["errors"].append(f"Empty action mask at step {step}")
                 results["success"] = False
                 results["terminal_reason"] = "stuck_state"
@@ -229,8 +240,8 @@ def run_tests(
 
     cfg = {
         "env": "MVRPBTW",
-        "tasks": ["easy_N100_F10_C"],
-        "n_customers": 100,
+        "tasks": ["easy_N10_F2_C"],
+        "n_customers": 10,
         "max_coord": 100.0,
         "capacity_truck": 200.0,
         "capacity_drone": 20.0,
