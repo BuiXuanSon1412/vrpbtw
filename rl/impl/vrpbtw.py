@@ -639,16 +639,11 @@ class VRPBTWEnv(Environment):
     def _landing_nodes(self, state: VRPBTWState, k: int) -> List[int]:
         """
         Return indices into truck_routes[k] where drone can land.
-        Drone can land from launch_node (exclusive) to current_truck_node (inclusive).
+        Drone can land from last landing position onwards.
         """
-        if state.drone_active[k]:
-            launch_node = int(state.drone_trips[k][-1][0])
-        else:
-            launch_node = int(state.truck_prev_node[k])
-
         route = state.truck_routes[k]
-        launch_idx = route.index(launch_node)
-        return list(range(launch_idx + 1, len(route)))
+        launch_idx = int(state.drone_land_idx[k])
+        return list(range(launch_idx, len(route)))
 
     def _get_feasible_land_nodes(
         self, state: VRPBTWState, k: int, j: int, depart_t: float
@@ -804,6 +799,8 @@ class VRPBTWEnv(Environment):
             return False
         if not self._truck_phase_ok(state, k, j):
             return False
+        if state.drone_node[k] == state.truck_node[k]:
+            return False
 
         # Check capacity using current load bounds
         demand = self.demands[j]
@@ -828,7 +825,11 @@ class VRPBTWEnv(Environment):
 
         # Detailed constraint checking using launch time computation
         launch_time = self._compute_trip_start(state, k, j)
-        return launch_time < float("inf")
+        if launch_time >= float("inf"):
+            return False
+
+        # Ensure there exists at least one feasible landing node for this trip
+        return len(self._get_feasible_land_nodes(state, k, j, launch_time)) > 0
 
     def _drone_extend_feasible(self, state: VRPBTWState, k: int, j: int) -> bool:
         if not state.drone_active[k] or state.served[j]:
@@ -860,7 +861,7 @@ class VRPBTWEnv(Environment):
         return len(self._get_feasible_land_nodes(state, k, j, depart_t)) > 0
 
     def _drone_land_feasible(self, state: VRPBTWState, k: int, land_idx: int) -> bool:
-        """Check if drone can land at truck_routes[k][land_idx] without losing customers.
+        """Check if drone can land at truck_routes[k][land_idx] without changing truck departure times.
 
         Args:
             land_idx: index into truck_routes[k]
@@ -885,8 +886,8 @@ class VRPBTWEnv(Environment):
         if trip_end > self.T_max:
             return False
 
-        # Check if late landing would cause truck to miss future customers
-        return self._service_rate_feasible(state, k, land_idx, trip_end)
+        # Landing is feasible only if drone lands before truck's departure at that node
+        return trip_end <= state.truck_depart[k][land_idx]
 
     def _compute_trip_start(self, state: VRPBTWState, k: int, j: int) -> float:
         """
@@ -898,6 +899,10 @@ class VRPBTWEnv(Environment):
         Returns:
             Launch time (seconds from episode start) if feasible, inf otherwise.
         """
+        # Check if there are any possible landing nodes before computing
+        if len(self._landing_nodes(state, k)) == 0:
+            return float("inf")
+
         launch_node = int(state.truck_prev_node[k])
         land_node = int(state.truck_node[k])
         launch_idx = state.truck_routes[k].index(launch_node)
@@ -916,7 +921,7 @@ class VRPBTWEnv(Environment):
         )
         t_launch_to_land = self.manhattan_dist[launch_node, land_node] / self.v_t
 
-        d_launch_depart = float("inf")
+        best_depart = float("inf")
 
         # Case 1: (*) d_launch_depart + d_launch_to_j < tw_open[j]
         #         (**) d_launch_depart < truck_depart[k][launch_idx]
@@ -939,7 +944,8 @@ class VRPBTWEnv(Environment):
             and self.tw_open[j] + self.service_times[j] + d_j_to_land
             < state.truck_depart[k][launch_idx] + t_launch_to_land
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 2: (*) d_launch_depart + d_launch_to_j < tw_open[j]
         #         (**) d_launch_depart < truck_depart[k][launch_idx]
@@ -962,7 +968,8 @@ class VRPBTWEnv(Environment):
             and self.tw_open[j] + self.service_times[j] + d_j_to_land
             >= state.truck_depart[k][launch_idx] + t_launch_to_land
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 3: (*) d_launch_depart + d_launch_to_j < tw_open[j]
         #         (**) d_launch_depart >= truck_depart[k][launch_idx]
@@ -983,14 +990,15 @@ class VRPBTWEnv(Environment):
             min_d_launch_depart <= max_d_launch_depart
             and t_launch_to_land <= self.t_max
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 4: (*) d_launch_depart + d_launch_to_j < tw_open[j]
         #         (**) d_launch_depart >= truck_depart[k][launch_idx]
         #         (***) tw_open[j] + service_times[j] + d_j_to_land >= d_launch_depart + t_launch_to_land
         min_d_launch_depart = max(
             state.truck_depart[k][launch_idx],
-            self.tw_open[j] + self.service_times[j] + d_j_to_land - t_launch_to_land,
+            self.tw_open[j] + self.service_times[j] + d_j_to_land - self.t_max,
             state.truck_arrive[k][launch_idx],
         )
         max_d_launch_depart = min(
@@ -1002,10 +1010,11 @@ class VRPBTWEnv(Environment):
         )
         if (
             min_d_launch_depart <= max_d_launch_depart
-            and state.truck_depart[k][launch_idx] + t_launch_to_land
+            and self.tw_open[j] + self.service_times[j] + d_j_to_land
             <= state.truck_depart[k][land_idx]
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 5: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
         #         (**) d_launch_depart < truck_depart[k][launch_idx]
@@ -1031,7 +1040,8 @@ class VRPBTWEnv(Environment):
             and state.truck_depart[k][launch_idx] + t_launch_to_land
             <= state.truck_depart[k][land_idx]
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 6: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
         #         (**) d_launch_depart < truck_depart[k][launch_idx]
@@ -1055,7 +1065,8 @@ class VRPBTWEnv(Environment):
             min_d_launch_depart <= max_d_launch_depart
             and d_launch_to_j + self.service_times[j] + d_j_to_land <= self.t_max
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 7: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
         #         (**) d_launch_depart >= truck_depart[k][launch_idx]
@@ -1076,7 +1087,8 @@ class VRPBTWEnv(Environment):
             and d_launch_to_j + self.service_times[j] + d_j_to_land < t_launch_to_land
             and t_launch_to_land <= self.t_max
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
         # Case 8: (*) d_launch_depart + d_launch_to_j >= tw_open[j]
         #         (**) d_launch_depart >= truck_depart[k][launch_idx]
@@ -1100,36 +1112,10 @@ class VRPBTWEnv(Environment):
             and d_launch_to_j + self.service_times[j] + d_j_to_land >= t_launch_to_land
             and d_launch_to_j + self.service_times[j] + d_j_to_land <= self.t_max
         ):
-            d_launch_depart = min(d_launch_depart, min_d_launch_depart)
+            if min_d_launch_depart < best_depart:
+                best_depart = min_d_launch_depart
 
-        d_j_arrive = d_launch_depart + d_launch_to_j
-
-        # Adjustment: Try to accommodate customer and landing node time windows,
-        # but verify trip duration stays within t_max
-        if d_launch_depart < float("inf"):
-            # Candidate adjusted values
-            adjust_for_customer = d_launch_depart + max(self.tw_open[j] - d_j_arrive, 0)
-            adjust_for_landing = (
-                state.truck_depart[k][launch_idx]
-                + max(self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0)
-            )
-            adjusted_depart = min(adjust_for_customer, adjust_for_landing)
-
-            # Verify the adjusted departure time still results in a feasible trip
-            d_j_arrive_adj = adjusted_depart + d_launch_to_j
-            d_j_depart_adj = max(d_j_arrive_adj, self.tw_open[j]) + self.service_times[j]
-            d_land_arrive_adj = max(
-                d_j_depart_adj + d_j_to_land,
-                state.truck_arrive[k][land_idx]
-            )
-            trip_dur_adj = d_land_arrive_adj - adjusted_depart
-
-            # Only use adjusted value if it satisfies t_max constraint
-            if trip_dur_adj <= self.t_max and d_land_arrive_adj <= self.T_max:
-                d_launch_depart = adjusted_depart
-            # else: keep original d_launch_depart from cases
-
-        return d_launch_depart
+        return best_depart
 
     # ------------------------------------------------------------------
     # apply_action
@@ -1268,15 +1254,6 @@ class VRPBTWEnv(Environment):
             first_land_idx = feasible_land_indices[0]
             state.drone_land_idx[k] = first_land_idx
 
-        # Use slack at landing node to delay truck departure at launch
-        state.truck_depart[k][launch_idx] += max(
-            self.tw_open[land_node] - state.truck_arrive[k][land_idx], 0.0
-        )
-        t_launch_to_land = self.manhattan_dist[launch_node, land_node] / self.v_t
-        state.truck_arrive[k][land_idx] = (
-            state.truck_depart[k][launch_idx] + t_launch_to_land
-        )
-
         state.current_cost += self.c_d * dist
 
         # Start new trip with launch_node and j
@@ -1389,41 +1366,6 @@ class VRPBTWEnv(Environment):
         state.drone_depart[k][-1].append(
             0.0
         )  # 0.0 for departure (unset - only set if landing node becomes launch node of next trip)
-
-        # Update truck departure times based on drone trip completion
-        # At launch node: truck depart time should be >= drone depart time at launch node
-        launch_node = int(state.drone_trips[k][-1][0])
-        launch_idx = state.truck_routes[k].index(launch_node)
-        drone_depart_at_launch = state.drone_depart[k][-1][0]
-        state.truck_depart[k][launch_idx] = max(
-            state.truck_depart[k][launch_idx], drone_depart_at_launch
-        )
-
-        # Update landing node departure
-        new_depart = max(state.truck_depart[k][land_idx], d_land_arrive)
-
-        # Only propagate to subsequent nodes if landing node departure changed
-        if new_depart != state.truck_depart[k][land_idx]:
-            state.truck_depart[k][land_idx] = new_depart
-            t = new_depart
-
-            # Propagate timing updates to subsequent nodes
-            for i in range(land_idx + 1, len(state.truck_routes[k])):
-                prev_node = state.truck_routes[k][i - 1]
-                curr_node = state.truck_routes[k][i]
-
-                dist = self.manhattan_dist[prev_node, curr_node]
-                new_arrive = t + dist / self.v_t
-                state.truck_arrive[k][i] = new_arrive
-
-                service_start = max(new_arrive, self.tw_open[curr_node])
-                new_depart = service_start + self.service_times[curr_node]
-
-                if new_depart == state.truck_depart[k][i]:
-                    break  # No further changes, stop propagation
-
-                state.truck_depart[k][i] = new_depart
-                t = new_depart
 
         # Transfer drone backhaul load to truck positions from landing onwards
         landing_load = state.drone_load[k][-1][-1]  # last drone node's load

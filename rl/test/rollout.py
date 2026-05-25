@@ -98,7 +98,7 @@ def run_detailed_episode(
         results["truck_depart"] = state.truck_depart
         results["drone_trips"] = [
             [[int(n) for n in trip] for trip in trips]
-            for trips in state.drone_trips_node
+            for trips in state.drone_trips
         ]
         results["drone_arrive"] = state.drone_arrive
         results["drone_depart"] = state.drone_depart
