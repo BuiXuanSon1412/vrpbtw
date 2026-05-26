@@ -39,7 +39,6 @@ from core.collector import (
     BaseCollector,
     GAECollector,
     MCCollector,
-    EPCollector,
     POMOSampler,
 )
 
@@ -78,7 +77,6 @@ _OPTIMIZER_REGISTRY: Dict[str, type | None] = {
 _COLLECTOR_REGISTRY: Dict[str, type] = {
     "gae": GAECollector,
     "mc": MCCollector,
-    "ep": EPCollector,
     "pomo": POMOSampler,
 }
 

@@ -97,8 +97,7 @@ def run_detailed_episode(
         results["truck_arrive"] = state.truck_arrive
         results["truck_depart"] = state.truck_depart
         results["drone_trips"] = [
-            [[int(n) for n in trip] for trip in trips]
-            for trips in state.drone_trips
+            [[int(n) for n in trip] for trip in trips] for trips in state.drone_trips
         ]
         results["drone_arrive"] = state.drone_arrive
         results["drone_depart"] = state.drone_depart
@@ -240,8 +239,8 @@ def run_tests(
 
     cfg = {
         "env": "MVRPBTW",
-        "tasks": ["easy_N10_F2_C"],
-        "n_customers": 10,
+        "tasks": ["easy_N50_F5_C"],
+        "n_customers": 50,
         "max_coord": 100.0,
         "capacity_truck": 200.0,
         "capacity_drone": 20.0,

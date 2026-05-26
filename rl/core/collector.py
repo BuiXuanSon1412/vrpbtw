@@ -6,11 +6,9 @@ Data collection strategies for on-policy RL.
 Classes
 -------
   BaseCollector           — abstract interface for trajectory collection
-  BaseSequentialCollector — common logic for sequential rollout collectors
   GAECollector            — Generalized Advantage Estimation
   MCCollector             — Monte Carlo returns
-  EPCollector             — Episodic rewards from environment
-  POMOCollector           — collect from multiple starting points
+  POMOSampler             — collect from multiple starting points
 
 Design
 ------
@@ -353,118 +351,6 @@ class MCCollector(BaseCollector):
 
 
 # ---------------------------------------------------------------------------
-# EPCollector (Episodic)
-# ---------------------------------------------------------------------------
-
-
-class EPCollector(BaseCollector):
-    """Episodic reward collector.
-
-    Uses environment-computed returns and value-based advantages.
-    Suitable for combinatorial optimization problems.
-    """
-
-    def __init__(self, rollout_length: int = 256, gamma: float = 0.99):
-        self.rollout_length = rollout_length
-        self.gamma = gamma
-
-    @classmethod
-    def from_config(cls, cfg: Dict[str, Any]) -> "EPCollector":
-        params = cfg.get("params", {})
-        return cls(
-            rollout_length=params.get("rollout_length", 256),
-            gamma=params.get("gamma", 0.99),
-        )
-
-    def collect(
-        self,
-        agent: BaseAgent,
-        env: Any,
-    ) -> dict:
-        """Collect trajectories with environment-computed returns."""
-        observations = []
-        masks = []
-        actions = []
-        log_probs = []
-        values = []
-        entropies = []
-        rewards = []
-        dones = []
-
-        obs, info = env.reset()
-        action_mask = info["action_mask"]
-
-        while len(log_probs) < self.rollout_length:
-            obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-            mask_t = torch.tensor(
-                action_mask, dtype=torch.bool, device=globals.DEVICE
-            ).unsqueeze(0)
-            action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
-            action = int(action_t.item())
-
-            next_obs, reward, terminated, truncated, info = env.step(action)
-
-            observations.append(obs_t)
-            masks.append(mask_t)
-            actions.append(action_t)
-            log_probs.append(lp)
-            values.append(val)
-            entropies.append(ent)
-            rewards.append(reward)
-            dones.append(terminated or truncated)
-
-            obs = next_obs
-            action_mask = info["action_mask"]
-
-            if terminated or truncated or not action_mask.any():
-                obs, info = env.get_obs_info()
-                action_mask = info["action_mask"]
-                # Safety: if no feasible actions after reset, break collection
-                if not action_mask.any():
-                    break
-
-        # Get episode return from environment
-        episode_return = env.compute_return()
-        observations_tensor = torch.cat(observations, dim=0)
-        masks_tensor = torch.cat(masks, dim=0)
-        actions_tensor = torch.cat(actions, dim=0)
-        log_probs_tensor = torch.stack(log_probs)
-        values_tensor = torch.stack(values)
-        entropies_tensor = torch.stack(entropies)
-
-        # Use episode return for all steps
-        returns = torch.full_like(
-            values_tensor[:, 0], episode_return, dtype=torch.float32
-        )
-        advantages = returns - values_tensor[:, 0].detach()
-
-        return {
-            "observations": observations_tensor,
-            "masks": masks_tensor,
-            "actions": actions_tensor,
-            "log_probs": log_probs_tensor,
-            "advantages": advantages,
-            "returns": returns,
-            "entropies": entropies_tensor,
-        }
-
-    def _compute_returns(
-        self, rewards: torch.Tensor, dones: torch.Tensor
-    ) -> torch.Tensor:
-        """Not used in overridden collect() but required by interface."""
-        return torch.zeros_like(rewards)
-
-    def _compute_advantages(
-        self,
-        values: torch.Tensor,
-        returns: torch.Tensor,
-        dones: torch.Tensor,
-    ) -> torch.Tensor:
-        """Not used in overridden collect() but required by interface."""
-        return torch.zeros_like(returns)
-
-
-# ---------------------------------------------------------------------------
 # POMOCollector (POMO-style multiple optima)
 # ---------------------------------------------------------------------------
 
@@ -538,16 +424,18 @@ class POMOSampler(BaseCollector):
 
             # First step with starting action
             episode_log_prob = starting_log_prob
+            episode_reward = 0.0
             step_entropies = []
-            next_obs, _, terminated, truncated, next_info = env.step(
+            next_obs, reward, terminated, truncated, next_info = env.step(
                 int(starting_action)
             )
+            episode_reward += reward if reward is not None else 0.0
 
             if not terminated and not truncated and next_info["action_mask"].any():
                 obs = next_obs
                 mask = next_info["action_mask"]
 
-                # Collect rest of trajectory, accumulating log probabilities and entropies
+                # Collect rest of trajectory, accumulating log probabilities, rewards, and entropies
                 while True:
                     obs_t = obs_to_tensor(obs, device=globals.DEVICE)
                     mask_t = torch.tensor(
@@ -559,7 +447,8 @@ class POMOSampler(BaseCollector):
                     action = int(action_t.item())
                     episode_log_prob = episode_log_prob + lp
                     step_entropies.append(entropy)
-                    next_obs, _, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    episode_reward += reward if reward is not None else 0.0
 
                     if terminated or truncated or not info["action_mask"].any():
                         break
@@ -567,8 +456,8 @@ class POMOSampler(BaseCollector):
                     obs = next_obs
                     mask = info["action_mask"]
 
-            # Get final episode return and entropy
-            episode_return = env.compute_return()
+            # Use accumulated per-step rewards
+            episode_return = episode_reward
             episode_log_probs.append(episode_log_prob)
             episode_returns.append(episode_return)
 

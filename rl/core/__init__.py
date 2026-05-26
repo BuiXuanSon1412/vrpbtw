@@ -12,7 +12,7 @@ from core.trainer import (
     MetaTrainer,
     POMOTrainer,
 )
-from core.collector import BaseCollector, GAECollector, MCCollector, EPCollector, POMOSampler
+from core.collector import BaseCollector, GAECollector, MCCollector, POMOSampler
 from core.utils import SeedManager, RunningNormalizer, obs_to_tensor
 
 __all__ = [
@@ -25,7 +25,6 @@ __all__ = [
     "BaseCollector",
     "GAECollector",
     "MCCollector",
-    "EPCollector",
     "POMOSampler",
     # evaluator
     "Evaluator",
