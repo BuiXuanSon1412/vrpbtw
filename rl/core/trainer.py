@@ -448,23 +448,26 @@ class MetaTrainer(BaseTrainer):
                                 self.env.retask(task_id)
                                 batch = self.collector.collect(agent, self.env)
 
-                                # Update agent with collected batch
-                                metrics = agent.update(batch)
-                                self._total_updates += 1
-                                loss_val = metrics.get("loss", 0.0)
-                                loss_val = (
-                                    loss_val.detach()
-                                    if isinstance(loss_val, torch.Tensor)
-                                    else loss_val
-                                )
-                                epoch_losses.append(float(loss_val))
-                                grad_norm_val = metrics.get("grad_norm", -1.0)
-                                grad_norm_val = (
-                                    grad_norm_val.detach()
-                                    if isinstance(grad_norm_val, torch.Tensor)
-                                    else grad_norm_val
-                                )
-                                epoch_grad_norms.append(float(grad_norm_val))
+                                # Reuse each rollout for ppo_epochs gradient updates.
+                                # old_log_probs stay fixed (from collection); the clipped
+                                # surrogate ratio naturally limits drift across epochs.
+                                for _ in range(self.fcfg["ppo_epochs"]):
+                                    metrics = agent.update(batch)
+                                    self._total_updates += 1
+                                    loss_val = metrics.get("loss", 0.0)
+                                    loss_val = (
+                                        loss_val.detach()
+                                        if isinstance(loss_val, torch.Tensor)
+                                        else loss_val
+                                    )
+                                    epoch_losses.append(float(loss_val))
+                                    grad_norm_val = metrics.get("grad_norm", -1.0)
+                                    grad_norm_val = (
+                                        grad_norm_val.detach()
+                                        if isinstance(grad_norm_val, torch.Tensor)
+                                        else grad_norm_val
+                                    )
+                                    epoch_grad_norms.append(float(grad_norm_val))
                         except Exception as e:
                             self.logger.log_exception(
                                 e,
