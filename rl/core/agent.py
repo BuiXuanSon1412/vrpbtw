@@ -194,7 +194,7 @@ class PPOAgent(BaseAgent):
         """PPO update step with clipped surrogate objective.
 
         Args:
-            batch: dict with keys observations, masks, log_probs, advantages, returns
+            batch: dict with keys observations, masks, log_probs, advantages, returns, entropies
 
         Returns:
             dict with loss and metrics
@@ -204,6 +204,7 @@ class PPOAgent(BaseAgent):
         old_log_probs = batch["log_probs"]
         advantages = batch["advantages"]
         returns = batch["returns"]
+        entropies = batch.get("entropies", torch.tensor(0.0))
 
         # Forward pass: re-evaluate actions under new policy
         # (batch must have 'actions' key for proper PPO re-evaluation)
@@ -226,8 +227,11 @@ class PPOAgent(BaseAgent):
         # Value loss (MSE between predictions and returns)
         value_loss = torch.nn.functional.mse_loss(values, returns)
 
-        # Entropy regularization
-        entropy_loss = -new_log_probs.mean()
+        # Entropy regularization (use real entropy from collector, not negative log-prob mean)
+        if isinstance(entropies, torch.Tensor) and entropies.numel() > 0:
+            entropy_loss = -entropies.mean()
+        else:
+            entropy_loss = torch.tensor(0.0, device=policy_loss.device)
 
         total_loss = (
             policy_loss
@@ -251,6 +255,7 @@ class PPOAgent(BaseAgent):
             "grad_norm": grad_norm,
             "policy_loss": policy_loss,
             "value_loss": value_loss,
+            "entropy": entropy_loss,
         }
 
 
@@ -444,17 +449,6 @@ class POMOAgent(BaseAgent):
             grad_norm = torch.as_tensor(grad_norm_val, device=total_loss.device)
             self.optimizer.step()
 
-        # Debug: loss components and gradient info
-        instance_losses_vals = [l.item() for l in instance_losses]
-        print(f"  POMOAgent: n_instances={num_instances}, "
-              f"total_loss={total_loss.item():.6f}, "
-              f"policy_loss={policy_loss.item():.6f}, "
-              f"entropy_bonus={entropy_bonus.item():.6f}, "
-              f"loss_min={min(instance_losses_vals):.6f}, "
-              f"loss_max={max(instance_losses_vals):.6f}, "
-              f"grad_norm={grad_norm.item():.4f}, "
-              f"baseline_mean={total_baseline / max(num_instances, 1):.4f}")
-
         return {
             "loss": total_loss,
             "grad_norm": grad_norm,
@@ -510,17 +504,22 @@ class MetaAgent(BaseAgent):
             batch: dict with key "task_losses" containing stacked loss tensor
 
         Returns:
-            dict with meta_loss metric
+            dict with loss and grad_norm metrics
         """
         task_losses = batch["task_losses"]
         meta_loss = task_losses.mean()
 
+        grad_norm = torch.tensor(0.0, device=meta_loss.device)
         if self.optimizer is not None:
             self.optimizer.zero_grad()
             meta_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm_val = torch.nn.utils.clip_grad_norm_(
                 self.network.parameters(), self.max_grad_norm
             )
+            grad_norm = torch.as_tensor(grad_norm_val, device=meta_loss.device)
             self.optimizer.step()
 
-        return {"meta_loss": meta_loss}
+        return {
+            "loss": meta_loss,
+            "grad_norm": grad_norm,
+        }

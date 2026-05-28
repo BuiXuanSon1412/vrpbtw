@@ -102,7 +102,7 @@ def _compute_gae(
         gae = delta + gamma * gae_lambda * (1 - dones[t]) * gae
         advantages[t] = gae
 
-    returns = advantages + values[:T]
+    returns = (advantages + values[:T]).detach()
     return advantages, returns
 
 
@@ -149,56 +149,56 @@ class GAECollector(BaseCollector):
         obs, info = env.reset()
         action_mask = info["action_mask"]
 
-        while len(log_probs) < self.rollout_length:
-            obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-            mask_t = torch.tensor(
-                action_mask, dtype=torch.bool, device=globals.DEVICE
-            ).unsqueeze(0)
-            action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
-            action = int(action_t.item())
+        with torch.no_grad():
+            while len(log_probs) < self.rollout_length:
+                obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+                mask_t = torch.tensor(
+                    action_mask, dtype=torch.bool, device=globals.DEVICE
+                ).unsqueeze(0)
+                action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
+                action = int(action_t.item())
 
-            next_obs, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, info = env.step(action)
 
-            observations.append(obs_t)
-            masks.append(mask_t)
-            actions.append(action_t)
-            log_probs.append(lp)
-            values.append(val)
-            entropies.append(ent)
-            rewards.append(reward)
-            dones.append(terminated or truncated)
+                observations.append(obs_t)
+                masks.append(mask_t)
+                actions.append(action_t)
+                log_probs.append(lp)
+                values.append(val)
+                entropies.append(ent)
+                rewards.append(reward)
+                dones.append(terminated or truncated)
 
-            obs = next_obs
-            action_mask = info["action_mask"]
-
-            if terminated or truncated or not action_mask.any():
-                obs, info = env.get_obs_info()
+                obs = next_obs
                 action_mask = info["action_mask"]
-                # Safety: if no feasible actions after reset, break collection
-                if not action_mask.any():
+
+                if terminated or truncated or not action_mask.any():
                     break
 
+            # Get bootstrap value
+            obs_end = obs_to_tensor(obs, device=globals.DEVICE)
+            mask_end = torch.tensor(
+                action_mask, dtype=torch.bool, device=globals.DEVICE
+            ).unsqueeze(0)
+            _, _, bootstrap_val, _ = agent.act(obs_end, mask_end, deterministic=False)
+
         # Compute GAE
-        observations_tensor = torch.cat(observations, dim=0)
+        # Keep observations as-is (may be list of dicts for graph-based envs with dynamic structures)
+        observations_tensor = observations
         masks_tensor = torch.cat(masks, dim=0)
         actions_tensor = torch.cat(actions, dim=0)
-        log_probs_tensor = torch.stack(log_probs)
-        values_tensor = torch.stack(values)
-        entropies_tensor = torch.stack(entropies)
+        log_probs_tensor = torch.stack(log_probs).squeeze(-1)
+        values_tensor = torch.stack(values).squeeze(-1)
+        entropies_tensor = torch.stack(entropies).squeeze(-1)
         rewards_tensor = torch.tensor(
             rewards, dtype=torch.float32, device=globals.DEVICE
         )
         dones_tensor = torch.tensor(dones, dtype=torch.float32, device=globals.DEVICE)
 
-        # Get bootstrap value
-        obs_end = obs_to_tensor(obs, device=globals.DEVICE)
-        mask_end = torch.tensor(
-            action_mask, dtype=torch.bool, device=globals.DEVICE
-        ).unsqueeze(0)
-        _, _, bootstrap_val, _ = agent.act(obs_end, mask_end, deterministic=False)
-        values_with_bootstrap = torch.cat(
-            [values_tensor, bootstrap_val.unsqueeze(0)], dim=0
-        )
+        # Concatenate with bootstrap value for GAE computation
+        # values_tensor is (T,), bootstrap_val is (1,), make them compatible
+        bootstrap_val_1d = bootstrap_val.view(-1)  # Ensure it's 1D
+        values_with_bootstrap = torch.cat([values_tensor, bootstrap_val_1d], dim=0)
 
         advantages, returns = _compute_gae(
             rewards_tensor,
@@ -275,36 +275,35 @@ class MCCollector(BaseCollector):
         obs, info = env.reset()
         action_mask = info["action_mask"]
 
-        while len(log_probs) < self.rollout_length:
-            obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-            mask_t = torch.tensor(
-                action_mask, dtype=torch.bool, device=globals.DEVICE
-            ).unsqueeze(0)
-            action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
-            action = int(action_t.item())
+        with torch.no_grad():
+            while len(log_probs) < self.rollout_length:
+                obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+                mask_t = torch.tensor(
+                    action_mask, dtype=torch.bool, device=globals.DEVICE
+                ).unsqueeze(0)
+                action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
+                action = int(action_t.item())
 
-            next_obs, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, info = env.step(action)
 
-            observations.append(obs_t)
-            masks.append(mask_t)
-            actions.append(action_t)
-            log_probs.append(lp)
-            values.append(val)
-            entropies.append(ent)
-            rewards.append(reward)
-            dones.append(terminated or truncated)
+                observations.append(obs_t)
+                masks.append(mask_t)
+                actions.append(action_t)
+                log_probs.append(lp)
+                values.append(val)
+                entropies.append(ent)
+                rewards.append(reward)
+                dones.append(terminated or truncated)
 
-            obs = next_obs
-            action_mask = info["action_mask"]
-
-            if terminated or truncated or not action_mask.any():
-                obs, info = env.get_obs_info()
+                obs = next_obs
                 action_mask = info["action_mask"]
-                if not action_mask.any():
+
+                if terminated or truncated or not action_mask.any():
                     break
 
         # Convert to tensors, squeezing batch dimension from agent.act() returns
-        observations_tensor = torch.cat(observations, dim=0)
+        # Keep observations as-is (may be list of dicts for graph-based envs with dynamic structures)
+        observations_tensor = observations
         masks_tensor = torch.cat(masks, dim=0)
         actions_tensor = torch.cat(actions, dim=0)
         log_probs_tensor = torch.stack([lp.squeeze(0) for lp in log_probs])
@@ -347,7 +346,7 @@ class MCCollector(BaseCollector):
         dones: torch.Tensor,
     ) -> torch.Tensor:
         """Compute advantages as return - value."""
-        return returns - values[:-1].detach()
+        return returns - values.detach()
 
 
 # ---------------------------------------------------------------------------
@@ -456,8 +455,8 @@ class POMOSampler(BaseCollector):
                     obs = next_obs
                     mask = info["action_mask"]
 
-            # Use accumulated per-step rewards
-            episode_return = episode_reward
+            # Use accumulated per-step rewards (store as tensor scalar for consistency)
+            episode_return = torch.tensor(episode_reward, dtype=torch.float32, device=globals.DEVICE)
             episode_log_probs.append(episode_log_prob)
             episode_returns.append(episode_return)
 

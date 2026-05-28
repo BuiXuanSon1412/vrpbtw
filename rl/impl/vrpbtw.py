@@ -70,6 +70,9 @@ class VRPBTWState:
         np.ndarray
     )  # (K,) phase when drone k launched (locked for trip duration)
     drone_land_idx: np.ndarray  # (K,) landing node index for constraint computation
+    drone_land_indices: List[
+        List[int]
+    ]  # [k] feasible landing route indices for drone k
 
     # Global
     served: np.ndarray  # (N+1,) bool
@@ -107,6 +110,7 @@ def _copy_state(s: VRPBTWState) -> VRPBTWState:
         drone_active=s.drone_active.copy(),
         drone_phase=s.drone_phase.copy(),
         drone_land_idx=s.drone_land_idx.copy(),
+        drone_land_indices=[list(indices) for indices in s.drone_land_indices],
         served=s.served.copy(),
         current_cost=s.current_cost,
         current_truck_load=s.current_truck_load.copy(),
@@ -446,6 +450,7 @@ class VRPBTWEnv(Environment):
             drone_active=np.zeros(K, dtype=bool),
             drone_phase=np.zeros(K, dtype=np.int32),
             drone_land_idx=np.zeros(K, dtype=np.int32),
+            drone_land_indices=[[] for _ in range(K)],
             served=served,
             current_cost=0.0,
             current_truck_load=np.stack(
@@ -1243,6 +1248,7 @@ class VRPBTWEnv(Environment):
 
         # Compute feasible landing nodes while drone is still inactive
         feasible_land_indices = self._get_feasible_land_nodes(state, k, j, depart_t)
+        state.drone_land_indices[k] = feasible_land_indices
 
         state.drone_node[k] = j
         state.drone_active[k] = True
@@ -1297,9 +1303,10 @@ class VRPBTWEnv(Environment):
         state.drone_node[k] = j
         state.served[j] = True
 
-        # Update first feasible landing node after extending
+        # Update feasible landing nodes after extending
         depart_t = self._drone_current_time(state, k)
         feasible_land_indices = self._get_feasible_land_nodes(state, k, j, depart_t)
+        state.drone_land_indices[k] = feasible_land_indices
         if feasible_land_indices:
             first_land_idx = feasible_land_indices[0]
             state.drone_land_idx[k] = first_land_idx
@@ -1347,6 +1354,7 @@ class VRPBTWEnv(Environment):
         )
 
         state.drone_active[k] = False
+        state.drone_land_indices[k] = []
         if land == int(state.truck_node[k]):
             state.drone_node[k] = state.truck_node[k]
             state.drone_land_idx[k] = len(state.truck_routes[k])
@@ -1580,9 +1588,7 @@ class VRPBTWEnv(Environment):
         for k in range(self.K):
             keep_truck[int(state.truck_node[k])] = True  # current truck pos
             if state.drone_active[k]:
-                for lc_idx in self._landing_nodes(
-                    state, k
-                ):  # landing candidates (route indices)
+                for lc_idx in state.drone_land_indices[k]:  # feasible landing indices
                     lc_node = state.truck_routes[k][lc_idx]
                     keep_truck[lc_node] = True
 

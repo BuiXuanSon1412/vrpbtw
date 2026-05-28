@@ -130,9 +130,10 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: '106'
+  name: test_validation
   description: mvrpbtw experiment - drone launch with constraint-based feasibility
 logger:
   base_dir: experiment/train
   verbose: true
   tensorboard: false
+name: test_validation

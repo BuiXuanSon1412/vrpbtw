@@ -135,7 +135,7 @@ def main() -> None:
         algo_name = algo_name.get("name", "").upper()
     else:
         algo_name = algo_name.upper()
-    net_type = cfg.get("network", {}).get("name", "hgnn")
+    net_type = cfg.get("network", {}).get("name", "geman")
     device = cfg.get("device", "cpu")
     print(f"  Experiment : {exp_name}")
     print(f"  Algorithm  : {algo_name}  |  Network: {net_type}  |  Device: {device}")

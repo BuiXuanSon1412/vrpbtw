@@ -22,7 +22,7 @@ logger:
   tensorboard: false
 
 _include:
-  - trainer: trainer/pomo.yaml
+  - trainer: trainer/meta.yaml
   - network: network/geman.yaml
   - environment: environment/mvrpbtw.yaml
 

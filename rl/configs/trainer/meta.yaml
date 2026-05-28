@@ -19,7 +19,7 @@ trainer:
 
   agents:
     meta_agent:
-      name: ppo
+      name: meta
       learning_rate: 0.001
       optimizer: unspecified
       clip_eps: 0.2
@@ -67,6 +67,7 @@ trainer:
 
   phases:
     meta_learning:
+      enabled: true  # Set to false to skip meta-learning phase
       curriculum:
         entropy_threshold: 0.5
         check_interval: 1
@@ -80,6 +81,7 @@ trainer:
         min_delta: 0.0001
 
     fine_tuning:
+      enabled: true  # Set to false to skip fine-tuning phase (only meta-learning)
       control:
         epochs: 50
         batches_per_epoch: 100

@@ -1,9 +1,9 @@
 """
 impl/geman.py
 -----------------------
-GEMAN Actor-Critic Network for VRPBTW (Heterogeneous Graph Neural Network).
+GEMAN Actor-Critic Network for VRPBTW (Graph-Enhanced Multi-relational Attention Network).
 
-Identical to HGNN architecture. The network receives a fully pre-processed obs dict from
+Primary implementation for VRPBTW policy. The network receives a fully pre-processed obs dict from
 VRPBTWProblem.state_to_obs — all arrays are already normalised and the
 static compatibility graph is already built. No preprocessing happens inside this file.
 

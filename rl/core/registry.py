@@ -26,11 +26,10 @@ from impl.vrpbtw import VRPBTWEnv
 from impl.mvrpbtw import MVRPBTWEnv
 
 # Networks
-from impl.hgnn import HGNNActorCritic
 from impl.geman import GEMANActorCritic
 
 # Core
-from core.agent import BaseAgent, PPOAgent, ReinforceAgent, POMOAgent
+from core.agent import BaseAgent, PPOAgent, ReinforceAgent, POMOAgent, MetaAgent
 from core.network import ActorCritic
 from core.trainer import BaseTrainer, MetaTrainer, POMOTrainer
 from core.evaluator import Evaluator
@@ -47,7 +46,6 @@ from core.collector import (
 # ---------------------------------------------------------------------------
 
 _NETWORK_REGISTRY: Dict[str, type] = {
-    "hgnn": HGNNActorCritic,
     "geman": GEMANActorCritic,
 }
 
@@ -55,6 +53,7 @@ _AGENT_REGISTRY: Dict[str, type] = {
     "ppo": PPOAgent,
     "reinforce": ReinforceAgent,
     "pomo": POMOAgent,
+    "meta": MetaAgent,
 }
 
 _TRAINER_REGISTRY: Dict[str, type] = {
@@ -229,7 +228,7 @@ def build_network(cfg: Dict[str, Any]) -> ActorCritic:
     import torch
 
     network_cfg = cfg.get("network", cfg.get("policy", {}))  # Support both old and new
-    net_type = network_cfg.get("name", "hgnn")
+    net_type = network_cfg.get("name", "geman")
 
     if net_type not in _NETWORK_REGISTRY:
         raise ValueError(

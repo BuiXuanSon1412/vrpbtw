@@ -106,6 +106,7 @@ class MetaTrainer(BaseTrainer):
 
         # Get meta_learning phase
         meta_phase = phases_cfg.get("meta_learning", {})
+        self.enable_meta_learning = bool(meta_phase.get("enabled", True))
         curriculum_cfg = meta_phase.get("curriculum", {})
         meta_control_cfg = meta_phase.get("control", {})
         meta_early_stop = meta_control_cfg.get("early_stopping", {})
@@ -124,6 +125,7 @@ class MetaTrainer(BaseTrainer):
 
         # Get fine_tuning phase config
         fine_tune_phase = phases_cfg.get("fine_tuning", {})
+        self.enable_fine_tuning = bool(fine_tune_phase.get("enabled", True))
         fine_control_cfg = fine_tune_phase.get("control", {})
         fine_early_stop = fine_control_cfg.get("early_stopping", {})
 
@@ -170,18 +172,44 @@ class MetaTrainer(BaseTrainer):
         )
 
     def train(self) -> Dict[str, Any]:
-        """Run full MAML pipeline: meta-training + fine-tuning."""
+        """Run training pipeline: conditionally execute meta-training and/or fine-tuning.
+
+        Modes:
+          - Both enabled: Full MAML pipeline (meta-train + fine-tune)
+          - Only meta-learning: Pure meta-learning without fine-tuning
+          - Only fine-tuning: Equivalent to normal PPO (task-specific training from scratch)
+          - Neither enabled: Error (at least one phase must be enabled)
+        """
+        if not self.enable_meta_learning and not self.enable_fine_tuning:
+            raise ValueError("At least one of meta_learning or fine_tuning must be enabled")
+
         start_time = time.time()
+        meta_summary = {}
+        fine_tune_summary = {}
 
-        # Phase 1: Meta-training
-        meta_summary = self.meta_train()
+        # Phase 1: Meta-training (optional)
+        if self.enable_meta_learning:
+            meta_summary = self.meta_train()
+        else:
+            self.logger.log_event(
+                "meta_learning_skipped",
+                self._total_updates,
+                message="Meta-learning disabled; starting fine-tuning with untrained network",
+            )
 
-        # Phase 2: Fine-tuning
-        fine_tune_summary = self.fine_tune()
+        # Phase 2: Fine-tuning (optional)
+        if self.enable_fine_tuning:
+            fine_tune_summary = self.fine_tune()
+        else:
+            self.logger.log_event(
+                "fine_tuning_skipped",
+                self._total_updates,
+                message="Fine-tuning disabled; meta-learning complete",
+            )
 
         # Combine summaries
         summary = {
-            "stop_reason": meta_summary.get("stop_reason", "completed"),
+            "stop_reason": meta_summary.get("stop_reason", fine_tune_summary.get("stop_reason", "completed")),
             "total_updates": self._total_updates,
             "total_epochs": meta_summary.get("total_epochs", 0)
             + fine_tune_summary.get("total_epochs", 0),
@@ -190,8 +218,10 @@ class MetaTrainer(BaseTrainer):
                 fine_tune_summary.get("best_objective", float("-inf")),
             ),
             "training_time_s": round(time.time() - start_time, 1),
-            "meta_summary": meta_summary,
-            "fine_tune_summary": fine_tune_summary,
+            "meta_learning_enabled": self.enable_meta_learning,
+            "fine_tuning_enabled": self.enable_fine_tuning,
+            "meta_summary": meta_summary if self.enable_meta_learning else None,
+            "fine_tune_summary": fine_tune_summary if self.enable_fine_tuning else None,
         }
         self.logger.log_event(
             "training_complete",
@@ -199,6 +229,8 @@ class MetaTrainer(BaseTrainer):
             total_updates=self._total_updates,
             total_epochs=summary["total_epochs"],
             best_objective=summary["best_objective"],
+            meta_learning_enabled=self.enable_meta_learning,
+            fine_tuning_enabled=self.enable_fine_tuning,
         )
         self.logger.save_summary(summary)
         self.logger.close()
@@ -587,12 +619,14 @@ class MetaTrainer(BaseTrainer):
     def _compute_task_losses(
         self,
     ) -> Tuple[torch.Tensor, Dict[Any, Dict[str, float]]]:
-        """Compute task losses across all active tasks using MAML inner/outer loop.
+        """Compute task losses across all active tasks using FOMAML (first-order MAML).
 
         For each active task:
           1. Clone sub_agent from meta_agent (fresh copy)
-          2. Inner loop: collect support set, adapt sub_agent on support
-          3. Outer loop: collect query set, evaluate adapted sub_agent on query
+          2. Inner loop: collect support set, compute gradients without stepping
+          3. Compute adapted parameters using gradient information
+          4. Outer loop: collect query set, evaluate with adapted parameters
+          5. Return query loss (connected to meta_agent for outer-loop update)
 
         Returns:
             (task_losses_tensor, task_metrics)
@@ -606,29 +640,91 @@ class MetaTrainer(BaseTrainer):
             sub_agent = self.sub_agent
             sub_agent.clone(self.meta_agent)
 
-            # Inner loop: collect support set and adapt
+            # Inner loop: collect support set and compute gradients (FOMAML)
             self.env.retask(task_id)
             support_batch = self.collector.collect(sub_agent, self.env)
-            support_metrics = sub_agent.update(support_batch)
-            support_loss = support_metrics.get("loss", torch.tensor(0.0, device=globals.DEVICE))
-            support_loss_tensor = (
-                support_loss
-                if isinstance(support_loss, torch.Tensor)
-                else torch.tensor(support_loss, device=globals.DEVICE)
-            )
 
-            # Outer loop: collect query set and evaluate
+            # Compute support loss manually to retain graph for adapted parameters
+            observations = support_batch["observations"]
+            masks = support_batch["masks"]
+            old_log_probs = support_batch["log_probs"]
+            advantages = support_batch["advantages"]
+            returns = support_batch["returns"]
+
+            # Handle observations as list (graph-based with dynamic sizes)
+            if isinstance(observations, list):
+                # Process each observation through network and collect outputs
+                # masks is (T, n_actions) after concatenation, so need to iterate properly
+                logits_list = []
+                values_list = []
+                for i, obs_t in enumerate(observations):
+                    mask_t = masks[i:i+1]  # Keep batch dimension (1, n_actions)
+                    logits_t, values_t, _ = sub_agent.network.evaluate(obs_t, mask_t, actions=None)
+                    logits_list.append(logits_t)
+                    values_list.append(values_t)
+                logits = torch.cat(logits_list, dim=0)
+                values = torch.cat(values_list, dim=0)
+            else:
+                logits, values, _ = sub_agent.network.evaluate(observations, masks, actions=None)
+            ratio = torch.exp(torch.nn.functional.log_softmax(logits, dim=-1).gather(-1, support_batch["actions"].unsqueeze(-1)).squeeze(-1) - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - sub_agent.clip_eps, 1 + sub_agent.clip_eps) * advantages
+            support_loss = -torch.min(surr1, surr2).mean() + sub_agent.value_coef * torch.nn.functional.mse_loss(values, returns)
+            support_loss_tensor = support_loss.detach()
+
+            # Compute adapted parameters via gradient (FOMAML: no optimizer.step())
+            # Inner learning rate (use same as outer for simplicity)
+            inner_lr = 0.001 if sub_agent.optimizer is None else sub_agent.optimizer.defaults.get('lr', 0.001)
+            grads = torch.autograd.grad(support_loss, sub_agent.network.parameters(), create_graph=True)
+            adapted_params = {n: p - inner_lr * g for (n, p), g in zip(sub_agent.network.named_parameters(), grads)}
+
+            # Outer loop: collect query set and evaluate with adapted parameters
             self.env.retask(task_id)
             query_batch = self.collector.collect(sub_agent, self.env)
-            query_metrics = sub_agent.update(query_batch)
-            query_loss = query_metrics.get("loss", torch.tensor(0.0, device=globals.DEVICE))
-            query_loss_tensor = (
-                query_loss
-                if isinstance(query_loss, torch.Tensor)
-                else torch.tensor(query_loss, device=globals.DEVICE)
-            )
 
-            task_losses.append(query_loss_tensor)
+            # Temporarily apply adapted parameters to network (maintains gradient connection)
+            # Save original params
+            original_params = {n: p.detach().clone() for n, p in sub_agent.network.named_parameters()}
+
+            # Assign adapted parameters (these retain gradients through autograd.grad call)
+            for name, param in sub_agent.network.named_parameters():
+                if name in adapted_params:
+                    param.data = adapted_params[name].data
+
+            # Evaluate query loss with adapted network parameters
+            query_observations = query_batch["observations"]
+            query_masks = query_batch["masks"]
+
+            # Handle observations as list (graph-based with dynamic sizes)
+            if isinstance(query_observations, list):
+                # Process each observation through network and collect outputs
+                query_logits_list = []
+                query_values_list = []
+                for i, obs_t in enumerate(query_observations):
+                    mask_t = query_masks[i:i+1]  # Keep batch dimension (1, n_actions)
+                    logits_t, values_t, _ = sub_agent.network.evaluate(obs_t, mask_t, actions=None)
+                    query_logits_list.append(logits_t)
+                    query_values_list.append(values_t)
+                query_logits = torch.cat(query_logits_list, dim=0)
+                query_values = torch.cat(query_values_list, dim=0)
+            else:
+                query_logits, query_values, _ = sub_agent.network.evaluate(query_observations, query_masks, actions=None)
+
+            # Compute query loss
+            query_old_log_probs = query_batch["log_probs"]
+            query_advantages = query_batch["advantages"]
+            query_returns = query_batch["returns"]
+
+            query_ratio = torch.exp(torch.nn.functional.log_softmax(query_logits, dim=-1).gather(-1, query_batch["actions"].unsqueeze(-1)).squeeze(-1) - query_old_log_probs)
+            query_surr1 = query_ratio * query_advantages
+            query_surr2 = torch.clamp(query_ratio, 1 - sub_agent.clip_eps, 1 + sub_agent.clip_eps) * query_advantages
+            query_loss = -torch.min(query_surr1, query_surr2).mean() + sub_agent.value_coef * torch.nn.functional.mse_loss(query_values, query_returns)
+
+            # Restore original parameters
+            for name, param in sub_agent.network.named_parameters():
+                param.data = original_params[name]
+
+            task_losses.append(query_loss)
 
             # Compute mean entropy from query batch for curriculum learning
             entropy = 0.0
@@ -637,8 +733,8 @@ class MetaTrainer(BaseTrainer):
 
             task_metrics[task_id] = {
                 "support_loss": support_loss_tensor.item(),
-                "query_loss": query_loss_tensor.item(),
-                "improvement": (support_loss_tensor - query_loss_tensor).item(),
+                "query_loss": query_loss.detach().item(),
+                "improvement": (support_loss_tensor - query_loss.detach()).item(),
                 "entropy": entropy,
             }
 
@@ -647,20 +743,47 @@ class MetaTrainer(BaseTrainer):
     def _print_header(self) -> None:
         active_task_ids = sorted(self.active_tasks)
         total_tasks = len(self.env.tasks)
-        print(
-            f"\n{'=' * 64}\n"
-            f"  Algorithm  : MAML (Meta-Learning)\n"
-            f"  Tasks      : {active_task_ids} (of {total_tasks} total)\n"
-            f"  Meta       : {self.mcfg['epochs']} epochs × {self.mcfg['batches_per_epoch']} batches\n"
-            f"  Fine-tune  : {self.fcfg['epochs']} epochs × {self.fcfg['batches_per_epoch']} batches\n"
-            f"  Device     : {globals.DEVICE}\n"
+
+        # Determine algorithm name based on enabled phases
+        if self.enable_meta_learning and self.enable_fine_tuning:
+            algo = "MAML (Meta-Learning + Fine-Tuning)"
+        elif self.enable_meta_learning:
+            algo = "MAML (Meta-Learning Only)"
+        elif self.enable_fine_tuning:
+            algo = "PPO (Fine-Tuning Only)"
+        else:
+            algo = "INVALID"
+
+        lines = [
+            f"\n{'=' * 64}",
+            f"  Algorithm  : {algo}",
+            f"  Tasks      : {active_task_ids} (of {total_tasks} total)",
+        ]
+
+        if self.enable_meta_learning:
+            lines.append(f"  Meta       : {self.mcfg['epochs']} epochs × {self.mcfg['batches_per_epoch']} batches")
+        if self.enable_fine_tuning:
+            lines.append(f"  Fine-tune  : {self.fcfg['epochs']} epochs × {self.fcfg['batches_per_epoch']} batches")
+
+        lines.extend([
+            f"  Device     : {globals.DEVICE}",
             f"{'=' * 64}"
-        )
+        ])
+
+        print("\n".join(lines))
 
     def _print_footer(self, summary: Dict) -> None:
+        phases = []
+        if summary.get("meta_learning_enabled"):
+            phases.append("meta-learning")
+        if summary.get("fine_tuning_enabled"):
+            phases.append("fine-tuning")
+        phases_str = " + ".join(phases) if phases else "none"
+
         print(
             f"\n{'=' * 64}\n"
             f"  Done ({summary['stop_reason']})\n"
+            f"  Phases     : {phases_str}\n"
             f"  Updates    : {summary['total_updates']:,}\n"
             f"  Epochs     : {summary['total_epochs']:,}\n"
             f"  Best Obj   : {summary['best_objective']:.4f}\n"

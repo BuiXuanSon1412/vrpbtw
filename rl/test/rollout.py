@@ -1,4 +1,20 @@
-"""Test script with detailed episode rollout and solution output."""
+"""
+Test script with detailed episode rollout and solution output.
+
+CLI Usage
+---------
+  python test/rollout.py                           # Default: 5 instances × 3 rollouts
+  python test/rollout.py --detailed                # With detailed route/time output
+  python test/rollout.py --n-instances 10          # Override instance count
+  python test/rollout.py --n-rollouts 5            # Override rollouts per instance
+  python test/rollout.py --detailed --n-instances 10 --n-rollouts 5
+
+Arguments
+---------
+  --detailed           Print truck routes, drone trips, timings for each rollout
+  --n-instances N      Number of instances to generate (default: 5)
+  --n-rollouts N       Number of rollouts per instance (default: 3)
+"""
 
 import sys
 from pathlib import Path
@@ -239,8 +255,8 @@ def run_tests(
 
     cfg = {
         "env": "MVRPBTW",
-        "tasks": ["easy_N50_F5_C"],
-        "n_customers": 50,
+        "tasks": ["easy_N20_F3_C"],
+        "n_customers": 20,
         "max_coord": 100.0,
         "capacity_truck": 200.0,
         "capacity_drone": 20.0,
