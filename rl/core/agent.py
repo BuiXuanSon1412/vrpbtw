@@ -210,12 +210,30 @@ class PPOAgent(BaseAgent):
         # (batch must have 'actions' key for proper PPO re-evaluation)
         if "actions" in batch:
             actions = batch["actions"]
-            new_log_probs, values, _ = self.network.evaluate(
-                observations, masks, actions=actions
-            )
+            if isinstance(observations, list):
+                new_log_probs_list, values_list = [], []
+                for i, obs_t in enumerate(observations):
+                    lp, val, _ = self.network.evaluate(
+                        obs_t, masks[i:i+1], actions=actions[i:i+1]
+                    )
+                    new_log_probs_list.append(lp)
+                    values_list.append(val)
+                new_log_probs = torch.cat(new_log_probs_list, dim=0)
+                values = torch.cat(values_list, dim=0)
+            else:
+                new_log_probs, values, _ = self.network.evaluate(
+                    observations, masks, actions=actions
+                )
         else:
             # Fallback: compute values only (improper PPO without action re-evaluation)
-            logits, values, _ = self.network.evaluate(observations, masks, actions=None)
+            if isinstance(observations, list):
+                values_list = []
+                for i, obs_t in enumerate(observations):
+                    _, val, _ = self.network.evaluate(obs_t, masks[i:i+1], actions=None)
+                    values_list.append(val)
+                values = torch.cat(values_list, dim=0)
+            else:
+                _, values, _ = self.network.evaluate(observations, masks, actions=None)
             new_log_probs = old_log_probs
 
         # Compute ratio and clipped surrogate loss
