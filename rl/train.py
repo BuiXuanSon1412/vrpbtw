@@ -125,21 +125,6 @@ def main() -> None:
             cfg["evaluation"]["decoding"] = {}
         cfg["evaluation"]["decoding"]["beam_width"] = args.beam
 
-    print(
-        f"\n  Config     : {args.config}"
-        + (f"  +  {args.override}" if args.override else "")
-    )
-    exp_name = cfg.get("name") or cfg.get("experiment", {}).get("name", "experiment")
-    algo_name = cfg.get("algorithm", "")
-    if isinstance(algo_name, dict):
-        algo_name = algo_name.get("name", "").upper()
-    else:
-        algo_name = algo_name.upper()
-    net_type = cfg.get("network", {}).get("name", "geman")
-    device = cfg.get("device", "cpu")
-    print(f"  Experiment : {exp_name}")
-    print(f"  Algorithm  : {algo_name}  |  Network: {net_type}  |  Device: {device}")
-
     # ── 2. Reproducibility ──────────────────────────────────────────────
     reproducibility_cfg = cfg.get("reproducibility", {})
     seed_cfg = reproducibility_cfg.get("seed", cfg.get("seed", {}))
@@ -149,34 +134,18 @@ def main() -> None:
         torch_seed=seed_cfg.get("torch_seed", 42),
     )
     seed_mgr.seed_everything()
-    print(f"  {seed_mgr}")
 
     # ── 3. Initialize logger and save config ────────────────────────────
     logger = build_logger(cfg)
-
-    # Save merged config
     logger.save_config(cfg)
-    logger_base_dir = Path(logger.config_path).parent
-
-    print(f"  Experiment dir: {logger_base_dir}")
-    print(f"  Logs:           {logger.log_dir.relative_to(logger_base_dir)}")
-    print(f"  Checkpoints:    {logger.checkpoint_dir.relative_to(logger_base_dir)}")
-    print(f"  Config:         {logger.config_path.name}")
-    print(f"  Artifacts:      {logger.artifacts_dir.relative_to(logger_base_dir)}")
 
     # ── 4. Build components using registry pattern ──────────────────────
-    # Build environment
     env = build_environment(cfg)
-    print(f"  Environment: {type(env).__name__}")
-
-    # Build agents from config (returns dict keyed by agent name)
     agents = build_agents(cfg=cfg)
-    print(f"  Agents     : {list(agents.keys())}\n")
-
-    # Build evaluators (one per phase, or "default" for single-phase trainers)
     evaluators = build_evaluators(cfg, agents, env)
 
     # Build trainer using factory pattern (dispatched by cfg.trainer)
+    # MetaTrainer will print informative header when train() is called
     trainer = build_trainer(
         cfg=cfg,
         agents=agents,
@@ -184,7 +153,6 @@ def main() -> None:
         evaluators=evaluators,
         logger=logger,
     )
-    print(f"  Trainer    : {type(trainer).__name__}\n")
 
     # ── 5. Training ─────────────────────────────────────────────────────
     trainer.train()

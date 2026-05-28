@@ -602,13 +602,36 @@ class VRPBTWEnv(Environment):
         # Check if there are any feasible serving nodes across all vehicles
         has_feasible_serving = False
 
+        # Debug: check each vehicle's feasibility at initial state
+        if state.truck_node[0] == 0 and all(node == 0 for node in state.truck_node):  # All at depot initially
+            feasible_per_vehicle = {v_idx: 0 for v_idx in range(V)}
+
         for v_idx in range(V):
             k, vtype = self.vehicle_fleet_type(v_idx)
             if vtype == TRUCK:
+                feasible_nodes = []
                 for j in range(1, N1):
                     if self._truck_feasible(state, k, j):
+                        feasible_nodes.append(j)
                         mask[self.encode_action(j, v_idx)] = True
                         has_feasible_serving = True
+                if state.truck_node[0] == 0 and all(node == 0 for node in state.truck_node):
+                    feasible_per_vehicle[v_idx] = len(feasible_nodes)
+                    if not feasible_nodes:
+                        print(f"[DEBUG] Vehicle {v_idx} (fleet {k}, TRUCK) infeasible to ALL customers")
+                        # Check why first customer is infeasible
+                        if not self._truck_feasible(state, k, 1):
+                            print(f"  -> Customer 1 infeasible. Checking constraints...")
+                            print(f"     served[1]={state.served[1]}")
+                            print(f"     current_truck_load[{k}]={state.current_truck_load[k]}")
+                            print(f"     tw_open[1]={self.tw_open[1]:.4f}, tw_close[1]={self.tw_close[1]:.4f}")
+                            print(f"     demands[1]={self.demands[1]}")
+                            from_node = int(state.truck_node[k])
+                            arrive = self._truck_current_time(state, k) + self.manhattan_dist[from_node, 1] / self.v_t
+                            service_end = max(arrive, self.tw_open[1]) + self.service_times[1]
+                            print(f"     arrival={arrive:.4f}, service_end={service_end:.4f}")
+                            print(f"     service_end > tw_close? {service_end > self.tw_close[1]}")
+                            print(f"     service_end + return_dist > T_max? {service_end + self.manhattan_dist[1, 0] / self.v_t > self.T_max}")
             else:
                 if state.drone_active[k]:
                     # Check extending to unserved customers
@@ -634,6 +657,7 @@ class VRPBTWEnv(Environment):
                 k, vtype = self.vehicle_fleet_type(v_idx)
                 if vtype == TRUCK and self._truck_return_feasible(state, k):
                     mask[self.encode_action(DEPOT, v_idx)] = True
+
 
         return ActionMask.from_bool_array(mask)
 

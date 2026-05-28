@@ -109,16 +109,17 @@ def _compute_gae(
 class GAECollector(BaseCollector):
     """Generalized Advantage Estimation collector.
 
-    Computes advantages using exponential-weighted moving average over TD residuals.
+    Collects one complete episode per call and computes advantages using
+    exponential-weighted moving average over TD residuals.
+
+    Note: Each batch is exactly one complete episode (no partial episodes).
     """
 
     def __init__(
         self,
-        rollout_length: int = 256,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
     ):
-        self.rollout_length = rollout_length
         self.gamma = gamma
         self.gae_lambda = gae_lambda
 
@@ -126,7 +127,6 @@ class GAECollector(BaseCollector):
     def from_config(cls, cfg: Dict[str, Any]) -> "GAECollector":
         params = cfg.get("params", {})
         return cls(
-            rollout_length=params.get("rollout_length", 256),
             gamma=params.get("gamma", 0.99),
             gae_lambda=params.get("gae_lambda", 0.95),
         )
@@ -136,7 +136,11 @@ class GAECollector(BaseCollector):
         agent: BaseAgent,
         env: Any,
     ) -> dict:
-        """Collect trajectories with GAE advantage estimation."""
+        """Collect one complete episode with GAE advantage estimation.
+
+        Collects trajectory steps until episode termination (natural end).
+        Each batch is exactly one complete episode.
+        """
         observations = []
         masks = []
         actions = []
@@ -150,7 +154,7 @@ class GAECollector(BaseCollector):
         action_mask = info["action_mask"]
 
         with torch.no_grad():
-            while len(log_probs) < self.rollout_length:
+            while True:  # Collect until episode terminates
                 obs_t = obs_to_tensor(obs, device=globals.DEVICE)
                 mask_t = torch.tensor(
                     action_mask, dtype=torch.bool, device=globals.DEVICE
@@ -172,6 +176,7 @@ class GAECollector(BaseCollector):
                 obs = next_obs
                 action_mask = info["action_mask"]
 
+                # Exit when episode terminates
                 if terminated or truncated or not action_mask.any():
                     break
 
@@ -242,18 +247,19 @@ class GAECollector(BaseCollector):
 class MCCollector(BaseCollector):
     """Monte Carlo collector.
 
+    Collects one complete episode per call.
     Computes returns as discounted sum of rewards. Advantages are return - value.
+
+    Note: Each batch is exactly one complete episode (no partial episodes).
     """
 
-    def __init__(self, rollout_length: int = 256, gamma: float = 0.99):
-        self.rollout_length = rollout_length
+    def __init__(self, gamma: float = 0.99):
         self.gamma = gamma
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "MCCollector":
         params = cfg.get("params", {})
         return cls(
-            rollout_length=params.get("rollout_length", 256),
             gamma=params.get("gamma", 0.99),
         )
 
@@ -262,7 +268,7 @@ class MCCollector(BaseCollector):
         agent: BaseAgent,
         env: Any,
     ) -> dict:
-        """Collect complete episodes and return batch dict."""
+        """Collect one complete episode and return batch dict."""
         observations = []
         masks = []
         actions = []
@@ -276,7 +282,7 @@ class MCCollector(BaseCollector):
         action_mask = info["action_mask"]
 
         with torch.no_grad():
-            while len(log_probs) < self.rollout_length:
+            while True:  # Collect until episode terminates
                 obs_t = obs_to_tensor(obs, device=globals.DEVICE)
                 mask_t = torch.tensor(
                     action_mask, dtype=torch.bool, device=globals.DEVICE

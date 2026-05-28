@@ -206,22 +206,31 @@ class PPOAgent(BaseAgent):
         returns = batch["returns"]
         entropies = batch.get("entropies", torch.tensor(0.0))
 
-        # Forward pass: re-evaluate actions under new policy
-        # (batch must have 'actions' key for proper PPO re-evaluation)
-        if "actions" in batch:
-            actions = batch["actions"]
-            new_log_probs, values, _ = self.network.evaluate(
-                observations, masks, actions=actions
-            )
-        else:
-            # Fallback: compute values only (improper PPO without action re-evaluation)
-            logits, values, _ = self.network.evaluate(observations, masks, actions=None)
-            new_log_probs = old_log_probs
+        # Normalize advantages for stable training
+        # PPO best practice: advantages with mean 0 and std 1 stabilize learning
+        advantages_normalized = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Compute ratio and clipped surrogate loss
+        # Observations are stored as list (graph-based with dynamic sizes across timesteps)
+        # Process each observation through network and collect outputs
+        logits_list = []
+        values_list = []
+        for i, obs_t in enumerate(observations):
+            mask_t = masks[i:i+1]  # Keep batch dimension (1, n_actions)
+            if "actions" in batch:
+                # Get action for this timestep
+                actions_t = batch["actions"][i:i+1]
+                logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=actions_t)
+            else:
+                logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=None)
+            logits_list.append(logits_t)
+            values_list.append(values_t)
+        new_log_probs = torch.cat(logits_list, dim=0) if "actions" not in batch else old_log_probs
+        values = torch.cat(values_list, dim=0)
+
+        # Compute ratio and clipped surrogate loss (using normalized advantages)
         ratio = torch.exp(new_log_probs - old_log_probs)
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
+        surr1 = ratio * advantages_normalized
+        surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages_normalized
         policy_loss = -torch.min(surr1, surr2).mean()
 
         # Value loss (MSE between predictions and returns)

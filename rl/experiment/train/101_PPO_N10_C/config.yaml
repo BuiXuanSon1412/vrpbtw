@@ -3,14 +3,13 @@ trainer:
   collector:
     name: gae
     params:
-      rollout_length: 256
       gamma: 0.99
       gae_lambda: 0.95
   agents:
     meta_agent:
       name: meta
       learning_rate: 0.001
-      optimizer: unspecified
+      optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
       entropy_coef: 0.01
@@ -54,7 +53,7 @@ trainer:
         beam_width: 1
   phases:
     meta_learning:
-      enabled: true
+      enabled: false
       curriculum:
         entropy_threshold: 0.5
         check_interval: 1
@@ -122,7 +121,7 @@ environment:
     drone_landing_min: 1.0
     service_time_min: 5.0
     tasks:
-    - 002_N10_F2_R
+    - 003_N10_F2_C
 device: cpu
 reproducibility:
   seed:
@@ -130,10 +129,9 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: test_validation
-  description: mvrpbtw experiment - drone launch with constraint-based feasibility
+  name: 101_PPO_N10_C
+  description: mvrpbtw experiment
 logger:
   base_dir: experiment/train
   verbose: true
   tensorboard: false
-name: test_validation

@@ -235,14 +235,6 @@ class Evaluator:
             return lp
 
         obs_t = obs_to_tensor(obs, globals.DEVICE)
-        if isinstance(obs_t, dict):
-            obs_t = {
-                k: (v.to(globals.DEVICE) if isinstance(v, torch.Tensor) else v)
-                for k, v in obs_t.items()
-            }
-        else:
-            obs_t = obs_t.to(globals.DEVICE)
-
         mask_t = torch.tensor(mask[np.newaxis], dtype=torch.bool, device=globals.DEVICE)
 
         with torch.no_grad():

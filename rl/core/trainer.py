@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
+from torch.func import functional_call
 
 import globals
 from core.agent import BaseAgent
@@ -181,7 +183,12 @@ class MetaTrainer(BaseTrainer):
           - Neither enabled: Error (at least one phase must be enabled)
         """
         if not self.enable_meta_learning and not self.enable_fine_tuning:
-            raise ValueError("At least one of meta_learning or fine_tuning must be enabled")
+            raise ValueError(
+                "At least one of meta_learning or fine_tuning must be enabled"
+            )
+
+        # Print training header (always shown, regardless of which phases are enabled)
+        self._print_header()
 
         start_time = time.time()
         meta_summary = {}
@@ -209,7 +216,9 @@ class MetaTrainer(BaseTrainer):
 
         # Combine summaries
         summary = {
-            "stop_reason": meta_summary.get("stop_reason", fine_tune_summary.get("stop_reason", "completed")),
+            "stop_reason": meta_summary.get(
+                "stop_reason", fine_tune_summary.get("stop_reason", "completed")
+            ),
             "total_updates": self._total_updates,
             "total_epochs": meta_summary.get("total_epochs", 0)
             + fine_tune_summary.get("total_epochs", 0),
@@ -239,7 +248,6 @@ class MetaTrainer(BaseTrainer):
 
     def meta_train(self) -> Dict[str, Any]:
         """Run meta-training loop with epoch/batch structure."""
-        self._print_header()
         start_time = time.time()
         stop_reason = "completed"
         epoch = -1
@@ -305,22 +313,23 @@ class MetaTrainer(BaseTrainer):
 
                 # Per-epoch aggregation
                 epoch_time = time.time() - epoch_start
-                epoch_losses_array = (
-                    torch.stack(epoch_losses).detach().cpu().numpy()
-                    if epoch_losses
-                    else np.array([])
-                )
-                train_metrics = {
-                    "meta/loss_mean": float(np.mean(epoch_losses_array))
-                    if len(epoch_losses_array) > 0
-                    else 0.0,
-                    "meta/loss_std": float(np.std(epoch_losses_array))
-                    if len(epoch_losses_array) > 0
-                    else 0.0,
+                train_metrics = {}
+                if epoch_losses:
+                    epoch_losses_tensor = torch.stack(epoch_losses).detach()
+                    train_metrics = {
+                        "meta/loss_mean": float(epoch_losses_tensor.mean()),
+                        "meta/loss_std": float(epoch_losses_tensor.std()),
+                    }
+                else:
+                    train_metrics = {
+                        "meta/loss_mean": 0.0,
+                        "meta/loss_std": 0.0,
+                    }
+                train_metrics.update({
                     "meta/num_active_tasks": float(len(self.active_tasks)),
                     "meta/total_updates": float(self._total_updates),
                     "meta/epoch_time_s": epoch_time,
-                }
+                })
 
                 # Evaluation every eval_interval epochs
                 eval_metrics = {}
@@ -448,23 +457,24 @@ class MetaTrainer(BaseTrainer):
                                 self.env.retask(task_id)
                                 batch = self.collector.collect(agent, self.env)
 
-                                # Update agent with collected batch
-                                metrics = agent.update(batch)
-                                self._total_updates += 1
-                                loss_val = metrics.get("loss", 0.0)
-                                loss_val = (
-                                    loss_val.detach()
-                                    if isinstance(loss_val, torch.Tensor)
-                                    else loss_val
-                                )
-                                epoch_losses.append(float(loss_val))
-                                grad_norm_val = metrics.get("grad_norm", -1.0)
-                                grad_norm_val = (
-                                    grad_norm_val.detach()
-                                    if isinstance(grad_norm_val, torch.Tensor)
-                                    else grad_norm_val
-                                )
-                                epoch_grad_norms.append(float(grad_norm_val))
+                                # Multiple gradient steps over the same batch (PPO optimization)
+                                for ppo_epoch in range(self.fcfg["ppo_epochs"]):
+                                    metrics = agent.update(batch)
+                                    self._total_updates += 1
+                                    loss_val = metrics.get("loss", 0.0)
+                                    loss_val = (
+                                        loss_val.detach()
+                                        if isinstance(loss_val, torch.Tensor)
+                                        else loss_val
+                                    )
+                                    epoch_losses.append(float(loss_val))
+                                    grad_norm_val = metrics.get("grad_norm", -1.0)
+                                    grad_norm_val = (
+                                        grad_norm_val.detach()
+                                        if isinstance(grad_norm_val, torch.Tensor)
+                                        else grad_norm_val
+                                    )
+                                    epoch_grad_norms.append(float(grad_norm_val))
                         except Exception as e:
                             self.logger.log_exception(
                                 e,
@@ -634,6 +644,10 @@ class MetaTrainer(BaseTrainer):
         task_losses: List[torch.Tensor] = []
         task_metrics: Dict[Any, Dict[str, float]] = {}
 
+        # Extract agent hyperparameters (safe access for type checker)
+        clip_eps = getattr(self.sub_agent, "clip_eps", 0.2)
+        value_coef = getattr(self.sub_agent, "value_coef", 0.5)
+
         # Process each active task
         for task_id in self.active_tasks:
             # Clone meta_agent to sub_agent (fresh copy for this task)
@@ -658,71 +672,140 @@ class MetaTrainer(BaseTrainer):
                 logits_list = []
                 values_list = []
                 for i, obs_t in enumerate(observations):
-                    mask_t = masks[i:i+1]  # Keep batch dimension (1, n_actions)
-                    logits_t, values_t, _ = sub_agent.network.evaluate(obs_t, mask_t, actions=None)
+                    mask_t = masks[i : i + 1]  # Keep batch dimension (1, n_actions)
+                    logits_t, values_t, _ = sub_agent.network.evaluate(
+                        obs_t, mask_t, actions=None
+                    )
                     logits_list.append(logits_t)
                     values_list.append(values_t)
                 logits = torch.cat(logits_list, dim=0)
                 values = torch.cat(values_list, dim=0)
             else:
-                logits, values, _ = sub_agent.network.evaluate(observations, masks, actions=None)
-            ratio = torch.exp(torch.nn.functional.log_softmax(logits, dim=-1).gather(-1, support_batch["actions"].unsqueeze(-1)).squeeze(-1) - old_log_probs)
+                logits, values, _ = sub_agent.network.evaluate(
+                    observations, masks, actions=None
+                )
+
+            # Verify shape compatibility for gather operation
+            assert logits.shape[:-1] == support_batch["actions"].shape, (
+                f"Support logits batch shape {logits.shape[:-1]} != actions shape {support_batch['actions'].shape}"
+            )
+
+            ratio = torch.exp(
+                torch.nn.functional.log_softmax(logits, dim=-1)
+                .gather(-1, support_batch["actions"].unsqueeze(-1))
+                .squeeze(-1)
+                - old_log_probs
+            )
             surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - sub_agent.clip_eps, 1 + sub_agent.clip_eps) * advantages
-            support_loss = -torch.min(surr1, surr2).mean() + sub_agent.value_coef * torch.nn.functional.mse_loss(values, returns)
+            surr2 = (
+                torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+                * advantages
+            )
+            support_loss = -torch.min(
+                surr1, surr2
+            ).mean() + value_coef * torch.nn.functional.mse_loss(
+                values, returns
+            )
             support_loss_tensor = support_loss.detach()
 
             # Compute adapted parameters via gradient (FOMAML: no optimizer.step())
             # Inner learning rate (use same as outer for simplicity)
-            inner_lr = 0.001 if sub_agent.optimizer is None else sub_agent.optimizer.defaults.get('lr', 0.001)
-            grads = torch.autograd.grad(support_loss, sub_agent.network.parameters(), create_graph=True)
-            adapted_params = {n: p - inner_lr * g for (n, p), g in zip(sub_agent.network.named_parameters(), grads)}
+            inner_lr = (
+                0.001
+                if sub_agent.optimizer is None
+                else sub_agent.optimizer.defaults.get("lr", 0.001)
+            )
+            grads = torch.autograd.grad(
+                support_loss,
+                sub_agent.network.parameters(),
+                create_graph=True,
+                allow_unused=True,  # Some params may not be connected to loss
+            )
+            # Handle None gradients (from unused parameters)
+            grads_safe = [
+                g if g is not None else torch.zeros_like(p)
+                for p, g in zip(sub_agent.network.parameters(), grads)
+            ]
+            adapted_params = {
+                n: p - inner_lr * g
+                for (n, p), g in zip(sub_agent.network.named_parameters(), grads_safe)
+            }
 
             # Outer loop: collect query set and evaluate with adapted parameters
             self.env.retask(task_id)
             query_batch = self.collector.collect(sub_agent, self.env)
 
-            # Temporarily apply adapted parameters to network (maintains gradient connection)
-            # Save original params
-            original_params = {n: p.detach().clone() for n, p in sub_agent.network.named_parameters()}
-
-            # Assign adapted parameters (these retain gradients through autograd.grad call)
-            for name, param in sub_agent.network.named_parameters():
-                if name in adapted_params:
-                    param.data = adapted_params[name].data
-
-            # Evaluate query loss with adapted network parameters
+            # Evaluate query loss with adapted parameters using functional_call
+            # This maintains gradient flow through the adaptation for proper meta-gradients
             query_observations = query_batch["observations"]
             query_masks = query_batch["masks"]
 
-            # Handle observations as list (graph-based with dynamic sizes)
-            if isinstance(query_observations, list):
-                # Process each observation through network and collect outputs
-                query_logits_list = []
-                query_values_list = []
-                for i, obs_t in enumerate(query_observations):
-                    mask_t = query_masks[i:i+1]  # Keep batch dimension (1, n_actions)
-                    logits_t, values_t, _ = sub_agent.network.evaluate(obs_t, mask_t, actions=None)
-                    query_logits_list.append(logits_t)
-                    query_values_list.append(values_t)
-                query_logits = torch.cat(query_logits_list, dim=0)
-                query_values = torch.cat(query_values_list, dim=0)
-            else:
-                query_logits, query_values, _ = sub_agent.network.evaluate(query_observations, query_masks, actions=None)
+            # Create params dict for functional_call (adapted parameters only)
+            # Filter by actual parameters, not state_dict (which includes buffers)
+            adapted_params_dict = {
+                name: adapted_params[name]
+                for name in dict(sub_agent.network.named_parameters()).keys()
+                if name in adapted_params
+            }
 
-            # Compute query loss
+            # Helper function to evaluate network with functional_call
+            def evaluate_with_adapted_params():
+                if isinstance(query_observations, list):
+                    # Process each observation with adapted parameters
+                    query_logits_list = []
+                    query_values_list = []
+                    for i, obs_t in enumerate(query_observations):
+                        mask_t = query_masks[i : i + 1]
+                        # Use functional_call to evaluate with adapted params
+                        outputs = functional_call(
+                            sub_agent.network,
+                            adapted_params_dict,
+                            (obs_t, mask_t, None),
+                        )
+                        logits_t, values_t, _ = outputs
+                        query_logits_list.append(logits_t)
+                        query_values_list.append(values_t)
+                    query_logits = torch.cat(query_logits_list, dim=0)
+                    query_values = torch.cat(query_values_list, dim=0)
+                else:
+                    # Non-list observations
+                    outputs = functional_call(
+                        sub_agent.network,
+                        adapted_params_dict,
+                        (query_observations, query_masks, None),
+                    )
+                    query_logits, query_values, _ = outputs
+
+                return query_logits, query_values
+
+            query_logits, query_values = evaluate_with_adapted_params()
+
+            # Compute query loss with adapted parameters
             query_old_log_probs = query_batch["log_probs"]
             query_advantages = query_batch["advantages"]
             query_returns = query_batch["returns"]
 
-            query_ratio = torch.exp(torch.nn.functional.log_softmax(query_logits, dim=-1).gather(-1, query_batch["actions"].unsqueeze(-1)).squeeze(-1) - query_old_log_probs)
-            query_surr1 = query_ratio * query_advantages
-            query_surr2 = torch.clamp(query_ratio, 1 - sub_agent.clip_eps, 1 + sub_agent.clip_eps) * query_advantages
-            query_loss = -torch.min(query_surr1, query_surr2).mean() + sub_agent.value_coef * torch.nn.functional.mse_loss(query_values, query_returns)
+            # Verify shape compatibility for gather operation
+            assert query_logits.shape[:-1] == query_batch["actions"].shape, (
+                f"Logits batch shape {query_logits.shape[:-1]} != actions shape {query_batch['actions'].shape}"
+            )
 
-            # Restore original parameters
-            for name, param in sub_agent.network.named_parameters():
-                param.data = original_params[name]
+            query_ratio = torch.exp(
+                torch.nn.functional.log_softmax(query_logits, dim=-1)
+                .gather(-1, query_batch["actions"].unsqueeze(-1))
+                .squeeze(-1)
+                - query_old_log_probs
+            )
+            query_surr1 = query_ratio * query_advantages
+            query_surr2 = (
+                torch.clamp(query_ratio, 1 - clip_eps, 1 + clip_eps)
+                * query_advantages
+            )
+            query_loss = -torch.min(
+                query_surr1, query_surr2
+            ).mean() + value_coef * torch.nn.functional.mse_loss(
+                query_values, query_returns
+            )
 
             task_losses.append(query_loss)
 
@@ -741,34 +824,112 @@ class MetaTrainer(BaseTrainer):
         return torch.stack(task_losses), task_metrics
 
     def _print_header(self) -> None:
+        from datetime import datetime
+
         active_task_ids = sorted(self.active_tasks)
         total_tasks = len(self.env.tasks)
 
         # Determine algorithm name based on enabled phases
         if self.enable_meta_learning and self.enable_fine_tuning:
-            algo = "MAML (Meta-Learning + Fine-Tuning)"
+            algo = "FOMAML + PPO Fine-Tuning"
         elif self.enable_meta_learning:
-            algo = "MAML (Meta-Learning Only)"
+            algo = "FOMAML (Meta-Learning Only)"
         elif self.enable_fine_tuning:
             algo = "PPO (Fine-Tuning Only)"
         else:
             algo = "INVALID"
 
+        # Calculate training statistics
+        # Note: Each batch is one complete episode (no fixed rollout_length)
+        meta_batches = (
+            self.mcfg["epochs"] * self.mcfg["batches_per_epoch"]
+            if self.enable_meta_learning
+            else 0
+        )
+
+        fine_batches = (
+            self.fcfg["epochs"] * self.fcfg["batches_per_epoch"]
+            if self.enable_fine_tuning
+            else 0
+        )
+        fine_ppo_steps = (
+            fine_batches * self.fcfg["ppo_epochs"] if self.enable_fine_tuning else 0
+        )
+
+        total_updates = meta_batches + fine_ppo_steps
+
+        # Get meta-agent hyperparameters
+        meta_lr = getattr(self.meta_agent, "learning_rate", 0.001)
+        meta_optimizer = (
+            self.meta_agent.optimizer.__class__.__name__
+            if self.meta_agent.optimizer
+            else "None"
+        )
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         lines = [
-            f"\n{'=' * 64}",
-            f"  Algorithm  : {algo}",
-            f"  Tasks      : {active_task_ids} (of {total_tasks} total)",
+            f"\n{'=' * 80}",
+            f"                          TRAINING STARTED",
+            f"{'=' * 80}",
+            f"Experiment              : {self.logger.experiment_name}",
+            f"Timestamp               : {timestamp}",
+            f"Algorithm               : {algo}",
+            f"",
+            f"Training Schedule",
         ]
 
         if self.enable_meta_learning:
-            lines.append(f"  Meta       : {self.mcfg['epochs']} epochs × {self.mcfg['batches_per_epoch']} batches")
-        if self.enable_fine_tuning:
-            lines.append(f"  Fine-tune  : {self.fcfg['epochs']} epochs × {self.fcfg['batches_per_epoch']} batches")
+            lines.extend(
+                [
+                    f"  Meta-Learning Phase",
+                    f"    Epochs              : {self.mcfg['epochs']}",
+                    f"    Batches/Epoch       : {self.mcfg['batches_per_epoch']}",
+                    f"    Episodes/Batch      : 1 (collects complete episode per batch)",
+                    f"    Total Batches       : {meta_batches:,}",
+                    f"    Total Episodes      : {meta_batches:,}",
+                    f"    Task Curriculum     : Start with {len(self.active_tasks)} task(s), expand based on entropy < {self.mcfg['entropy_threshold']}",
+                ]
+            )
 
-        lines.extend([
-            f"  Device     : {globals.DEVICE}",
-            f"{'=' * 64}"
-        ])
+        if self.enable_fine_tuning:
+            lines.extend(
+                [
+                    f"  Fine-Tuning Phase",
+                    f"    Epochs              : {self.fcfg['epochs']}",
+                    f"    Batches/Epoch       : {self.fcfg['batches_per_epoch']}",
+                    f"    PPO Epochs          : {self.fcfg['ppo_epochs']} (updates per batch)",
+                    f"    Episodes/Batch      : 1 (collects complete episode per batch)",
+                    f"    Total Batches       : {fine_batches:,}",
+                    f"    Total PPO Updates   : {fine_ppo_steps:,}",
+                    f"    Total Episodes      : {fine_batches:,}",
+                    f"    Tasks               : {len(self.env.tasks)} task(s)",
+                ]
+            )
+
+        lines.extend(
+            [
+                f"",
+                f"Training Summary",
+                f"  Total Episodes          : {meta_batches + fine_batches:,} (one episode per batch)",
+                f"  Total Updates           : {total_updates:,}",
+                f"  Environment             : {self.env.__class__.__name__}",
+                f"  Device                  : {globals.DEVICE}",
+                f"",
+                f"Configuration",
+                f"  Meta LR                 : {meta_lr}",
+                f"  Meta Optimizer          : {meta_optimizer}",
+                f"  Max Grad Norm           : {self.meta_agent.max_grad_norm if hasattr(self.meta_agent, 'max_grad_norm') else 0.5}",
+                f"  Rollout Strategy        : Serial (1 environment), variable-length batches",
+                f"",
+                f"Output Directories",
+                f"  Experiment              : {self.logger.log_dir.parent}",
+                f"  Checkpoints             : {self.logger.checkpoint_dir}",
+                f"  Logs                    : {self.logger.log_dir}",
+                f"",
+                f"{'=' * 80}",
+            ]
+        )
 
         print("\n".join(lines))
 
@@ -838,6 +999,7 @@ class POMOTrainer(BaseTrainer):
         phases_cfg = trainer_cfg.get("phases", {})
         training_phase = phases_cfg.get("training", {})
         control_cfg = training_phase.get("control", {})
+        early_stop_cfg = training_phase.get("early_stopping", {})
 
         self.tcfg = {
             "epochs": int(control_cfg["epochs"]),
@@ -845,6 +1007,8 @@ class POMOTrainer(BaseTrainer):
             "instances_per_batch": int(control_cfg["instances_per_batch"]),
             "eval_interval": int(control_cfg.get("eval_interval", 1)),
             "checkpoint_interval": int(control_cfg["checkpoint_interval"]),
+            "patience": int(early_stop_cfg.get("patience", 20)),
+            "min_delta": float(early_stop_cfg.get("min_delta", 0.0001)),
         }
 
         self._total_updates = 0
@@ -896,6 +1060,7 @@ class POMOTrainer(BaseTrainer):
 
             best_objective = float("-inf")
             best_epoch = -1
+            patience_counter = 0
 
             for epoch in range(epochs):
                 epoch_start = time.time()
@@ -906,7 +1071,7 @@ class POMOTrainer(BaseTrainer):
                 # Training phase: accumulate statistics across all batches
                 for batch_idx in range(batches_per_epoch):
                     batch_log_probs = []  # List of tensors, one per instance
-                    batch_rewards = []    # List of tensors, one per instance
+                    batch_rewards = []  # List of tensors, one per instance
                     batch_entropies = []  # List of tensors, one per instance
 
                     for _ in range(instances_per_batch):
@@ -915,13 +1080,25 @@ class POMOTrainer(BaseTrainer):
                         # Stack episodes for this instance
                         if batch_data["log_probs"]:
                             instance_log_probs = torch.stack(
-                                [torch.as_tensor(lp, device=globals.DEVICE).squeeze(0) for lp in batch_data["log_probs"]]
+                                [
+                                    torch.as_tensor(lp, device=globals.DEVICE).squeeze(
+                                        0
+                                    )
+                                    for lp in batch_data["log_probs"]
+                                ]
                             )
                             instance_rewards = torch.tensor(
-                                batch_data["rewards"], dtype=torch.float32, device=globals.DEVICE
+                                batch_data["rewards"],
+                                dtype=torch.float32,
+                                device=globals.DEVICE,
                             )
                             instance_entropies = torch.stack(
-                                [torch.as_tensor(ent, device=globals.DEVICE).squeeze(0) for ent in batch_data.get("entropies", [])]
+                                [
+                                    torch.as_tensor(ent, device=globals.DEVICE).squeeze(
+                                        0
+                                    )
+                                    for ent in batch_data.get("entropies", [])
+                                ]
                             )
                             batch_log_probs.append(instance_log_probs)
                             batch_rewards.append(instance_rewards)
@@ -930,9 +1107,9 @@ class POMOTrainer(BaseTrainer):
                     # Update after batch
                     if batch_log_probs:
                         batch = {
-                            "log_probs": batch_log_probs,   # List of (num_starting_points_i,) tensors
-                            "rewards": batch_rewards,       # List of (num_starting_points_i,) tensors
-                            "entropies": batch_entropies,   # List of (num_starting_points_i,) tensors
+                            "log_probs": batch_log_probs,  # List of (num_starting_points_i,) tensors
+                            "rewards": batch_rewards,  # List of (num_starting_points_i,) tensors
+                            "entropies": batch_entropies,  # List of (num_starting_points_i,) tensors
                         }
                         metrics = agent.update(batch)
                         loss_val = metrics.get("loss", 0.0)
@@ -954,25 +1131,31 @@ class POMOTrainer(BaseTrainer):
                         epoch_losses.append(0.0)
 
                     # Flatten instance rewards (list of tensors) into epoch_returns
-                    for instance_rewards in batch_rewards:
-                        if isinstance(instance_rewards, torch.Tensor):
-                            epoch_returns.extend(instance_rewards.detach().cpu().tolist())
-                        else:
-                            epoch_returns.extend(instance_rewards)
+                    # Batch GPU→CPU transfer instead of per-instance
+                    gpu_rewards = [
+                        r for r in batch_rewards if isinstance(r, torch.Tensor)
+                    ]
+                    if gpu_rewards:
+                        batch_rewards_gpu = torch.cat(gpu_rewards)
+                        epoch_returns.extend(
+                            batch_rewards_gpu.detach().cpu().tolist()
+                        )
+                    # Handle non-tensor rewards
+                    for r in batch_rewards:
+                        if not isinstance(r, torch.Tensor):
+                            epoch_returns.extend(r)
                     self._total_instances += instances_per_batch
 
                 # Compute per-epoch training statistics
                 epoch_time = time.time() - epoch_start
                 train_returns = np.array(epoch_returns)
 
-                # Debug: epoch summary
-                epoch_losses_array = np.array(epoch_losses) if epoch_losses else np.array([])
-                epoch_grad_norms_array = np.array(epoch_grad_norms) if epoch_grad_norms else np.array([])
-                print(f"Epoch {epoch + 1:3d} | "
-                      f"loss: {np.mean(epoch_losses_array):8.6f}±{np.std(epoch_losses_array):8.6f} | "
-                      f"return: {np.mean(train_returns):8.4f}±{np.std(train_returns):8.4f} | "
-                      f"grad_norm: {np.mean(epoch_grad_norms_array):8.4f}±{np.std(epoch_grad_norms_array):8.4f} | "
-                      f"time: {epoch_time:6.1f}s")
+                epoch_losses_array = (
+                    np.array(epoch_losses) if epoch_losses else np.array([])
+                )
+                epoch_grad_norms_array = (
+                    np.array(epoch_grad_norms) if epoch_grad_norms else np.array([])
+                )
 
                 train_metrics = {
                     "train/loss_mean": float(np.mean(epoch_losses))
@@ -1013,11 +1196,12 @@ class POMOTrainer(BaseTrainer):
                     eval_stats = self.evaluator.evaluate(task_id)
                     eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
-                    # Track best objective
+                    # Track best objective with early stopping
                     mean_obj = eval_stats.get("mean_objective", float("-inf"))
-                    if mean_obj > best_objective:
+                    if mean_obj > best_objective + self.tcfg["min_delta"]:
                         best_objective = mean_obj
                         best_epoch = epoch + 1
+                        patience_counter = 0
                         self.logger.save_checkpoint(
                             f"{task_id}_best",
                             {
@@ -1033,6 +1217,18 @@ class POMOTrainer(BaseTrainer):
                             epoch=epoch + 1,
                             objective=f"{mean_obj:.4f}",
                         )
+                    else:
+                        patience_counter += 1
+
+                    # Early stopping check
+                    if patience_counter >= self.tcfg["patience"]:
+                        self.logger.log_event(
+                            "early_stop",
+                            self._total_updates,
+                            task=task_id,
+                            patience=self.tcfg["patience"],
+                        )
+                        break
 
                 # Log all metrics
                 all_metrics = {**train_metrics, **eval_metrics}
@@ -1124,13 +1320,63 @@ class POMOTrainer(BaseTrainer):
         return summary
 
     def _print_header(self) -> None:
-        print(
-            f"\n{'=' * 64}\n"
-            f"  Algorithm  : POMO (Multiple Optima)\n"
-            f"  Tasks      : {len(self.env.tasks)}\n"
-            f"  Device     : {globals.DEVICE}\n"
-            f"{'=' * 64}"
+        total_tasks = len(self.env.tasks)
+        total_batches = self.tcfg["epochs"] * self.tcfg["batches_per_epoch"]
+        total_instances = (
+            total_batches * self.tcfg["instances_per_batch"]
+            if self.tcfg["instances_per_batch"] > 0
+            else total_batches
         )
+
+        train_lr = getattr(self.train_agent, "learning_rate", 0.001)
+        train_optimizer = (
+            self.train_agent.optimizer.__class__.__name__
+            if self.train_agent.optimizer
+            else "None"
+        )
+        entropy_coef = getattr(self.train_agent, "entropy_coef", 0.01)
+        max_grad_norm = getattr(self.train_agent, "max_grad_norm", 0.5)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = [
+            f"\n{'=' * 80}",
+            f"                          TRAINING STARTED",
+            f"{'=' * 80}",
+            f"Experiment              : {self.logger.experiment_name}",
+            f"Timestamp               : {timestamp}",
+            f"Algorithm               : POMO (Policy Optimization with Multiple Optima)",
+            f"",
+            f"Training Schedule",
+            f"  Epochs                  : {self.tcfg['epochs']}",
+            f"  Batches/Epoch           : {self.tcfg['batches_per_epoch']}",
+            f"  Instances/Batch         : {self.tcfg['instances_per_batch']}",
+            f"  Eval Interval           : {self.tcfg['eval_interval']}",
+            f"  Checkpoint Interval     : {self.tcfg['checkpoint_interval']}",
+            f"  Total Batches           : {total_batches:,}",
+            f"  Total Instances         : {total_instances:,}",
+            f"",
+            f"Training Summary",
+            f"  Tasks                   : {total_tasks}",
+            f"  Environment             : {self.env.__class__.__name__}",
+            f"  Device                  : {globals.DEVICE}",
+            f"",
+            f"Configuration",
+            f"  Learning Rate           : {train_lr}",
+            f"  Optimizer               : {train_optimizer}",
+            f"  Entropy Coefficient     : {entropy_coef}",
+            f"  Max Grad Norm           : {max_grad_norm}",
+            f"  Rollout Strategy        : Serial (1 environment), per-task training",
+            f"",
+            f"Output Directories",
+            f"  Experiment              : {self.logger.log_dir.parent}",
+            f"  Checkpoints             : {self.logger.checkpoint_dir}",
+            f"  Logs                    : {self.logger.log_dir}",
+            f"",
+            f"{'=' * 80}",
+        ]
+
+        print("\n".join(lines))
 
     def _print_header_task(self, task_id: str) -> None:
         print(f"\n{'-' * 64}\n  Task: {task_id}\n{'-' * 64}")

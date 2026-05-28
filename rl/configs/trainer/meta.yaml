@@ -13,7 +13,6 @@ trainer:
   collector:
     name: gae
     params:
-      rollout_length: 256
       gamma: 0.99
       gae_lambda: 0.95
 
@@ -21,7 +20,7 @@ trainer:
     meta_agent:
       name: meta
       learning_rate: 0.001
-      optimizer: unspecified
+      optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
       entropy_coef: 0.01
@@ -67,7 +66,7 @@ trainer:
 
   phases:
     meta_learning:
-      enabled: true  # Set to false to skip meta-learning phase
+      enabled: false  # Set to false to skip meta-learning phase
       curriculum:
         entropy_threshold: 0.5
         check_interval: 1
