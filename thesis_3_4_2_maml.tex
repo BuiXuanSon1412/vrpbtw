@@ -1,0 +1,31 @@
+\subsubsection{Meta-Learning for Multiple Optimal Solutions}
+
+The Coordinated Truck-Drone Routing Problem with Backhauls and Time Windows often admits multiple optimal or near-optimal solutions due to the combinatorial nature of vehicle assignment and routing decisions. A policy trained to converge to a single solution may miss alternative high-quality routes. Model-Agnostic Meta-Learning (MAML) addresses this challenge by training a policy that can rapidly adapt to discover diverse optimal solutions through task-specific fine-tuning.
+
+MAML operates through a bi-level optimization process: an inner loop that adapts the policy to specific problem instances, and an outer loop that updates the meta-parameters to improve adaptation across diverse instances. The inner-loop adaptation mimics a few-step gradient descent on a single task:
+
+\begin{equation}
+\theta'_i = \theta - \alpha \nabla_\theta \mathcal{L}(\theta, \tau_i)
+\end{equation}
+
+where $\theta$ are the meta-parameters, $\alpha$ is the inner-loop learning rate, and $\mathcal{L}(\theta, \tau_i)$ is the PPO loss computed on task (problem instance) $\tau_i$. After $K$ inner-loop steps (typically $K=1$ or $K=2$), the adapted parameters $\theta'_i$ are evaluated on a held-out portion of the same instance to compute the outer-loop loss:
+
+\begin{equation}
+\mathcal{L}^{meta} = \sum_i \mathcal{L}(\theta'_i, \tau_i^{test})
+\end{equation}
+
+The meta-parameters $\theta$ are then updated using gradients of this outer-loop loss:
+
+\begin{equation}
+\theta \leftarrow \theta - \beta \nabla_\theta \mathcal{L}^{meta}
+\end{equation}
+
+where $\beta$ is the outer-loop learning rate. This bi-level optimization encourages the learned policy to be sensitive to problem-specific characteristics while maintaining adaptability across diverse instances.
+
+In the context of multiple optimal solutions, MAML training enables the policy to learn a representation space where rapid gradient steps can steer the policy toward different local optima. When multiple equally good solutions exist, the inner-loop fine-tuning allows exploration of different solution regions by starting from different random seeds or perturbed value estimates. The policy discovers that small parameter changes can lead to dramatically different routing assignments, effectively mapping the solution manifold.
+
+The integration of MAML with PPO involves modifying the training loop to incorporate meta-gradient updates. During each training epoch, problem instances are divided into support sets (for inner-loop adaptation) and query sets (for outer-loop evaluation). The policy is adapted on support set trajectories, and the meta-loss is computed on query set trajectories collected with the adapted parameters. This separation ensures that the meta-parameters are optimized for generalization rather than overfitting to any single instance.
+
+Additionally, MAML's adaptation capability is particularly valuable when combined with action masking. Different feasible regions across problem instances define distinct solution spaces. The inner-loop adaptation allows the policy to quickly specialize to the feasible regions of new problem instances, discovering multiple valid solutions within those regions. The learned meta-parameters capture generalizable patterns for identifying different types of optimal routing structures.
+
+The computational overhead of MAML is mitigated through selective application: the full bi-level optimization is performed during periodic meta-update iterations, while standard PPO updates occur in between. This hybrid approach balances the computational cost of meta-learning with the benefits of discovering diverse high-quality solutions across the problem distribution.
