@@ -212,19 +212,17 @@ class PPOAgent(BaseAgent):
 
         # Observations are stored as list (graph-based with dynamic sizes across timesteps)
         # Process each observation through network and collect outputs
+        # evaluate(actions=...) returns (log_probs, values, entropy)
         logits_list = []
         values_list = []
         for i, obs_t in enumerate(observations):
             mask_t = masks[i:i+1]  # Keep batch dimension (1, n_actions)
-            if "actions" in batch:
-                # Get action for this timestep
-                actions_t = batch["actions"][i:i+1]
-                logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=actions_t)
-            else:
-                logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=None)
+            # Always provide actions for proper log_prob computation in PPO
+            actions_t = batch["actions"][i:i+1]
+            logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=actions_t)
             logits_list.append(logits_t)
             values_list.append(values_t)
-        new_log_probs = torch.cat(logits_list, dim=0) if "actions" not in batch else old_log_probs
+        new_log_probs = torch.cat(logits_list, dim=0)
         values = torch.cat(values_list, dim=0)
 
         # Compute ratio and clipped surrogate loss (using normalized advantages)

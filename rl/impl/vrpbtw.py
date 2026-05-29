@@ -394,7 +394,7 @@ class VRPBTWEnv(Environment):
 
     def _compute_objective(self, cost: float, served_count: int) -> float:
         """
-        New lexicographic objective: minimize cost, prioritize serving customers.
+        Lexicographic objective: maximize service rate (primary), minimize cost (secondary).
         f = total_cost + c_t * max_dist * N * (N - k)
 
         Where:
@@ -405,8 +405,10 @@ class VRPBTWEnv(Environment):
         - k: served customers
         - (N-k): unserved customers
 
-        This ensures k+1 served customers always beats k served customers,
-        even with worst-case additional distance.
+        This ensures:
+        - Serving k+1 customers is always better than k customers (maximizes service rate)
+        - Among solutions with same service rate, lower cost is better (minimizes cost)
+        - LOWER objective = BETTER solution (cost minimization)
         """
         N = self.n_customers
         k = served_count
@@ -417,9 +419,8 @@ class VRPBTWEnv(Environment):
     def compute_return(self) -> float:
         """Compute return from current solution: -objective / (max_dist * max_cost_unit).
 
-        Gets solution from current state, extracts objective, negates it to convert
-        from cost minimization to return maximization, and normalizes by both spatial
-        and cost scales for scale-independence across instances.
+        Converts cost minimization to reward maximization by negating the objective.
+        Normalizes by spatial and cost scales for scale-independence across instances.
 
         Returns
         -------
@@ -1176,12 +1177,14 @@ class VRPBTWEnv(Environment):
         terminated = self._is_terminated(state)
 
         # Compute reward: potential-based shaping = -(f_next - f_prev)
+        # Since objective is a cost (positive), we negate the improvement
         curr_served = int(state.served[1:].sum())
         curr_obj = self._compute_objective(state.current_cost, curr_served)
         normalized_factor = (
             2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
         )
 
+        # When objective decreases (good), reward is positive
         reward = -(curr_obj - prev_obj) / normalized_factor
 
         next_mask = (

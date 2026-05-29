@@ -4,9 +4,15 @@ scripts/plot_learning_curves.py
 Plot learning curves from training experiments.
 Saves plots to experiment/train/{exp_id}/artifacts/
 
+Supports both Meta trainer and POMO trainer output formats.
+
 Reads from:
   - summary.json: final results per task (always available)
+    - POMO format: task_summaries at root level
+    - Meta format: task_summaries nested in fine_tune_summary
   - logs/metrics.jsonl: per-epoch training metrics (when available)
+    - POMO format: train/* prefixed metrics
+    - Meta format: tune/* prefixed metrics
 
 Usage
 -----
@@ -14,10 +20,10 @@ Usage
   python scripts/plot_learning_curves.py
 
   # Plot specific experiments
-  python scripts/plot_learning_curves.py --exp-ids 101 102 103
+  python scripts/plot_learning_curves.py --exp-ids 100 102 103
 
   # Regenerate plots for a single experiment
-  python scripts/plot_learning_curves.py --exp-ids 101
+  python scripts/plot_learning_curves.py --exp-ids 100
 """
 
 from __future__ import annotations
@@ -38,6 +44,53 @@ def load_experiment_summary(exp_dir: Path) -> Optional[Dict]:
         return None
     with open(summary_path) as f:
         return json.load(f)
+
+
+def get_task_summaries(summary: Dict) -> Optional[Dict]:
+    """Extract task_summaries from either POMO or Meta trainer format.
+
+    POMO format: summary["task_summaries"]
+    Meta format: summary["fine_tune_summary"]["task_summaries"]
+
+    Returns the task_summaries dict, or None if not found.
+    """
+    # Try POMO format first (direct)
+    if "task_summaries" in summary:
+        return summary["task_summaries"]
+
+    # Try Meta trainer format (nested in fine_tune_summary)
+    if "fine_tune_summary" in summary:
+        fine_tune = summary["fine_tune_summary"]
+        if fine_tune and "task_summaries" in fine_tune:
+            return fine_tune["task_summaries"]
+
+    return None
+
+
+def normalize_task_summary(task_summary: Dict) -> Dict:
+    """Normalize task summary to have standard fields.
+
+    Meta trainer format has: best_objective, epochs_completed
+    POMO trainer format has: best_objective, best_epoch, final_epoch
+
+    This ensures both have all three fields for plotting.
+    """
+    normalized = task_summary.copy()
+
+    # If best_epoch is missing, use epochs_completed as fallback
+    if "best_epoch" not in normalized and "epochs_completed" in normalized:
+        normalized["best_epoch"] = normalized["epochs_completed"]
+
+    # If final_epoch is missing, use epochs_completed as fallback
+    if "final_epoch" not in normalized and "epochs_completed" in normalized:
+        normalized["final_epoch"] = normalized["epochs_completed"]
+
+    # Provide defaults if still missing
+    normalized.setdefault("best_objective", 0)
+    normalized.setdefault("best_epoch", 0)
+    normalized.setdefault("final_epoch", 0)
+
+    return normalized
 
 
 def load_metrics_jsonl(exp_dir: Path) -> Tuple[List[Dict], Dict[int, List[Dict]]]:
@@ -104,17 +157,24 @@ def extract_metric_timeline(metrics_by_step: Dict[int, List[Dict]], key: str) ->
     return steps, values
 
 
-def plot_per_epoch_metrics(exp_id: int, artifacts_dir: Path, metrics_by_step: Dict[int, List[Dict]]) -> None:
-    """Plot per-epoch training curves from metrics.jsonl."""
+def plot_per_epoch_metrics(exp_id, artifacts_dir: Path, metrics_by_step: Dict[int, List[Dict]]) -> None:
+    """Plot per-epoch training curves from metrics.jsonl.
+
+    Handles both Meta trainer (tune/ prefix) and POMO trainer (train/ prefix) formats.
+    """
     if not metrics_by_step:
         return
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Extract key metrics over time
-    steps_loss, loss_means = extract_metric_timeline(metrics_by_step, "train/loss_mean")
+    # Try both Meta trainer (tune/) and POMO trainer (train/) prefixes
+    steps_loss, loss_means = extract_metric_timeline(metrics_by_step, "tune/loss_mean")
+    if not loss_means:
+        steps_loss, loss_means = extract_metric_timeline(metrics_by_step, "train/loss_mean")
+
     steps_return, return_means = extract_metric_timeline(metrics_by_step, "train/return_mean")
     steps_return_std, return_stds = extract_metric_timeline(metrics_by_step, "train/return_std")
+
     steps_eval_obj, eval_objs = extract_metric_timeline(metrics_by_step, "eval/mean_objective")
     steps_eval_cost, eval_costs = extract_metric_timeline(metrics_by_step, "eval/mean_cost")
     steps_eval_sr, eval_srs = extract_metric_timeline(metrics_by_step, "eval/mean_service_rate")
@@ -227,16 +287,17 @@ def plot_experiment_summary(exp_id: int, summary: Dict, artifacts_dir: Path) -> 
     """Create plots for a single experiment."""
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    task_summaries = summary.get("task_summaries", {})
+    task_summaries = get_task_summaries(summary)
     if not task_summaries:
         print(f"  No task summaries found for experiment {exp_id}")
         return
 
-    # Extract data for each task
+    # Extract data for each task (normalize to handle both Meta and POMO formats)
     task_names = list(task_summaries.keys())
-    best_objectives = [task.get("best_objective", 0) for task in task_summaries.values()]
-    best_epochs = [task.get("best_epoch", 0) for task in task_summaries.values()]
-    final_epochs = [task.get("final_epoch", 0) for task in task_summaries.values()]
+    normalized_summaries = [normalize_task_summary(task) for task in task_summaries.values()]
+    best_objectives = [task["best_objective"] for task in normalized_summaries]
+    best_epochs = [task["best_epoch"] for task in normalized_summaries]
+    final_epochs = [task["final_epoch"] for task in normalized_summaries]
 
     # Plot 1: Best objectives by task
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -399,40 +460,57 @@ def main():
         if not exp_dir.is_dir():
             continue
         try:
-            exp_id = int(exp_dir.name)
+            # Extract exp_id from directory name (e.g., "100_PPO_N10_C" -> 100)
+            # or "test_105_PPO_N10_C" -> use full name as identifier
+            dir_name = exp_dir.name
+            if dir_name.startswith("test_"):
+                # Keep test experiments with their full name as key
+                exp_id = dir_name
+            else:
+                # Extract numeric prefix
+                exp_id = int(dir_name.split("_")[0])
+
             summary = load_experiment_summary(exp_dir)
             if summary:
-                experiments[exp_id] = (exp_id, summary, exp_dir)
-        except ValueError:
+                experiments[exp_id] = (summary, exp_dir)
+        except (ValueError, IndexError):
             continue
 
     # Filter by exp_ids if specified
     if args.exp_ids:
+        filter_set = set(args.exp_ids)
         experiments = {
-            k: v for k, v in experiments.items() if k in args.exp_ids
+            k: v for k, v in experiments.items()
+            if k in filter_set
         }
 
     if not experiments:
         print("No experiments found")
         return
 
-    print(f"Found {len(experiments)} experiments: {sorted(experiments.keys())}\n")
+    # Sort experiments: numeric IDs first, then test experiments
+    sorted_keys = sorted(
+        experiments.keys(),
+        key=lambda x: (isinstance(x, str), x)
+    )
+    print(f"Found {len(experiments)} experiments: {sorted_keys}\n")
 
     # Generate plots for each experiment
-    for exp_id, (_, summary, exp_dir) in sorted(experiments.items()):
-        print(f"Plotting experiment {exp_id}...")
+    for exp_key in sorted_keys:
+        summary, exp_dir = experiments[exp_key]
+        print(f"Plotting experiment {exp_key}...")
         artifacts_dir = exp_dir / "artifacts"
 
         # Try to load per-epoch metrics from jsonl
         _, metrics_by_step = load_metrics_jsonl(exp_dir)
         if metrics_by_step:
             print(f"  Found {len(metrics_by_step)} metric steps in metrics.jsonl")
-            plot_per_epoch_metrics(exp_id, artifacts_dir, metrics_by_step)
+            plot_per_epoch_metrics(exp_key, artifacts_dir, metrics_by_step)
         else:
             print(f"  No detailed metrics.jsonl (or empty)")
 
         # Always plot summary-based plots
-        plot_experiment_summary(exp_id, summary, artifacts_dir)
+        plot_experiment_summary(exp_key, summary, artifacts_dir)
 
     print("\nDone!")
 

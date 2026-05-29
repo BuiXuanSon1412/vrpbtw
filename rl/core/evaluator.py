@@ -93,8 +93,8 @@ class Evaluator:
         stats: Dict[str, float] = {
             "mean_objective": float(np.mean(objectives)),
             "std_objective": float(np.std(objectives)),
-            "best_objective": float(np.max(objectives)),
-            "worst_objective": float(np.min(objectives)),
+            "best_objective": float(np.min(objectives)),  # For minimization problems, lower is better
+            "worst_objective": float(np.max(objectives)),  # For minimization problems, higher is worse
             "median_objective": float(np.median(objectives)),
             "mean_reward": float(np.mean(rewards)),
             "mean_time_s": float(np.mean(times)),
@@ -256,8 +256,8 @@ class Evaluator:
         stats = {
             "mean_objective": float(np.mean(objs)),
             "std_objective": float(np.std(objs)),
-            "best_objective": float(np.max(objs)),
-            "worst_objective": float(np.min(objs)),
+            "best_objective": float(np.min(objs)),  # For minimization problems, lower is better
+            "worst_objective": float(np.max(objs)),  # For minimization problems, higher is worse
             "median_objective": float(np.median(objs)),
             "n_solutions": float(len(solutions)),
         }
