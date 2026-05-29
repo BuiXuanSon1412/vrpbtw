@@ -1,0 +1,33 @@
+\subsubsection{Problem Definition and Mathematical Formulation}
+
+An optimization problem is a mathematical framework for finding the best solution from a set of feasible alternatives according to some quantifiable criteria. Formally, an optimization problem can be expressed as:
+
+\begin{equation}
+\begin{aligned}
+\minimize_{\mathbf{x} \in \mathcal{X}} \quad & f(\mathbf{x}) \\
+\subject \quad & g_i(\mathbf{x}) \leq 0, \quad i = 1, 2, \ldots, m \\
+& h_j(\mathbf{x}) = 0, \quad j = 1, 2, \ldots, p
+\end{aligned}
+\end{equation}
+
+where $f: \mathbb{R}^n \to \mathbb{R}$ is the objective function to minimize, $\mathbf{x} \in \mathbb{R}^n$ is the decision variable vector, $\mathcal{X}$ is the feasible solution space, $g_i$ are inequality constraints, and $h_j$ are equality constraints. The feasible solution space is defined as:
+
+\begin{equation}
+\mathcal{X} = \{\mathbf{x} \in \mathbb{R}^n : g_i(\mathbf{x}) \leq 0, h_j(\mathbf{x}) = 0\}
+\end{equation}
+
+The goal is to find an optimal solution $\mathbf{x}^* \in \mathcal{X}$ such that $f(\mathbf{x}^*) \leq f(\mathbf{x})$ for all $\mathbf{x} \in \mathcal{X}$.
+
+Optimization problems are characterized by several fundamental properties. The search space dimensionality $n$ determines the number of decision variables, ranging from small problems with tens of variables to large-scale problems with thousands or millions. The structure of the objective function determines tractability: convex objective functions admit efficient polynomial-time algorithms, while non-convex objectives generally require heuristic approaches. The feasible region topology, defined by the constraint structure, significantly impacts solution difficulty—problems with disconnected feasible regions present additional exploration challenges.
+
+A critical distinction exists between continuous and discrete optimization. Continuous optimization assumes decision variables take real values within specified bounds, enabling techniques from calculus such as gradient-based methods. Discrete (combinatorial) optimization restricts decision variables to discrete sets, typically integers or permutations, eliminating gradient information and fundamentally changing the solution landscape. Combinatorial problems exhibit multimodality with numerous local optima separated by infeasible regions, necessitating specialized solution techniques.
+
+Multi-objective optimization extends the framework to consider multiple competing objectives simultaneously:
+
+\begin{equation}
+\minimize_{\mathbf{x} \in \mathcal{X}} \quad \mathbf{f}(\mathbf{x}) = [f_1(\mathbf{x}), f_2(\mathbf{x}), \ldots, f_k(\mathbf{x})]
+\end{equation}
+
+Solutions to multi-objective problems are characterized by Pareto optimality: a solution is Pareto optimal if no other feasible solution improves any objective without degrading another. This contrasts with single-objective optimization where a globally optimal solution exists. Vehicle routing problems with multiple objectives (minimizing cost while maximizing service reliability) exemplify this complexity.
+
+The problem instance specificity affects solution methodology. Static problems maintain constant parameters throughout solution construction, while dynamic problems receive new information during optimization. Stochastic problems incorporate uncertainty in parameters, requiring robust solutions that perform acceptably across parameter variations. Real-world routing problems often exhibit dynamic and stochastic characteristics, complicating both problem formulation and solution approach selection.
