@@ -70,25 +70,34 @@ class Evaluator:
         self,
         task_id: Optional[str] = None,
     ) -> Dict[str, float]:
+        # Use fixed seed for evaluation to ensure consistent test instances across epochs
+        # This allows fair comparison of agent performance across training iterations
+        rng_state = np.random.get_state()
+        np.random.seed(hash(task_id) & 0x7FFFFFFF if task_id else 42)
+
         objectives: List[float] = []
         rewards: List[float] = []
         times: List[float] = []
         solutions: List[Any] = []
 
-        for _ in range(self.n_episodes):
-            t0 = time.time()
+        try:
+            for _ in range(self.n_episodes):
+                t0 = time.time()
 
-            if self.beam_width > 1:
-                sol = self._beam_search(task_id)
-            elif self.n_samples > 1:
-                sol = self._sampling_decode(task_id, n_samples=self.n_samples)
-            else:
-                sol = self._greedy_decode(task_id)
+                if self.beam_width > 1:
+                    sol = self._beam_search(task_id)
+                elif self.n_samples > 1:
+                    sol = self._sampling_decode(task_id, n_samples=self.n_samples)
+                else:
+                    sol = self._greedy_decode(task_id)
 
-            times.append(time.time() - t0)
-            objectives.append(sol.objective)
-            rewards.append(sol.metadata.get("episode_reward", sol.objective))
-            solutions.append(sol)
+                times.append(time.time() - t0)
+                objectives.append(sol.objective)
+                rewards.append(sol.metadata.get("episode_reward", sol.objective))
+                solutions.append(sol)
+        finally:
+            # Restore RNG state to avoid affecting training
+            np.random.set_state(rng_state)
 
         stats: Dict[str, float] = {
             "mean_objective": float(np.mean(objectives)),

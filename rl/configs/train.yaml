@@ -13,7 +13,7 @@ reproducibility:
     torch_seed: 42
 
 experiment:
-  name: "107_PPO_N10_C"
+  name: "130_PPO_N10_RC"
   description: mvrpbtw experiment
 
 logger:
