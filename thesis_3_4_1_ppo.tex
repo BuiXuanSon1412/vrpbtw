@@ -1,0 +1,33 @@
+\subsubsection{Proximal Policy Optimization}
+
+Proximal Policy Optimization (PPO) is a policy gradient algorithm that improves upon previous approaches by introducing a clipped objective function that prevents excessively large policy updates during training. This mechanism provides stability in the learning process while enabling efficient sample utilization, making it particularly suitable for combinatorial optimization problems where exploration-exploitation trade-offs are critical.
+
+The core principle of PPO is to optimize the policy by maximizing an objective function that measures the advantage of taking an action compared to the baseline value estimate. The PPO objective is defined as:
+
+\begin{equation}
+\mathcal{L}^{PPO} = \mathbb{E}_t \left[ \min(r_t(\theta) A_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) A_t) \right]
+\end{equation}
+
+where $r_t(\theta) = \frac{\pi_\theta(a_t | s_t)}{\pi_{\theta_{old}}(a_t | s_t)}$ is the probability ratio between the new and old policy, $A_t$ is the estimated advantage, and $\epsilon$ is a clipping parameter (typically 0.2). The minimum operation ensures that the policy update is conservative when the new policy diverges significantly from the old policy, preventing gradient explosions and erratic behavior.
+
+The advantage function is computed using the generalized advantage estimation (GAE):
+
+\begin{equation}
+A_t = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}^V
+\end{equation}
+
+where $\gamma$ is the discount factor, $\lambda$ is the GAE parameter (typically 0.95), and $\delta_t^V = r_t + \gamma V(s_{t+1}) - V(s_t)$ is the temporal difference error. This formulation balances bias and variance in advantage estimation, providing low-variance gradient estimates that improve convergence stability.
+
+In the context of the routing problem, PPO operates on trajectories constructed sequentially through the hierarchical decoder. Each trajectory $\tau = (s_0, a_0, r_0, s_1, a_1, r_1, \ldots, s_T)$ represents a complete routing solution where the agent selects customers and vehicles in sequence. The policy $\pi_\theta$ outputs action probabilities from the node selection and vehicle selection heads, which are sampled during training to generate trajectories.
+
+The value network $V(s)$ trained in parallel with the policy provides baseline estimates that reduce variance in gradient computations. The joint loss function combines the policy gradient loss with a value function loss:
+
+\begin{equation}
+\mathcal{L}^{total} = \mathcal{L}^{PPO} + c_1 \mathcal{L}^{VF} + c_2 \mathcal{L}^{entropy}
+\end{equation}
+
+where $\mathcal{L}^{VF} = (V(s_t) - G_t)^2$ is the value function loss measuring the difference between value estimates and actual returns, $\mathcal{L}^{entropy} = -\sum_a \pi_\theta(a|s) \log \pi_\theta(a|s)$ encourages exploration through entropy regularization, and $c_1, c_2$ are hyperparameter weights.
+
+The constraint enforcement mechanism integrated with PPO through action masking ensures that infeasible actions receive zero probability. When computing the policy gradient, only feasible actions contribute to the gradient updates, naturally guiding the policy toward the feasible solution space without explicit penalty terms. This integration is essential for maintaining solution feasibility while allowing the policy to learn complex routing patterns.
+
+Training proceeds in epochs where collected trajectories from multiple episodes are batched and processed in mini-batches. For each mini-batch, the clipped PPO objective is optimized using Adam optimizer with typically 3-4 epochs of gradient updates per batch. This multi-epoch training improves sample efficiency by reusing trajectories for multiple gradient steps while the clipping mechanism prevents policy degradation.
