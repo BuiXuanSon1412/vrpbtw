@@ -1,0 +1,33 @@
+\subsubsection{Curriculum Learning Strategy}
+
+Curriculum learning improves training efficiency and solution quality by progressively increasing problem difficulty during the learning process. Rather than training on the full distribution of problem instances from the start, the agent initially encounters simpler problems with fewer customers and simpler constraints, gradually advancing toward more complex instances. This strategy facilitates skill development: the agent first learns fundamental routing patterns before tackling intricate multi-vehicle coordination and constraint satisfaction.
+
+The curriculum is structured across multiple difficulty levels defined by problem characteristics:
+
+\begin{equation}
+\text{Difficulty} = f(\text{\# customers}, \text{\# time windows}, \text{truck capacity}, \text{drone range}, \text{backhaul ratio})
+\end{equation}
+
+Level 0 consists of small instances with 5-10 customers, relaxed time windows, and simple vehicle capabilities. As training progresses, subsequent levels increase customer count in steps of 5-10, introduce tighter time windows, and vary vehicle parameters. The highest difficulty level contains the full problem distribution with 100+ customers, complex time window interactions, and realistic vehicle constraints.
+
+The transition between curriculum levels is controlled by a performance threshold. When the average solution quality on the current level exceeds a target metric (e.g., cost reduction of 5\% over baseline), the curriculum advances. This adaptive progression ensures the agent consolidates learning at each level before facing increased complexity:
+
+\begin{equation}
+\text{Advance curriculum if } \overline{\text{cost}}_{\text{current}} < (1 - \delta) \times \overline{\text{cost}}_{\text{previous}}
+\end{equation}
+
+where $\delta$ is a target improvement threshold (typically 0.05) and the bar notation denotes moving average over recent episodes.
+
+Curriculum learning integrates naturally with the MAML training framework. The meta-learning process adapts parameters specifically to the current curriculum level during inner-loop optimization, while the outer-loop meta-updates ensure the learned parameters generalize across difficulty levels. When the curriculum advances, the adapted parameters from the previous level provide initialization for the new level, enabling transfer of learned routing strategies to more complex problems.
+
+The curriculum also interacts with action masking and reward shaping. At lower difficulty levels, the feasible action space is typically larger relative to the number of customers, reducing the importance of precise constraint satisfaction. As difficulty increases and feasible regions become more constrained, the policy must develop more careful decision-making. This natural progression allows the attention mechanisms in the encoder-decoder architecture to progressively specialize in constraint-aware routing.
+
+Additionally, the reward signal is calibrated per difficulty level. The base reward structure remains consistent (tour cost, service rate penalties), but the scale is adjusted to maintain consistent signal magnitude:
+
+\begin{equation}
+r_{\text{scaled}} = \frac{r - \mu_{\text{level}}}{\sigma_{\text{level}}}
+\end{equation}
+
+where $\mu_{\text{level}}$ and $\sigma_{\text{level}}$ are the mean and standard deviation of reward magnitudes at the current curriculum level. This normalization prevents reward distributions from becoming uninformative as problem complexity increases.
+
+The curriculum learning strategy significantly reduces training time to convergence compared to training directly on the full problem distribution. Empirically, agents trained with curriculum learning reach comparable solution quality in 30-50\% fewer training episodes, while also achieving better overall performance due to more stable early-stage learning dynamics. The combination of curriculum learning, MAML, and PPO creates a training framework that balances exploration efficiency, adaptability across problem variants, and robustness to increasing complexity.
