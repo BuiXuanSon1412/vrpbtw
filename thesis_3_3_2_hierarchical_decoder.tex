@@ -1,0 +1,45 @@
+\subsubsection{Hierarchical Decoder}
+
+The decoder module translates the encoded problem representation into sequential routing decisions through a hierarchical architecture comprising two specialized attention-based heads and a baseline value network. This design reflects the two-stage decision process: first selecting a customer to serve, then selecting an appropriate vehicle from the available fleet to perform the delivery.
+
+\paragraph{a. Node Selection Head}
+
+The node selection head determines which customer should be served next in the construction process. This component implements a pointer network mechanism that computes attention weights over all available customers based on the current problem state.
+
+Given the encoded node features $\mathbf{h}_c^{(i)}$ from the multi-relational graph encoder, the node selection head computes attention logits as:
+
+\begin{equation}
+\alpha_j^{node} = \mathbf{v}^T \tanh(\mathbf{W}_{node}[\mathbf{h}_{context}; \mathbf{h}_c^{(j)}])
+\end{equation}
+
+where $\mathbf{v}$ is a learnable attention vector, $\mathbf{W}_{node}$ is a weight matrix, and $\mathbf{h}_{context}$ represents the aggregated context from all encoder outputs. The attention logits are normalized using softmax to produce a probability distribution over customers.
+
+Action masking is applied to enforce feasibility constraints. Customers that violate time window constraints or have already been served receive masked attention weights of $-\infty$ before softmax normalization, ensuring zero probability for infeasible selections. This constraint enforcement mechanism is critical for generating valid solutions and guides the exploration process toward feasible solution space.
+
+\paragraph{b. Vehicle Selection Head}
+
+The vehicle selection head selects which vehicle (truck or drone) should serve the previously selected customer. Similar to the node selection head, this component uses attention mechanisms to compute vehicle selection probabilities.
+
+Given the encoded vehicle features $\mathbf{h}_v^{(t)}$ and $\mathbf{h}_v^{(d)}$ for trucks and drones respectively, the vehicle selection head computes:
+
+\begin{equation}
+\alpha_k^{veh} = \mathbf{u}^T \tanh(\mathbf{W}_{veh}[\mathbf{h}_{context}; \mathbf{h}_v^{(k)}])
+\end{equation}
+
+where $\mathbf{u}$ is a learnable attention vector and $\mathbf{W}_{veh}$ is a dedicated weight matrix. Vehicle-specific constraints are enforced through action masking: vehicles with insufficient capacity, violated service time windows due to detours, or unavailable status receive masked weights.
+
+The hierarchical structure of selecting node-then-vehicle differs from single-stage selection mechanisms. This decomposition enables the model to implicitly learn the relationship between customer demands and vehicle capabilities without explicit architectural coupling, allowing the neural network to develop task-specific solution strategies through training.
+
+\paragraph{c. Value Network}
+
+The value network estimates the expected cumulative reward from the current state, serving as the baseline for the policy gradient loss in PPO. This component aggregates information from all three encoder modules to produce a scalar value estimate.
+
+The value network is implemented as a multi-layer perceptron:
+
+\begin{equation}
+V(s) = \mathbf{W}_{v,2} \tanh(\mathbf{W}_{v,1} \mathbf{h}_{agg} + \mathbf{b}_{v,1}) + \mathbf{b}_{v,2}
+\end{equation}
+
+where $\mathbf{h}_{agg}$ is an aggregated representation combining the global node representation (mean-pooled node features), global vehicle representation (mean-pooled vehicle features), and depot-specific features. This unified aggregation ensures the value network captures the overall problem state complexity including customer distribution, vehicle fleet status, and remaining service obligations.
+
+The value network is trained jointly with the policy heads using the temporal difference error from PPO training, providing a low-variance baseline that reduces gradient variance in the policy gradient estimates. This joint training enables the value function to learn complementary features that enhance both value estimation accuracy and policy stability.
