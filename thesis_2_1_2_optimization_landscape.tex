@@ -1,0 +1,37 @@
+\subsubsection{Optimization Landscape (Classification of Problems)}
+
+The optimization landscape describes the structure of the solution space and the distribution of objective function values across feasible solutions. This landscape fundamentally determines which solution techniques are effective. Problems can be classified along multiple dimensions that characterize their landscape properties.
+
+\paragraph{Convex vs. Non-Convex Optimization}
+
+Convex optimization problems satisfy the condition that any weighted combination of two feasible solutions remains feasible, and the objective function is convex:
+
+\begin{equation}
+f(\lambda \mathbf{x}_1 + (1-\lambda)\mathbf{x}_2) \leq \lambda f(\mathbf{x}_1) + (1-\lambda) f(\mathbf{x}_2), \quad \forall \lambda \in [0,1]
+\end{equation}
+
+Convex problems guarantee that any local optimum is a global optimum, enabling efficient polynomial-time solution algorithms such as interior point methods and gradient-based methods. Conversely, non-convex problems exhibit multiple local optima separated by saddle points and infeasible regions. The presence of multiple local optima creates a rugged landscape where local search methods may converge to suboptimal solutions.
+
+\paragraph{Unimodal vs. Multimodal Landscapes}
+
+Unimodal optimization problems possess a single global optimum with a smooth gradient direction leading toward it. Classical gradient descent methods effectively navigate unimodal landscapes. Multimodal problems contain multiple local optima of varying quality. The number of local optima grows exponentially with problem dimensionality in combinatorial problems, creating a landscape where random search often outperforms naive gradient-based approaches. The degree of multimodality—measured by the number and separation of local optima—characterizes landscape difficulty.
+
+\paragraph{Continuous vs. Discrete Problems}
+
+Continuous optimization operates on real-valued decision variables with infinite feasible regions. Discrete (combinatorial) optimization restricts variables to finite sets, typically integers or permutations. The fundamental distinction is that continuous problems admit gradient information enabling smooth optimization trajectories, while discrete problems lack meaningful gradients. Combinatorial optimization on permutation spaces (relevant to routing problems) involves searching over $n!$ possible solutions for $n$ items, creating exponentially large solution spaces where exhaustive enumeration becomes intractable even for moderate $n$.
+
+\paragraph{Landscape Ruggedness and Structure}
+
+The fitness landscape ruggedness quantifies the correlation between solution quality and solution similarity. Smooth landscapes exhibit high correlation—nearby solutions have similar objective values, enabling local search to navigate toward optima. Rugged landscapes exhibit low correlation—objectively good solutions are surrounded by poor solutions, creating a landscape of sharp peaks and valleys. The Kauffman NK-model formalizes landscape ruggedness: higher $K$ values (more variable interactions) create ruggedness, while lower $K$ values create smooth, navigable landscapes.
+
+Structured problems exhibit exploitable patterns: symmetries, separable variables, or hierarchical decomposability. Routing problems possess inherent structure through spatial locality—customers nearby in the Euclidean space typically should be served consecutively, creating structured solution space. Exploiting structure through specialized algorithms yields dramatic performance improvements compared to general-purpose solvers.
+
+\paragraph{Deterministic vs. Stochastic Landscapes}
+
+Deterministic problems have fixed objective function values for each solution, while stochastic problems incorporate uncertainty through noise in evaluation. Stochastic landscapes require robust optimization approaches that perform acceptably across uncertainty ranges rather than optimizing for a single deterministic case. Real-world routing problems contain stochastic elements: travel times vary with traffic conditions, customer demands fluctuate, vehicle reliability is uncertain.
+
+\paragraph{Static vs. Dynamic Optimization}
+
+Static optimization problems have fixed parameters throughout the solution process. Dynamic optimization problems receive new information during the optimization horizon, requiring adaptive solutions. Vehicle routing in real-time environments exemplifies dynamic optimization: new customer requests arrive while vehicles are en route, necessitating continuous solution adaptation rather than one-time optimization.
+
+The optimization landscape classification informs algorithm selection. Convex, unimodal, smooth, structured problems benefit from gradient-based methods. Non-convex, multimodal, rugged, unstructured discrete problems require metaheuristic approaches that balance exploration (discovering new regions) and exploitation (improving known good solutions). Learning-based approaches have emerged as effective landscape navigators for such challenging problems by discovering exploitable patterns through training.
