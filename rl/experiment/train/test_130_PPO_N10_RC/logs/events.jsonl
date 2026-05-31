@@ -1,0 +1,9 @@
+{"event": "meta_learning_skipped", "step": 0, "message": "Meta-learning disabled; starting fine-tuning with untrained network"}
+{"event": "tune_best_checkpoint", "step": 1000, "task": "001_N10_F2_RC", "objective": "9245.3779"}
+{"event": "tune_best_checkpoint", "step": 4000, "task": "001_N10_F2_RC", "objective": "6851.3066"}
+{"event": "tune_best_checkpoint", "step": 9000, "task": "001_N10_F2_RC", "objective": "6697.5654"}
+{"event": "tune_best_checkpoint", "step": 18000, "task": "001_N10_F2_RC", "objective": "5474.8623"}
+{"event": "tune_best_checkpoint", "step": 19000, "task": "001_N10_F2_RC", "objective": "4657.4014"}
+{"event": "tune_early_stop", "step": 29000, "task": "001_N10_F2_RC", "patience": 10}
+{"event": "fine_tuning_complete", "step": 29000, "stop_reason": "completed", "total_epochs": 29, "total_updates": 29000, "best_objective": 4657.4013671875, "training_time_s": 7531.6, "task_summaries": {"001_N10_F2_RC": {"best_objective": 4657.4013671875, "epochs_completed": 29}}}
+{"event": "training_complete", "step": 29000, "total_updates": 29000, "total_epochs": 29, "best_objective": 4657.4013671875, "meta_learning_enabled": false, "fine_tuning_enabled": true}

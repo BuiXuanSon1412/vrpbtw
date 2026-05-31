@@ -1,0 +1,17 @@
+device: cpu
+reproducibility:
+  seed:
+    random_seed: 42
+    numpy_seed: 42
+    torch_seed: 42
+experiment:
+  name: test_130_PPO_N10_RC
+directories:
+  source: test_130_PPO_N10_RC
+  base_dir: experiment/evaluate
+  artifacts: artifacts
+evaluation:
+  deterministic: true
+  n_eval_episodes: 100
+  decoding:
+    beam_width: 1

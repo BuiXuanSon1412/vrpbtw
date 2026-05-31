@@ -1,164 +1,138 @@
 """
 evaluate.py
 -----------
-Standalone evaluation entry point.
+Standalone evaluation script for trained checkpoints.
 
-Loads a trained checkpoint and evaluates it on fresh instances.
-No training is performed.
-
-CLI flags
----------
-  --config     PATH   Config file [default: configs/evaluate.yaml]
-  --checkpoint PATH   Model checkpoint .pt file [default: all checkpoints in training_experiment]
-  --override   PATH   Optional config override
-  --device     DEVICE Override cfg.device
-  --beam       WIDTH  Beam width (1=greedy, >1=beam search)
-  --episodes   N      Number of evaluation episodes
-  --samples    N      Rollouts per instance for sampling decode (>1 = best-of-N)
+Loads a trained checkpoint from a training experiment and evaluates it on fresh instances.
+Configuration is read from configs/evaluate.yaml
 
 Usage
 -----
-  # Default: evaluate all checkpoints from default training experiment
+  # Evaluate all checkpoints using default config
   python evaluate.py
 
-  # Evaluate specific checkpoint with default config
-  python evaluate.py --checkpoint vrpbtw_maml_base_best.pt
+  # Evaluate specific checkpoint
+  python evaluate.py --checkpoint tune_best_009_N50_F5_C.pt
 
-  # Beam search with specific config
-  python evaluate.py --config configs/custom_evaluate.yaml --checkpoint model_best.pt --beam 5
-
-  # Best-of-N sampling
-  python evaluate.py --checkpoint model_best.pt --samples 8
+  # Override settings
+  python evaluate.py --episodes 1000 --beam 5 --device cuda
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from pathlib import Path
-from typing import Any, Optional, Dict
+from typing import Any, Dict, List
+
+import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import globals
-from config import load_config, merge_configs
+from config import load_config, merge_configs, save_config
 from core import Evaluator, SeedManager
-from core.registry import build_agent, build_environment
-import torch
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+from core.registry import build_agents, build_environment
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Evaluate a trained RL checkpoint.",
+        description="Evaluate trained RL checkpoints using evaluate.yaml config.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
         "--config",
         default="configs/evaluate.yaml",
         metavar="PATH",
-        help="Evaluation config [default: configs/evaluate.yaml]",
+        help="Evaluation config file (default: configs/evaluate.yaml)",
     )
     p.add_argument(
         "--checkpoint",
         default=None,
-        metavar="PATH",
-        help="Checkpoint .pt file to evaluate. If not provided, evaluates all checkpoints in training_experiment dir.",
+        metavar="NAME",
+        help="Specific checkpoint to evaluate (e.g., tune_best_009_N50_F5_C.pt). If not provided, evaluates all.",
     )
     p.add_argument(
         "--override",
         default=None,
         metavar="PATH",
-        help="Optional ablation override YAML.",
+        help="Optional config override YAML.",
     )
     p.add_argument(
-        "--device", default=None, metavar="DEVICE", help="Override cfg.device."
-    )
-    p.add_argument(
-        "--beam",
+        "--device",
         default=None,
-        type=int,
-        metavar="WIDTH",
-        help="Beam width (1 = greedy).  Overrides cfg.train.eval_beam_width.",
+        metavar="DEVICE",
+        help="Override device from config (cpu or cuda)",
     )
     p.add_argument(
         "--episodes",
-        default=None,
         type=int,
+        default=None,
         metavar="N",
-        help="Number of evaluation episodes.  Overrides cfg.train.n_eval_episodes.",
+        help="Override number of evaluation instances from config",
+    )
+    p.add_argument(
+        "--beam",
+        type=int,
+        default=None,
+        metavar="WIDTH",
+        help="Override beam width for decoding",
     )
     p.add_argument(
         "--samples",
+        type=int,
         default=1,
-        type=int,
         metavar="N",
-        help="Best-of-N sampling rollouts per instance (default: 1).",
-    )
-    p.add_argument(
-        "--customers",
-        default=None,
-        type=int,
-        metavar="N",
-        help="Override n_customers for evaluation instances.  "
-        "Allows evaluating a checkpoint on larger or smaller problems "
-        "than the training size.",
+        help="Best-of-N sampling (default: 1)",
     )
     return p
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
-def _find_checkpoints(training_experiment: str) -> list:
-    """Find all .pt checkpoint files in training experiment directory."""
-    checkpoint_dir = Path("experiment/train") / training_experiment / "checkpoints"
+def _find_checkpoints(experiment_dir: Path) -> List[Path]:
+    """Find all .pt checkpoint files in experiment directory."""
+    checkpoint_dir = experiment_dir / "checkpoints"
     if not checkpoint_dir.exists():
         return []
     return sorted(checkpoint_dir.glob("*.pt"))
+
+
+def _extract_task_id(checkpoint_name: str) -> str | None:
+    """Extract task_id from checkpoint filename.
+
+    Format: {exp_name}_tune_best_{task_id}.pt or {exp_name}_tune_final_{task_id}.pt
+    Returns the task_id part.
+    """
+    # Remove .pt extension
+    stem = checkpoint_name[:-3] if checkpoint_name.endswith(".pt") else checkpoint_name
+
+    for prefix in ["tune_best_", "tune_final_"]:
+        if prefix in stem:
+            return stem.split(prefix, 1)[1]
+
+    return None
 
 
 def _evaluate_checkpoint(
     checkpoint_path: Path,
     cfg: Dict[str, Any],
     args: argparse.Namespace,
-    artifacts_dir: Path,
+    output_dir: Path,
 ) -> Dict[str, Any]:
-    """Evaluate a single checkpoint."""
-    import csv
+    """Evaluate a single checkpoint with batch progress output."""
 
-    # Extract config values with hierarchical support
-    device = cfg.get("device", "cpu")
-    exp_name = cfg.get("name") or cfg.get("experiment", {}).get("name", "experiment")
-
-    # Handle training config override for beam/episodes
-    training_cfg = cfg.get("training", cfg.get("train", {}))
-    eval_cfg = training_cfg.get("evaluation", cfg.get("evaluation", {}))
-    eval_decoding = eval_cfg.get("decoding", {})
-
-    beam_width = args.beam if args.beam else eval_decoding.get("beam_width", 1)
-    n_episodes = args.episodes if args.episodes else eval_cfg.get("n_episodes", 20)
-    deterministic = eval_cfg.get("deterministic", True)
-
-    # Parse task_id from checkpoint filename (format: {exp_name}_{tag}.pt)
-    checkpoint_stem = checkpoint_path.stem
-    parts = checkpoint_stem.rsplit("_", 1)
-    task_id = parts[-1] if len(parts) > 1 else None
+    checkpoint_name = checkpoint_path.stem
+    task_id = _extract_task_id(checkpoint_path.name)
 
     print(f"\n{'=' * 70}")
-    print(f"  Checkpoint : {checkpoint_path.name}")
-    print(f"  Task ID    : {task_id}")
-    print(f"  Experiment : {exp_name}")
-    print(f"  Device     : {device}")
+    print(f"  Checkpoint: {checkpoint_path.name}")
+    if task_id:
+        print(f"  Task ID   : {task_id}")
 
-    # ── Reproducibility ─────────────────────────────────────────────────
+    # Set reproducibility
     reproducibility_cfg = cfg.get("reproducibility", {})
-    seed_cfg = reproducibility_cfg.get("seed", cfg.get("seed", {}))
+    seed_cfg = reproducibility_cfg.get("seed", {})
     seed_mgr = SeedManager(
         random_seed=seed_cfg.get("random_seed", 42),
         numpy_seed=seed_cfg.get("numpy_seed", 42),
@@ -166,60 +140,99 @@ def _evaluate_checkpoint(
     )
     seed_mgr.seed_everything()
 
-    # ── Environment ─────────────────────────────────────────────────────
+    # Get device and evaluation settings
+    device = args.device or cfg.get("device", "cpu")
+    globals.DEVICE = device
+
+    # Get evaluation config
+    eval_cfg = cfg.get("evaluation", {})
+    n_episodes = args.episodes or eval_cfg.get("n_episodes", 10000)
+    beam_width = args.beam or eval_cfg.get("decoding", {}).get("beam_width", 1)
+    deterministic = eval_cfg.get("deterministic", True)
+
+    # Build environment and agents
     env = build_environment(cfg)
-    print(f"  Environment: {env}")
+    agents = build_agents(cfg=cfg)
 
-    # ── Agent ───────────────────────────────────────────────────────────
+    # Get first agent (typically the eval agent)
+    agent = next(iter(agents.values()))
 
-    agents = build_agent(cfg=cfg)
-    agent = next(iter(agents.values()))  # Use first agent for evaluation
-
+    # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    # Load checkpoint into agent's policy
-    if isinstance(checkpoint, dict) and "agent" in checkpoint:
-        agent.policy.load_state_dict(checkpoint["agent"])
+    if isinstance(checkpoint, dict) and "network_state" in checkpoint:
+        agent.network.load_state_dict(checkpoint["network_state"])
+    elif isinstance(checkpoint, dict) and "agent" in checkpoint:
+        agent.network.load_state_dict(checkpoint["agent"])
     elif isinstance(checkpoint, dict):
-        agent.policy.load_state_dict(checkpoint)
+        agent.network.load_state_dict(checkpoint)
 
-    print(f"  Agents     : {list(agents.keys())}")
-    print(f"  Agent      : {agent}")
+    # Evaluate in batches with progress output
+    batch_size = 100
+    num_batches = max(1, n_episodes // batch_size)
+    actual_batch_size = n_episodes // num_batches
 
-    # ── Evaluate ────────────────────────────────────────────────────────
-    evaluator = Evaluator(
-        agent=agent,
-        env=env,
-        n_episodes=n_episodes,
-        deterministic=deterministic,
-        n_samples=args.samples,
-        beam_width=beam_width,
-    )
-    stats = evaluator.evaluate(task_id)
+    print(f"  Evaluating {n_episodes} instances in {num_batches} batches...")
 
+    all_batch_stats = []
+
+    for batch_idx in range(num_batches):
+        evaluator = Evaluator(
+            agent=agent,
+            env=env,
+            n_episodes=actual_batch_size,
+            deterministic=deterministic,
+            n_samples=args.samples,
+            beam_width=beam_width,
+        )
+        batch_stats = evaluator.evaluate(task_id)
+        all_batch_stats.append(batch_stats)
+
+        # Progress output
+        mean_obj = batch_stats.get("mean_objective", 0)
+        mean_cost = batch_stats.get("mean_cost", 0)
+        mean_sr = batch_stats.get("mean_service_rate", 0)
+
+        print(
+            f"    Batch {batch_idx + 1:3d}/{num_batches} | "
+            f"mean_objective: {mean_obj:8.2f} | "
+            f"mean_cost: {mean_cost:7.2f} | "
+            f"mean_service_rate: {mean_sr:.4f}"
+        )
+
+    # Aggregate statistics across batches
+    aggregated_stats = {}
+    for key in all_batch_stats[0].keys():
+        values = [s[key] for s in all_batch_stats if isinstance(s[key], (int, float))]
+        if values:
+            aggregated_stats[key] = float(np.mean(values))
+        else:
+            aggregated_stats[key] = all_batch_stats[0][key]
+
+    # Print final results
     print("\n  Results:")
-    for k, v in stats.items():
-        print(f"    {k:<26}: {v:.4f}" if isinstance(v, float) else f"    {k:<26}: {v}")
+    for k, v in aggregated_stats.items():
+        if isinstance(v, float):
+            print(f"    {k:<26}: {v:.4f}")
+        else:
+            print(f"    {k:<26}: {v}")
 
-    # ── Save results to CSV ──────────────────────────────────────────────
-    checkpoint_name = checkpoint_path.stem
-    csv_path = artifacts_dir / f"{checkpoint_name}.csv"
-
+    # Save to CSV
+    csv_path = output_dir / f"{checkpoint_name}.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["metric", "value"])
-        for k, v in stats.items():
+        for k, v in aggregated_stats.items():
             writer.writerow([k, v])
 
     print(f"  CSV saved: {csv_path}")
 
-    return stats
+    return aggregated_stats
 
 
 def main() -> None:
     args = _build_parser().parse_args()
 
-    # ── 1. Load evaluate config ──────────────────────────────────────────
+    # Load evaluate config
     config_path = args.config
     if not Path(config_path).exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
@@ -232,7 +245,7 @@ def main() -> None:
 
     print(f"\n  Evaluate Config: {config_path}")
 
-    # ── 2. Get training and evaluation experiment names ──────────────────
+    # Get experiment names
     eval_exp_name = eval_cfg.get("experiment", {}).get("name")
     if not eval_exp_name:
         raise ValueError("experiment.name must be specified in evaluate config")
@@ -242,19 +255,25 @@ def main() -> None:
     if not training_exp_name:
         raise ValueError("directories.source must be specified in evaluate config")
 
-    training_config_path = (
-        Path("experiment/train") / training_exp_name / "config" / "config.yaml"
-    )
+    # Load training config
+    experiment_dir = Path("experiment/train") / training_exp_name
+    if not experiment_dir.exists():
+        raise FileNotFoundError(
+            f"Training experiment not found: {experiment_dir}\n"
+            f"Make sure 'directories.source' in {config_path} points to a valid experiment."
+        )
+
+    training_config_path = experiment_dir / "config.yaml"
     if not training_config_path.exists():
         raise FileNotFoundError(
             f"Training config not found: {training_config_path}\n"
-            f"Make sure training experiment '{training_exp_name}' exists in experiment/train/"
+            f"Expected to find config.yaml in training experiment directory."
         )
 
-    # Load training config and merge evaluate config on top
+    # Load training config and merge with evaluate config
     cfg = load_config(str(training_config_path))
 
-    # Merge evaluate settings (device, evaluation, directories, reproducibility)
+    # Merge evaluate settings
     if "device" in eval_cfg:
         cfg["device"] = eval_cfg["device"]
     if "evaluation" in eval_cfg:
@@ -264,79 +283,53 @@ def main() -> None:
     if "reproducibility" in eval_cfg:
         cfg["reproducibility"] = eval_cfg["reproducibility"]
 
-    if args.device:
-        cfg["device"] = args.device
-
-    # Set global device for all rl components
-    globals.DEVICE = cfg.get("device", "cpu")
-
-    print(f"  Training Experiment: {training_exp_name}")
-    print(f"  Evaluation Experiment: {eval_exp_name}")
-    print(f"  Training Config: {training_config_path}")
-
-    # ── 3. Determine checkpoints to evaluate ─────────────────────────────
-    if args.checkpoint:
-        # Single checkpoint specified
-        checkpoint_path = Path(args.checkpoint)
-        if not checkpoint_path.exists():
-            # Try to find in training experiment folder
-            exp_checkpoint = (
-                Path("experiment/train")
-                / training_exp_name
-                / "checkpoints"
-                / args.checkpoint
-            )
-            if exp_checkpoint.exists():
-                checkpoint_path = exp_checkpoint
-            else:
-                raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
-        checkpoints = [checkpoint_path]
-    else:
-        # Find all checkpoints in training experiment directory
-        checkpoints = _find_checkpoints(training_exp_name)
-        if not checkpoints:
-            raise FileNotFoundError(
-                f"No checkpoints found in experiment/train/{training_exp_name}/checkpoints/"
-            )
-        print(f"  Found {len(checkpoints)} checkpoint(s)")
-
-    # ── 4. Setup output directory ───────────────────────────────────────
-    base_dir = cfg.get("directories", {}).get("base_dir", "experiment/evaluate")
+    # Setup output directory
+    base_dir = dirs_cfg.get("base_dir", "experiment/evaluate")
     output_dir = Path(base_dir) / training_exp_name / eval_exp_name
-    artifacts_dir = output_dir / cfg.get("directories", {}).get(
-        "artifacts", "artifacts"
-    )
+    artifacts_dir = output_dir / dirs_cfg.get("artifacts", "artifacts")
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     # Save evaluate config
     eval_config_path = output_dir / "evaluate.yaml"
-    from config import save_config
-
     save_config(eval_cfg, str(eval_config_path))
 
+    print(f"  Training Experiment: {training_exp_name}")
+    print(f"  Evaluation Experiment: {eval_exp_name}")
+    print(f"  Training Config: {training_config_path}")
     print(f"  Output Directory: {output_dir}")
-    print(f"  Artifacts Directory: {artifacts_dir}")
 
-    # ── 5. Evaluate each checkpoint ──────────────────────────────────────
+    # Find checkpoints
+    if args.checkpoint:
+        checkpoint_path = experiment_dir / "checkpoints" / f"{args.checkpoint}.pt"
+        if not checkpoint_path.exists():
+            # Try without .pt extension if provided
+            checkpoint_path = experiment_dir / "checkpoints" / args.checkpoint
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+        checkpoints = [checkpoint_path]
+    else:
+        checkpoints = _find_checkpoints(experiment_dir)
+        if not checkpoints:
+            raise FileNotFoundError(
+                f"No checkpoints found in {experiment_dir}/checkpoints/"
+            )
+
+    print(f"  Found {len(checkpoints)} checkpoint(s)")
+
+    # Evaluate each checkpoint
     results = {}
     for checkpoint_path in checkpoints:
         results[checkpoint_path.name] = _evaluate_checkpoint(
             checkpoint_path, cfg, args, artifacts_dir
         )
 
-    # ── 6. Summary and aggregate results ────────────────────────────────
+    # Summary for multiple checkpoints
     if len(checkpoints) > 1:
         print(f"\n{'=' * 70}")
         print("\nSummary of all checkpoints:")
 
-        # Create summary CSV
-        import csv
-
         summary_csv = artifacts_dir / "summary.csv"
-
-        # Get all metrics from first checkpoint
-        first_stats = next(iter(results.values()))
-        metrics = list(first_stats.keys())
+        metrics = list(next(iter(results.values())).keys())
 
         with open(summary_csv, "w", newline="") as f:
             writer = csv.writer(f)
@@ -350,13 +343,12 @@ def main() -> None:
         for ckpt_name, stats in results.items():
             print(f"\n  {ckpt_name}:")
             for k, v in stats.items():
-                print(
-                    f"    {k:<26}: {v:.4f}"
-                    if isinstance(v, float)
-                    else f"    {k:<26}: {v}"
-                )
+                if isinstance(v, float):
+                    print(f"    {k:<26}: {v:.4f}")
+                else:
+                    print(f"    {k:<26}: {v}")
 
-    print(f"\n  Evaluation results saved to: {output_dir}")
+    print(f"\n  Evaluation results saved to: {output_dir}\n")
 
 
 if __name__ == "__main__":

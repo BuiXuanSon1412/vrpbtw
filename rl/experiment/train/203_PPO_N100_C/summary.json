@@ -1,0 +1,23 @@
+{
+  "stop_reason": "completed",
+  "total_updates": 11000,
+  "total_epochs": 11,
+  "best_objective": 288384.78125,
+  "training_time_s": 16977.8,
+  "meta_learning_enabled": false,
+  "fine_tuning_enabled": true,
+  "meta_summary": null,
+  "fine_tune_summary": {
+    "stop_reason": "completed",
+    "total_epochs": 11,
+    "total_updates": 11000,
+    "best_objective": 288384.78125,
+    "training_time_s": 16977.8,
+    "task_summaries": {
+      "012_N100_F10_C": {
+        "best_objective": 288384.78125,
+        "epochs_completed": 11
+      }
+    }
+  }
+}

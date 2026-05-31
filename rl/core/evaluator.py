@@ -72,8 +72,11 @@ class Evaluator:
     ) -> Dict[str, float]:
         # Use fixed seed for evaluation to ensure consistent test instances across epochs
         # This allows fair comparison of agent performance across training iterations
-        rng_state = np.random.get_state()
-        np.random.seed(hash(task_id) & 0x7FFFFFFF if task_id else 42)
+        np_rng_state = np.random.get_state()
+        torch_rng_state = torch.get_rng_state()
+        seed_value = hash(task_id) & 0x7FFFFFFF if task_id else 42
+        np.random.seed(seed_value)
+        torch.manual_seed(seed_value)
 
         objectives: List[float] = []
         rewards: List[float] = []
@@ -97,7 +100,8 @@ class Evaluator:
                 solutions.append(sol)
         finally:
             # Restore RNG state to avoid affecting training
-            np.random.set_state(rng_state)
+            np.random.set_state(np_rng_state)
+            torch.set_rng_state(torch_rng_state)
 
         stats: Dict[str, float] = {
             "mean_objective": float(np.mean(objectives)),

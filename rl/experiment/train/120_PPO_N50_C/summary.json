@@ -1,0 +1,23 @@
+{
+  "stop_reason": "completed",
+  "total_updates": 20000,
+  "total_epochs": 20,
+  "best_objective": 26370.533203125,
+  "training_time_s": 14803.4,
+  "meta_learning_enabled": false,
+  "fine_tuning_enabled": true,
+  "meta_summary": null,
+  "fine_tune_summary": {
+    "stop_reason": "completed",
+    "total_epochs": 20,
+    "total_updates": 20000,
+    "best_objective": 26370.533203125,
+    "training_time_s": 14803.4,
+    "task_summaries": {
+      "009_N50_F5_C": {
+        "best_objective": 26370.533203125,
+        "epochs_completed": 20
+      }
+    }
+  }
+}

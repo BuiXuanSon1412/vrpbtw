@@ -1,25 +1,15 @@
-# evaluate.yaml
-# Standalone evaluation configuration
-#
-# Loads a trained checkpoint and evaluates it on fresh instances.
-# Environment and policy configs are loaded from training experiment.
-
 device: cpu
-
 reproducibility:
   seed:
     random_seed: 42
     numpy_seed: 42
     torch_seed: 42
-
 experiment:
-  name: 120_PPO_N50_C_detailed
-
+  name: eval_test_130_PPO_N10_RC_detailed
 directories:
-  source: 120_PPO_N50_C
+  source: test_130_PPO_N10_RC
   base_dir: experiment/evaluate
   artifacts: artifacts
-
 evaluation:
   deterministic: true
   n_episodes: 10000
