@@ -268,9 +268,12 @@ def run(filename):
     for i in N_all:
         xi[i] = solver.NumVar(0, solver.infinity(), f'xi_{i}')
 
-    tardiness = solver.NumVar(0, solver.infinity(), 'tardiness')
+    # tardiness = solver.NumVar(0, solver.infinity(), 'tardiness')
+    # f1
+    sr_expr = solver.Sum([x[k, i] for k in K for i in C]) + solver.Sum([x_tilde[k, r, i] for k in K for r in R for i in C])
 
     # Objective function
+    # f2
     cost_expr = solver.Sum([
         y[k, i, j] * c * d[i][j]
         for k in K for i in N_all for j in N_end if i != j
@@ -279,18 +282,22 @@ def run(filename):
         for k in K for r in R for i in N_all for j in N_end if i != j
     ]) + solver.Sum([y[k, 0, j] * c_b for k in K for j in C])
 
-    solver.Minimize(w1 * cost_expr + w2 * tardiness)
+    # f = f2 + C_T*|C|*(|C| - f1) 
+    penalty_weight = Q * len(C)
+    solver.Minimize(cost_expr + penalty_weight * len(C) - penalty_weight * sr_expr)
+
+    # solver.Minimize(w1 * cost_expr + w2 * tardiness)
 
     # Constraints
     # Tardiness constraints
-    for i in C:
-        solver.Add(tardiness >= xi[i] + s[i] - t_end[i])
+    # for i in C:
+    #     solver.Add(tardiness >= xi[i] + s[i] - t_end[i])
 
     # Each customer served once (constraint 3)
     for i in C:
         solver.Add(
             solver.Sum([x[k, i] for k in K]) +
-            solver.Sum([x_tilde[k, r, i] for k in K for r in R]) == 1
+            solver.Sum([x_tilde[k, r, i] for k in K for r in R]) <= 1
         )
 
     # If no launching node, no edges traversed
@@ -485,8 +492,16 @@ def run(filename):
                 solver.Add(p_tilde[k, r, i] >= 0)
 
     # Constraints 43-45
+    # for i in C:
+    #     solver.Add(xi[i] >= t_start[i])
+
     for i in C:
-        solver.Add(xi[i] >= t_start[i])
+        sigma_i = (
+            solver.Sum([x[k, i] for k in K]) +
+            solver.Sum([x_tilde[k, r, i] for k in K for r in R])
+        )
+        solver.Add(xi[i] >= t_start[i] - M_T * (1 - sigma_i))
+        solver.Add(xi[i] <= t_end[i] - s[i] + M_T * (1 - sigma_i))
 
     for k in K:
         for i in C:
