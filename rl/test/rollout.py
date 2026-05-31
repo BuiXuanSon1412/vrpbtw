@@ -1,41 +1,83 @@
+#!/usr/bin/env python3
 """
-Test script with detailed episode rollout and solution output.
+Test script with detailed episode rollout and CPU usage measurement.
+
+Tests environment correctness and measures CPU usage per episode.
+Uses PyTorch sampling (matches production agent code).
 
 CLI Usage
 ---------
-  python test/rollout.py                           # Default: 5 instances × 3 rollouts
-  python test/rollout.py --detailed                # With detailed route/time output
-  python test/rollout.py --n-instances 10          # Override instance count
-  python test/rollout.py --n-rollouts 5            # Override rollouts per instance
-  python test/rollout.py --detailed --n-instances 10 --n-rollouts 5
+  python test/rollout.py                           # All tasks, default settings
+  python test/rollout.py --task 001_N10_F2_RC      # Specific task
+  python test/rollout.py --n-episodes 5            # Override episodes per task
+  python test/rollout.py --detailed                # Print detailed routes/timing
+  python test/rollout.py --config configs/train.yaml  # Custom config
 
 Arguments
 ---------
-  --detailed           Print truck routes, drone trips, timings for each rollout
-  --n-instances N      Number of instances to generate (default: 5)
-  --n-rollouts N       Number of rollouts per instance (default: 3)
+  --config CONFIG      Training config (default: configs/train.yaml)
+  --task TASK          Specific task (if not set, test all tasks)
+  --n-episodes N       Episodes per task (default: 3)
+  --detailed           Print truck routes, drone trips, timings
 """
 
 import sys
 from pathlib import Path
 
-# Add parent directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
+import re
+import time
 import numpy as np
+import torch
+import psutil
 from typing import Dict, Any, List
-from impl.mvrpbtw import MVRPBTWEnv
+
+import globals
+from config import load_config
 from core import SeedManager
+from core.registry import build_environment
+
+
+def get_test_tasks() -> List[str]:
+    """Get hardcoded list of tasks for testing.
+
+    Independent of mvrpbtw.yaml to ensure test reproducibility.
+    Format: {difficulty:003d}_N{customers}_F{fleets}_{distribution}
+    """
+    return [
+        # Small problems (N=10, 2 fleets)
+        "001_N10_F2_RC",  # Random-Clustered
+        "002_N10_F2_R",  # Random
+        "003_N10_F2_C",  # Clustered
+        # Medium problems (N=20, 3 fleets)
+        "004_N20_F3_RC",  # Random-Clustered
+        "005_N20_F3_R",  # Random
+        "006_N20_F3_C",  # Clustered
+        # Large problems (N=50, 5 fleets)
+        "007_N50_F5_RC",  # Random-Clustered
+        "008_N50_F5_R",  # Random
+        "009_N50_F5_C",  # Clustered
+        # Very large problems (N=100, 10 fleets)
+        "010_N100_F10_RC",  # Random-Clustered
+        "011_N100_F10_R",  # Random
+        "012_N100_F10_C",  # Clustered
+    ]
 
 
 def run_detailed_episode(
-    env: MVRPBTWEnv, episode_id: int, seed: int = 42
+    env: Any,
+    task_id: str,
+    episode_id: int,
+    verbose: bool = False,
 ) -> Dict[str, Any]:
-    """Run a single episode with detailed output."""
+    """Run a single episode with uniform action sampling and CPU measurement."""
+    process = psutil.Process()
+
     results = {
         "episode": episode_id,
-        "seed": seed,
+        "task_id": task_id,
         "success": True,
         "errors": [],
         "steps": 0,
@@ -45,9 +87,16 @@ def run_detailed_episode(
         "served_count": 0,
         "truck_routes": [],
         "drone_trips": [],
+        "duration_s": 0.0,
+        "cpu_percent": 0.0,
     }
 
+    cpu_samples = []
+    start_memory = process.memory_info().rss / 1024 / 1024
+    start_time = time.time()
+
     try:
+        env.retask(task_id)
         obs, info = env.reset()
         action_mask = info["action_mask"]
 
@@ -65,29 +114,24 @@ def run_detailed_episode(
 
             feasible = np.where(action_mask)[0]
             if len(feasible) == 0:
-                print(f"\n  STUCK at step {step}: Empty action mask")
-                print(f"    Served: {results['served_count']}/{env.n_customers}")
-                state = env._current_state
-                for k in range(env.K):
-                    print(
-                        f"    Truck {k}: node={state.truck_node[k]}, active_drone={state.drone_active[k]}, drone_node={state.drone_node[k]}, land_idx={state.drone_land_idx[k]}"
-                    )
-                    if state.drone_active[k]:
-                        print(
-                            f"      drone_trips={state.drone_trips[k]}, drone_load={state.drone_load[k]}"
-                        )
                 results["errors"].append(f"Empty action mask at step {step}")
                 results["success"] = False
                 results["terminal_reason"] = "stuck_state"
                 break
 
-            # Random action from feasible set
-            action = np.random.choice(feasible)
-            obs, reward, terminated, truncated, info = env.step(action)
+            # Sample uniformly from feasible actions using Categorical with uniform logits
+            logits = torch.ones(len(feasible), device=globals.DEVICE)
+            dist = torch.distributions.Categorical(logits=logits)
+            idx = dist.sample().item()
+            action = int(feasible[int(idx)])
 
-            results["total_reward"] += float(reward) if reward is not None else 0.0
+            # Sample CPU during environment step only
+            cpu_percent = process.cpu_percent(interval=0.001)
+            obs, reward, terminated, truncated, info = env.step(action)
+            cpu_samples.append(cpu_percent)
             action_mask = info["action_mask"]
 
+            results["total_reward"] += float(reward) if reward is not None else 0.0
             results["served_count"] = info.get("served_count", 0)
             results["final_cost"] = info.get("current_cost", 0.0)
 
@@ -96,13 +140,21 @@ def run_detailed_episode(
                 break
 
         if step >= max_steps:
-            results["warnings"] = f"Episode reached max steps ({max_steps})"
             results["terminal_reason"] = "max_steps"
 
     except Exception as e:
         results["errors"].append(f"Exception: {str(e)}")
         results["success"] = False
         results["terminal_reason"] = "exception"
+
+    finally:
+        duration = time.time() - start_time
+        peak_memory = process.memory_info().rss / 1024 / 1024
+        memory_delta = peak_memory - start_memory
+
+        results["duration_s"] = float(duration)
+        results["cpu_percent"] = float(np.mean(cpu_samples)) if cpu_samples else 0.0
+        results["memory_mb"] = float(memory_delta)
 
     # Get solution details
     try:
@@ -123,15 +175,18 @@ def run_detailed_episode(
     return results
 
 
-def print_detailed_result(results: Dict[str, Any], env: MVRPBTWEnv) -> None:
+def print_detailed_result(results: Dict[str, Any], env: Any) -> None:
     """Print detailed information for a single rollout."""
     status = "✓ PASS" if results["success"] else "✗ FAIL"
-    print(f"\n  Rollout: {status}")
+    print(f"\n  Rollout {results['episode']}: {status}")
     print(
         f"    Steps: {results['steps']}, Served: {results['served_count']}/{env.n_customers}"
     )
     print(
         f"    Cost: {results['final_cost']:.2f}, Reward: {results['total_reward']:.4f}"
+    )
+    print(
+        f"    Duration: {results['duration_s']:.3f}s, CPU: {results['cpu_percent']:.1f}%, Memory: {results['memory_mb']:.1f}MB"
     )
     print(f"    Reason: {results['terminal_reason']}")
 
@@ -195,8 +250,15 @@ def print_detailed_result(results: Dict[str, Any], env: MVRPBTWEnv) -> None:
             print(f"    ERROR: {error}")
 
 
-def print_summary_stats(results_list: List[Dict[str, Any]], n_customers: int) -> None:
-    """Print summary statistics for all rollouts."""
+def get_n_customers_from_task_id(task_id: str) -> int:
+    """Extract customer count from task ID (e.g., '001_N10_F2_RC' -> 10)."""
+    match = re.search(r"_N(\d+)_", task_id)
+    return int(match.group(1)) if match else 0
+
+
+def print_task_summary(results_list: List[Dict[str, Any]], task_id: str):
+    """Return single-line summary for a task."""
+    n_customers = get_n_customers_from_task_id(task_id)
     passed = sum(1 for r in results_list if r["success"])
     total = len(results_list)
 
@@ -204,146 +266,154 @@ def print_summary_stats(results_list: List[Dict[str, Any]], n_customers: int) ->
     costs = [r["final_cost"] for r in results_list]
     served = [r["served_count"] for r in results_list]
     steps = [r["steps"] for r in results_list]
+    durations = [r["duration_s"] for r in results_list]
+    cpu_percents = [r["cpu_percent"] for r in results_list]
+    memory_deltas = [r["memory_mb"] for r in results_list]
 
-    print(f"\n{'=' * 80}")
-    print("SUMMARY STATISTICS")
-    print(f"{'=' * 80}")
+    success = f"{passed}/{total}" if total > 1 else ("✓" if passed else "✗")
+    reward_str = f"{np.mean(rewards):.2f}±{np.std(rewards):.2f}"
+    cost_str = f"{np.mean(costs):.1f}±{np.std(costs):.1f}"
+    served_str = f"{np.mean(served):.0f}±{np.std(served):.0f}/{n_customers}"
+    steps_str = f"{np.mean(steps):.0f}±{np.std(steps):.0f}"
+    dur_str = f"{np.mean(durations):.3f}±{np.std(durations):.3f}"
+    cpu_str = f"{np.mean(cpu_percents):.1f}±{np.std(cpu_percents):.1f}"
+    mem_str = f"{np.mean(memory_deltas):.1f}±{np.std(memory_deltas):.1f}"
 
-    print(f"\nSuccess Rate: {passed}/{total} ({100 * passed / total:.1f}%)")
-
-    print(f"\nReward per episode:")
-    print(f"  Mean:     {np.mean(rewards):>8.4f}")
-    print(f"  Std:      {np.std(rewards):>8.4f}")
-    print(f"  Var:      {np.var(rewards):>8.4f}")
-    print(f"  Min:      {np.min(rewards):>8.4f}")
-    print(f"  Max:      {np.max(rewards):>8.4f}")
-    print(f"  Median:   {np.median(rewards):>8.4f}")
-
-    print(f"\nCost per episode:")
-    print(f"  Mean:     {np.mean(costs):>8.2f}")
-    print(f"  Std:      {np.std(costs):>8.2f}")
-    print(f"  Var:      {np.var(costs):>8.2f}")
-    print(f"  Min:      {np.min(costs):>8.2f}")
-    print(f"  Max:      {np.max(costs):>8.2f}")
-    print(f"  Median:   {np.median(costs):>8.2f}")
-
-    print(f"\nCustomers served per episode:")
-    print(f"  Mean:     {np.mean(served):>8.2f} / {n_customers}")
-    print(f"  Std:      {np.std(served):>8.2f}")
-    print(f"  Var:      {np.var(served):>8.2f}")
-    print(f"  Min:      {np.min(served):>8.0f} / {n_customers}")
-    print(f"  Max:      {np.max(served):>8.0f} / {n_customers}")
-    print(f"  Median:   {np.median(served):>8.1f} / {n_customers}")
-
-    print(f"\nSteps per episode:")
-    print(f"  Mean:     {np.mean(steps):>8.1f}")
-    print(f"  Std:      {np.std(steps):>8.1f}")
-    print(f"  Var:      {np.var(steps):>8.1f}")
-    print(f"  Min:      {np.min(steps):>8.0f}")
-    print(f"  Max:      {np.max(steps):>8.0f}")
-    print(f"  Median:   {np.median(steps):>8.1f}")
-
-    print(f"\n{'=' * 80}")
+    return (
+        success,
+        reward_str,
+        cost_str,
+        served_str,
+        steps_str,
+        dur_str,
+        cpu_str,
+        mem_str,
+    )
 
 
 def run_tests(
-    n_instances: int = 5,
-    n_rollouts: int = 3,
+    cfg: Dict,
+    tasks: List[str],
+    n_episodes: int = 10,
     detailed: bool = False,
 ) -> None:
-    """Run multiple instances with multiple rollouts per instance."""
+    """Run multiple tasks with multiple episodes per task."""
 
-    cfg = {
-        "env": "MVRPBTW",
-        "tasks": ["easy_N20_F3_C"],
-        "n_customers": 20,
-        "max_coord": 100.0,
-        "capacity_truck": 200.0,
-        "capacity_drone": 20.0,
-        "t_max_system_h": 24.0,
-        "drone_duration_h": 1.0,
-        "v_truck_km_h": 40.0,
-        "v_drone_km_h": 60.0,
-        "truck_cost_unit": 1.0,
-        "drone_cost_unit": 0.5,
-        "drone_takeoff_min": 1.0,
-        "drone_landing_min": 1.0,
-        "service_time_min": 5.0,
-    }
+    # Setup
+    device = cfg.get("device", "cpu")
+    globals.DEVICE = device
 
-    env = MVRPBTWEnv(cfg)
-    task_id = cfg["tasks"][0]
-    total_rollouts = n_instances * n_rollouts
+    reproducibility_cfg = cfg.get("reproducibility", {})
+    seed_cfg = reproducibility_cfg.get("seed", {})
+    seed_mgr = SeedManager(
+        random_seed=seed_cfg.get("random_seed", 42),
+        numpy_seed=seed_cfg.get("numpy_seed", 42),
+        torch_seed=seed_cfg.get("torch_seed", 42),
+    )
+    seed_mgr.seed_everything()
 
-    if detailed:
-        print(
-            f"Running {total_rollouts} rollouts ({n_instances} instances × {n_rollouts} rollouts)"
-        )
-        print(f"Task: {task_id}")
-        print(f"Detailed output: {detailed}\n")
+    # Build environment only
+    env = build_environment(cfg)
 
-    all_results = []
+    print("=" * 100)
+    print("ENVIRONMENT CORRECTNESS & CPU USAGE TEST")
+    print("=" * 100)
+    print(f"Config: {cfg.get('experiment', {}).get('name', 'default')}")
+    print(f"Device: {device}")
+    print(f"Sampler: PyTorch Categorical (uniform logits over feasible actions)")
+    print(f"Tasks: {len(tasks)}")
+    print(f"Episodes per task: {n_episodes}")
+    print()
 
-    for inst_id in range(n_instances):
-        # Generate instance once
-        seed_mgr = SeedManager(
-            random_seed=inst_id, numpy_seed=inst_id, torch_seed=inst_id
-        )
-        seed_mgr.seed_everything()
-        instance = env._generate_instance(task_id)
-        env.encode_instance(instance)
+    all_results = {}
 
-        if detailed:
-            print(f"\nInstance {inst_id + 1}/{n_instances}:")
+    for task_id in tasks:
+        print(f"Testing: {task_id}")
+        task_results = []
 
-        for rollout_id in range(n_rollouts):
-            # Run rollout on same instance
-            seed_mgr = SeedManager(
-                random_seed=inst_id * 1000 + rollout_id,
-                numpy_seed=inst_id * 1000 + rollout_id,
-                torch_seed=inst_id * 1000 + rollout_id,
-            )
-            seed_mgr.seed_everything()
-
-            results = run_detailed_episode(
-                env,
-                episode_id=inst_id * n_rollouts + rollout_id + 1,
-                seed=inst_id * 1000 + rollout_id,
-            )
-            all_results.append(results)
+        for ep_idx in range(n_episodes):
+            results = run_detailed_episode(env, task_id, ep_idx + 1, verbose=False)
+            task_results.append(results)
 
             if detailed:
                 print_detailed_result(results, env)
 
-    print_summary_stats(all_results, env.n_customers)
+        all_results[task_id] = task_results
+        print()
+
+    # Print per-task summary (all metrics in one table)
+    print("=" * 180)
+    print("PER-TASK SUMMARY")
+    print("=" * 180)
+    print()
+
+    headers = [
+        "Task",
+        "Success",
+        "Reward",
+        "Cost",
+        "Served",
+        "Steps",
+        "Duration(s)",
+        "CPU(%)",
+        "Memory(MB)",
+    ]
+    print(
+        f"{'Task':<20} {'Success':<10} {'Reward':<18} {'Cost':<16} {'Served':<18} {'Steps':<16} {'Dur(s)':<14} {'CPU(%)':<14} {'Mem(MB)':<14}"
+    )
+    print("-" * 180)
+
+    for task_id in tasks:
+        results = all_results[task_id]
+        success, reward, cost, served, steps, dur, cpu, mem = print_task_summary(
+            results, task_id
+        )
+        print(
+            f"{task_id:<20} {success:<10} {reward:<18} {cost:<16} {served:<18} {steps:<16} {dur:<14} {cpu:<14} {mem:<14}"
+        )
+
+    print()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Test VRPBTW environment with rollout episodes"
+        description="Test environment correctness and measure CPU usage with PyTorch sampling"
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/train.yaml",
+        help="Training config (default: configs/train.yaml)",
+    )
+    parser.add_argument(
+        "--task",
+        default=None,
+        help="Specific task (if not set, test all tasks from config)",
+    )
+    parser.add_argument(
+        "--n-episodes",
+        type=int,
+        default=100,
+        help="Episodes per task (default: 100)",
     )
     parser.add_argument(
         "--detailed",
         action="store_true",
         help="Print detailed output for each rollout (default: False)",
     )
-    parser.add_argument(
-        "--n-instances",
-        type=int,
-        default=5,
-        help="Number of instances to generate (default: 5)",
-    )
-    parser.add_argument(
-        "--n-rollouts",
-        type=int,
-        default=3,
-        help="Number of rollouts per instance (default: 3)",
-    )
 
     args = parser.parse_args()
 
-    run_tests(
-        n_instances=args.n_instances,
-        n_rollouts=args.n_rollouts,
-        detailed=args.detailed,
-    )
+    # Load config
+    cfg = load_config(args.config)
+
+    # Get tasks (hardcoded, independent of config)
+    tasks = get_test_tasks()
+
+    if args.task:
+        if args.task not in tasks:
+            print(f"Error: Task {args.task} not found in test suite")
+            print(f"   Available tasks: {tasks}")
+            sys.exit(1)
+        tasks = [args.task]
+
+    run_tests(cfg, tasks, n_episodes=args.n_episodes, detailed=args.detailed)

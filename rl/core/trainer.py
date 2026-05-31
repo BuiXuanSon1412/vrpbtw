@@ -457,24 +457,47 @@ class MetaTrainer(BaseTrainer):
                                 self.env.retask(task_id)
                                 batch = self.collector.collect(agent, self.env)
 
-                                # Multiple gradient steps over the same batch (PPO optimization)
+                                # Multiple gradient steps with mini-batch shuffling (proper PPO)
+                                trajectory_length = len(batch["observations"])
+                                mini_batch_size = max(1, trajectory_length // 4)  # 1/4 of episode per mini-batch
+
                                 for ppo_epoch in range(self.fcfg["ppo_epochs"]):
-                                    metrics = agent.update(batch)
-                                    self._total_updates += 1
-                                    loss_val = metrics.get("loss", 0.0)
-                                    loss_val = (
-                                        loss_val.detach()
-                                        if isinstance(loss_val, torch.Tensor)
-                                        else loss_val
-                                    )
-                                    epoch_losses.append(float(loss_val))
-                                    grad_norm_val = metrics.get("grad_norm", -1.0)
-                                    grad_norm_val = (
-                                        grad_norm_val.detach()
-                                        if isinstance(grad_norm_val, torch.Tensor)
-                                        else grad_norm_val
-                                    )
-                                    epoch_grad_norms.append(float(grad_norm_val))
+                                    # Shuffle trajectory indices for this PPO epoch
+                                    indices = torch.randperm(trajectory_length)
+
+                                    # Process mini-batches in shuffled order
+                                    for start_idx in range(0, trajectory_length, mini_batch_size):
+                                        end_idx = min(start_idx + mini_batch_size, trajectory_length)
+                                        mini_batch_indices = indices[start_idx:end_idx]
+
+                                        # Create mini-batch from full batch
+                                        mini_batch = {}
+                                        for key, value in batch.items():
+                                            if isinstance(value, torch.Tensor):
+                                                mini_batch[key] = value[mini_batch_indices]
+                                            elif isinstance(value, list):
+                                                # For list of observations (graph-based)
+                                                mini_batch[key] = [value[i.item()] for i in mini_batch_indices]
+                                            else:
+                                                mini_batch[key] = value
+
+                                        # Update on mini-batch
+                                        metrics = agent.update(mini_batch)
+                                        self._total_updates += 1
+                                        loss_val = metrics.get("loss", 0.0)
+                                        loss_val = (
+                                            loss_val.detach()
+                                            if isinstance(loss_val, torch.Tensor)
+                                            else loss_val
+                                        )
+                                        epoch_losses.append(float(loss_val))
+                                        grad_norm_val = metrics.get("grad_norm", -1.0)
+                                        grad_norm_val = (
+                                            grad_norm_val.detach()
+                                            if isinstance(grad_norm_val, torch.Tensor)
+                                            else grad_norm_val
+                                        )
+                                        epoch_grad_norms.append(float(grad_norm_val))
                         except Exception as e:
                             self.logger.log_exception(
                                 e,
@@ -690,16 +713,19 @@ class MetaTrainer(BaseTrainer):
                 f"Support logits batch shape {logits.shape[:-1]} != actions shape {support_batch['actions'].shape}"
             )
 
+            # Normalize advantages for stable PPO training (consistent with fine-tuning)
+            advantages_normalized = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
             ratio = torch.exp(
                 torch.nn.functional.log_softmax(logits, dim=-1)
                 .gather(-1, support_batch["actions"].unsqueeze(-1))
                 .squeeze(-1)
                 - old_log_probs
             )
-            surr1 = ratio * advantages
+            surr1 = ratio * advantages_normalized
             surr2 = (
                 torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-                * advantages
+                * advantages_normalized
             )
             support_loss = -torch.min(
                 surr1, surr2

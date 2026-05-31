@@ -154,6 +154,7 @@ class GAECollector(BaseCollector):
         action_mask = info["action_mask"]
 
         with torch.no_grad():
+            is_truncated = False  # Track if episode ended due to truncation vs natural termination
             while True:  # Collect until episode terminates
                 obs_t = obs_to_tensor(obs, device=globals.DEVICE)
                 mask_t = torch.tensor(
@@ -178,14 +179,20 @@ class GAECollector(BaseCollector):
 
                 # Exit when episode terminates
                 if terminated or truncated or not action_mask.any():
+                    is_truncated = truncated  # Only True if episode was truncated (not natural termination)
                     break
 
-            # Get bootstrap value
-            obs_end = obs_to_tensor(obs, device=globals.DEVICE)
-            mask_end = torch.tensor(
-                action_mask, dtype=torch.bool, device=globals.DEVICE
-            ).unsqueeze(0)
-            _, _, bootstrap_val, _ = agent.act(obs_end, mask_end, deterministic=False)
+            # Get bootstrap value only if episode was truncated (not naturally terminated)
+            # For natural termination, value at terminal state is 0
+            if is_truncated and action_mask.any():
+                obs_end = obs_to_tensor(obs, device=globals.DEVICE)
+                mask_end = torch.tensor(
+                    action_mask, dtype=torch.bool, device=globals.DEVICE
+                ).unsqueeze(0)
+                _, _, bootstrap_val, _ = agent.act(obs_end, mask_end, deterministic=False)
+            else:
+                # Natural termination: no future value to bootstrap from
+                bootstrap_val = torch.tensor(0.0, device=globals.DEVICE)
 
         # Compute GAE
         # Keep observations as-is (may be list of dicts for graph-based envs with dynamic structures)
@@ -212,6 +219,9 @@ class GAECollector(BaseCollector):
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,
         )
+
+        # Normalize advantages for PPO stability (prevents NaN in small batches)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         return {
             "observations": observations_tensor,
