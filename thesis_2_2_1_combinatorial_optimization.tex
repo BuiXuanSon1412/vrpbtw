@@ -1,0 +1,45 @@
+\subsubsection{Definitions and Preliminaries}
+
+\paragraph{Optimization Problems: General Framework}
+
+Optimization is the process of finding the best solution from a set of feasible alternatives according to some quantifiable criteria. Formally, an optimization problem seeks to solve:
+
+\begin{equation}
+\minimize_{\mathbf{x} \in \mathcal{X}} \quad f(\mathbf{x})
+\end{equation}
+
+where $f: \mathcal{X} \to \mathbb{R}$ is the objective function, $\mathcal{X}$ is the feasible solution space defined by constraints, and $\mathbf{x}^* = \arg\min_{\mathbf{x} \in \mathcal{X}} f(\mathbf{x})$ is the optimal solution. The fundamental distinction in optimization lies in the nature of the decision variables and feasible space: continuous optimization restricts decision variables to real numbers $\mathbf{x} \in \mathbb{R}^n$, enabling calculus-based methods exploiting gradient information. Discrete optimization restricts variables to finite sets such as integers or permutations, precluding gradient-based navigation.
+
+\paragraph{Optimization Landscape}
+
+The optimization landscape characterizes the relationship between solution quality and solution similarity. Intuitively, a landscape is smooth if nearby solutions have similar objective values, enabling local search to navigate toward optima. Conversely, a rugged landscape exhibits rapid objective value changes, creating isolated peaks and valleys where local search often fails to escape suboptimal regions.
+
+Formally, let $N(\mathbf{x})$ denote the neighborhood of solution $\mathbf{x}$ under some neighborhood relation (e.g., solutions reachable by single local moves). The fitness correlation $\rho$ measures how objective values correlate across neighbors:
+
+\begin{equation}
+\rho = \text{corr}(f(\mathbf{x}), f(\mathbf{x}'))  \quad \text{for } \mathbf{x}' \in N(\mathbf{x})
+\end{equation}
+
+High correlation ($\rho \approx 1$) indicates smooth landscapes amenable to gradient-based or local search methods. Low correlation ($\rho \approx 0$) indicates rugged landscapes where local search may fail. Beyond ruggedness, landscape structure determines solvability: convex problems possess unique global optima with smooth descent paths, while multimodal problems contain multiple local optima separated by infeasible regions, necessitating specialized solution approaches.
+
+\paragraph{Combinatorial Optimization}
+
+Combinatorial optimization addresses problems where decision variables are discrete, typically chosen from finite sets or permutations. A combinatorial optimization problem can be expressed as:
+
+\begin{equation}
+\minimize_{\mathbf{x} \in \mathcal{S}} \quad f(\mathbf{x})
+\end{equation}
+
+where $\mathcal{S}$ is a finite set of discrete solutions. The cardinality of $\mathcal{S}$ grows exponentially with problem size: for permutation problems involving $n$ distinct objects, the solution space contains $n!$ permutations. For the traveling salesman problem with 20 cities, $20! \approx 2.4 \times 10^{18}$ possible tours exist. Even with modern computational power (evaluating $10^9$ solutions per second), exhaustive enumeration requires infeasible time.
+
+The fundamental consequence of discrete variables is the absence of meaningful gradient information. In continuous optimization, $\nabla f(\mathbf{x})$ provides direction toward improvements. In combinatorial problems, changing a discrete variable by one unit may dramatically alter objective value or feasibility, eliminating smooth descent paths. Neighborhoods in combinatorial space are discrete: from a permutation, only specific local moves (swaps, insertions) reach neighboring solutions, and these neighbors may vary widely in quality.
+
+Combinatorial problems typically exhibit severely rugged landscapes. The Traveling Salesman Problem, for instance, has approximately $n!/2$ local optima for random instances of size $n$, with poor fitness correlation between neighboring tours. This landscape structure renders greedy construction and simple local search ineffective—algorithms frequently converge to suboptimal local optima far from the global optimum.
+
+\paragraph{Solution Space Structure and Feasibility}
+
+The feasible solution space $\mathcal{X} \subset \mathcal{S}$ in combinatorial problems is often disconnected under neighborhood relations. Consider vehicle routing: not all permutations of customers represent valid routes (some violate time windows or capacity constraints). The feasible region forms islands in the full solution space, creating barriers that standard local search cannot cross. This infeasibility structure complicates optimization: algorithms must maintain feasibility throughout search or accept cost penalties for infeasible solutions.
+
+Structured combinatorial problems possess exploitable patterns. Spatially-distributed problems (routing, scheduling on maps) exhibit locality: customers nearby in Euclidean space typically should be served consecutively in optimal solutions. Time-windowed problems have temporal structure: tight windows constrain feasible insertion positions. Vehicle routing with heterogeneous fleets (trucks vs. drones) creates assignment structure: certain customer-vehicle pairs are preferable due to capability alignment. Algorithms exploiting these structures dramatically outperform general approaches, motivating problem-specific neural network design.
+
+The distinction between structured and unstructured combinatorial problems is crucial for algorithm selection. Highly structured problems (routing with spatial locality) benefit from neural networks learning problem-specific patterns. Minimally structured problems (abstract assignment) may require more general-purpose exploration strategies.
