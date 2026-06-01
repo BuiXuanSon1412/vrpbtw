@@ -29,6 +29,7 @@ import globals
 from core.agent import BaseAgent
 from core.utils import obs_to_tensor
 
+from core.vec_env import stack_obs, batch_obs_to_tensor
 
 # ---------------------------------------------------------------------------
 # BaseCollector (abstract)
@@ -43,11 +44,7 @@ class BaseCollector(ABC):
     """
 
     @abstractmethod
-    def collect(
-        self,
-        agent: BaseAgent,
-        env: Any,
-    ) -> dict:
+    def collect(self, agent: BaseAgent, env: Any, rollout_length: int) -> dict:
         """Collect trajectories and return batch dict for agent.update().
 
         Args:
@@ -106,13 +103,23 @@ def _compute_gae(
     return advantages, returns
 
 
+# ---------------------------------------------------------------------------
+# GAECollector (Generalized Advantage Estimation)
+# ---------------------------------------------------------------------------
+
+
 class GAECollector(BaseCollector):
-    """Generalized Advantage Estimation collector.
+    """Generalized Advantage Estimation collector for parallel/serial environments.
 
-    Collects one complete episode per call and computes advantages using
-    exponential-weighted moving average over TD residuals.
+    Supports both serial (batch_size=1) and parallel (batch_size>1) collection:
+    - Serial: SubprocVecEnv(n_envs=1) collects from single environment
+    - Parallel: SubprocVecEnv(n_envs=B) collects from B parallel environments
 
-    Note: Each batch is exactly one complete episode (no partial episodes).
+    For each environment, collects rollout_length timesteps and computes
+    per-env advantages using exponential-weighted moving average over TD residuals.
+
+    Returns observations as list of T stacked batches (B, ...) per timestep,
+    enabling unified mini-batch logic in trainer for both serial and parallel cases.
     """
 
     def __init__(
@@ -135,118 +142,137 @@ class GAECollector(BaseCollector):
         self,
         agent: BaseAgent,
         env: Any,
+        rollout_length: int,
     ) -> dict:
-        """Collect one complete episode with GAE advantage estimation.
+        """Collect trajectory data from vectorized environment.
 
-        Collects trajectory steps until episode termination (natural end).
-        Each batch is exactly one complete episode.
+        For SubprocVecEnv with n_envs=B (serial or parallel):
+        - Collects rollout_length timesteps from each of B environments
+        - Computes per-env advantages using GAE
+        - Returns stacked observations (list of T batched dicts)
+
+        This unified method works for both:
+        - Serial: SubprocVecEnv(n_envs=1) with single environment
+        - Parallel: SubprocVecEnv(n_envs=B) with B parallel environments
+
+        Args:
+            agent: Policy agent with act(obs, mask) returning (actions, log_probs, values, entropies)
+            env: SubprocVecEnv instance
+            rollout_length: Target timesteps to collect per environment (required)
+
+        Returns:
+            dict with observations (list of T batched obs dicts), masks, actions, log_probs,
+            advantages, returns, entropies (flattened to B*rollout_length timesteps)
         """
-        observations = []
-        masks = []
-        actions = []
-        log_probs = []
-        values = []
-        entropies = []
-        rewards = []
-        dones = []
 
-        obs, info = env.reset()
-        action_mask = info["action_mask"]
+        n_envs = env.n_envs
+
+        obs_list, info_list = env.reset()
+        action_masks = np.stack([info["action_mask"] for info in info_list])
+
+        obs_buffer = []
+        mask_buffer = []
+        action_buffer = []
+        logprob_buffer = []
+        value_buffer = []
+        entropy_buffer = []
+        reward_buffer = []
+        done_buffer = []
+
+        # Initialize for tracking final episode states (for bootstrap value masking)
+        terminateds: np.ndarray = np.zeros(n_envs, dtype=bool)
+        truncateds: np.ndarray = np.zeros(n_envs, dtype=bool)
 
         with torch.no_grad():
-            is_truncated = False  # Track if episode ended due to truncation vs natural termination
-            while True:  # Collect until episode terminates
-                obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+            for t in range(rollout_length):
+                stacked_obs = stack_obs(obs_list)
+                obs_t = batch_obs_to_tensor(stacked_obs, device=globals.DEVICE)
                 mask_t = torch.tensor(
-                    action_mask, dtype=torch.bool, device=globals.DEVICE
-                ).unsqueeze(0)
-                action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
-                action = int(action_t.item())
+                    action_masks, dtype=torch.bool, device=globals.DEVICE
+                )
 
-                next_obs, reward, terminated, truncated, info = env.step(action)
+                actions_t, log_probs_t, values_t, entropies_t = agent.act(
+                    obs_t, mask_t, deterministic=False
+                )
 
-                observations.append(obs_t)
-                masks.append(mask_t)
-                actions.append(action_t)
-                log_probs.append(lp)
-                values.append(val)
-                entropies.append(ent)
-                rewards.append(reward)
-                dones.append(terminated or truncated)
+                obs_list, rewards, terminateds, truncateds, info_list = env.step(
+                    actions_t.cpu().numpy()
+                )
+                action_masks = np.stack([info["action_mask"] for info in info_list])
 
-                obs = next_obs
-                action_mask = info["action_mask"]
+                obs_buffer.append(stacked_obs)
+                mask_buffer.append(mask_t)
+                action_buffer.append(actions_t)
+                logprob_buffer.append(log_probs_t.squeeze(-1))
+                value_buffer.append(values_t.squeeze(-1))
+                entropy_buffer.append(entropies_t.squeeze(-1))
+                reward_buffer.append(
+                    torch.tensor(rewards, dtype=torch.float32, device=globals.DEVICE)
+                )
+                done_buffer.append(
+                    torch.tensor(
+                        np.logical_or(terminateds, truncateds),
+                        dtype=torch.float32,
+                        device=globals.DEVICE,
+                    )
+                )
 
-                # Exit when episode terminates
-                if terminated or truncated or not action_mask.any():
-                    is_truncated = truncated  # Only True if episode was truncated (not natural termination)
-                    break
+            stacked_final = stack_obs(obs_list)
+            obs_final = batch_obs_to_tensor(stacked_final, device=globals.DEVICE)
+            mask_final = torch.tensor(
+                action_masks, dtype=torch.bool, device=globals.DEVICE
+            )
+            _, _, bootstrap_vals, _ = agent.act(
+                obs_final, mask_final, deterministic=False
+            )
+            bootstrap_vals = bootstrap_vals.squeeze(-1)
+            bootstrap_vals[np.logical_or(terminateds, truncateds)] = 0.0
 
-            # Get bootstrap value only if episode was truncated (not naturally terminated)
-            # For natural termination, value at terminal state is 0
-            if is_truncated and action_mask.any():
-                obs_end = obs_to_tensor(obs, device=globals.DEVICE)
-                mask_end = torch.tensor(
-                    action_mask, dtype=torch.bool, device=globals.DEVICE
-                ).unsqueeze(0)
-                _, _, bootstrap_val, _ = agent.act(obs_end, mask_end, deterministic=False)
-            else:
-                # Natural termination: no future value to bootstrap from
-                bootstrap_val = torch.tensor(0.0, device=globals.DEVICE)
+        # Compute per-env advantages and returns
+        advantages_list = []
+        returns_list = []
 
-        # Compute GAE
-        # Keep observations as-is (may be list of dicts for graph-based envs with dynamic structures)
-        observations_tensor = observations
-        masks_tensor = torch.cat(masks, dim=0)
-        actions_tensor = torch.cat(actions, dim=0)
-        log_probs_tensor = torch.stack(log_probs).squeeze(-1)
-        values_tensor = torch.stack(values).squeeze(-1)
-        entropies_tensor = torch.stack(entropies).squeeze(-1)
-        rewards_tensor = torch.tensor(
-            rewards, dtype=torch.float32, device=globals.DEVICE
-        )
-        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=globals.DEVICE)
+        for b in range(n_envs):
+            rewards_b = torch.stack(
+                [reward_buffer[t][b] for t in range(rollout_length)]
+            )
+            values_b = torch.stack([value_buffer[t][b] for t in range(rollout_length)])
+            dones_b = torch.stack([done_buffer[t][b] for t in range(rollout_length)])
+            v_with_bootstrap = torch.cat([values_b, bootstrap_vals[b : b + 1]], dim=0)
 
-        # Concatenate with bootstrap value for GAE computation
-        # values_tensor is (T,), bootstrap_val is (1,), make them compatible
-        bootstrap_val_1d = bootstrap_val.view(-1)  # Ensure it's 1D
-        values_with_bootstrap = torch.cat([values_tensor, bootstrap_val_1d], dim=0)
+            adv_b, ret_b = _compute_gae(
+                rewards_b,
+                v_with_bootstrap,
+                dones_b,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+            )
+            advantages_list.append(adv_b)
+            returns_list.append(ret_b)
 
-        advantages, returns = _compute_gae(
-            rewards_tensor,
-            values_with_bootstrap,
-            dones_tensor,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-        )
+        advantages = torch.stack(advantages_list, dim=0)
+        returns = torch.stack(returns_list, dim=0)
 
-        # Normalize advantages for PPO stability (prevents NaN in small batches)
+        advantages = advantages.view(-1)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        returns = returns.view(-1)
+
+        masks_stacked = torch.stack(mask_buffer, dim=0)
+        masks_flat = masks_stacked.view(n_envs * rollout_length, -1)
+
+        actions_flat = torch.cat(action_buffer, dim=0)
+        logprobs_flat = torch.cat(logprob_buffer, dim=0)
+        entropies_flat = torch.cat(entropy_buffer, dim=0)
 
         return {
-            "observations": observations_tensor,
-            "masks": masks_tensor,
-            "actions": actions_tensor,
-            "log_probs": log_probs_tensor,
+            "observations": obs_buffer,
+            "masks": masks_flat,
+            "actions": actions_flat,
+            "log_probs": logprobs_flat,
             "advantages": advantages,
             "returns": returns,
-            "entropies": entropies_tensor,
+            "entropies": entropies_flat,
         }
-
-    def _compute_returns(
-        self, rewards: torch.Tensor, dones: torch.Tensor
-    ) -> torch.Tensor:
-        """Not used in overridden collect() but required by interface."""
-        return torch.zeros_like(rewards)
-
-    def _compute_advantages(
-        self,
-        values: torch.Tensor,
-        returns: torch.Tensor,
-        dones: torch.Tensor,
-    ) -> torch.Tensor:
-        """Not used in overridden collect() but required by interface."""
-        return torch.zeros_like(returns)
 
 
 # ---------------------------------------------------------------------------
@@ -273,11 +299,7 @@ class MCCollector(BaseCollector):
             gamma=params.get("gamma", 0.99),
         )
 
-    def collect(
-        self,
-        agent: BaseAgent,
-        env: Any,
-    ) -> dict:
+    def collect(self, agent: BaseAgent, env: Any, rollout_length: int) -> dict:
         """Collect one complete episode and return batch dict."""
         observations = []
         masks = []
@@ -387,11 +409,7 @@ class POMOSampler(BaseCollector):
     def from_config(cls, cfg: Dict[str, Any]) -> "POMOSampler":
         return cls()
 
-    def collect(
-        self,
-        agent: BaseAgent,
-        env: Any,
-    ) -> dict:
+    def collect(self, agent: BaseAgent, env: Any, rollout_length: int) -> dict:
         """Collect episodes from multiple starting points (POMO-style).
 
         For each feasible starting action:
@@ -472,7 +490,9 @@ class POMOSampler(BaseCollector):
                     mask = info["action_mask"]
 
             # Use accumulated per-step rewards (store as tensor scalar for consistency)
-            episode_return = torch.tensor(episode_reward, dtype=torch.float32, device=globals.DEVICE)
+            episode_return = torch.tensor(
+                episode_reward, dtype=torch.float32, device=globals.DEVICE
+            )
             episode_log_probs.append(episode_log_prob)
             episode_returns.append(episode_return)
 

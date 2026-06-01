@@ -69,8 +69,8 @@ trainer:
       enabled: true
       control:
         epochs: 50
-        batches_per_epoch: 100
-        ppo_epochs: 10
+        batches_per_epoch: 200
+        ppo_epochs: 1
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
@@ -121,7 +121,7 @@ environment:
     drone_landing_min: 1.0
     service_time_min: 5.0
     tasks:
-    - 003_N10_F2_C
+    - 001_N10_F2_RC
 device: cpu
 reproducibility:
   seed:
@@ -129,7 +129,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: 107_PPO_N10_C
+  name: PPO_N10_RC
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train

@@ -32,6 +32,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import sys
 from pathlib import Path
 
@@ -170,4 +171,5 @@ def _print_eval(stats: dict, label: str = "Evaluation") -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
     main()

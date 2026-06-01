@@ -213,17 +213,17 @@ class PPOAgent(BaseAgent):
         values_list = []
         for i, obs_t in enumerate(observations):
             mask_t = masks[i:i+1]  # Keep batch dimension (1, n_actions)
-            # Always provide actions for proper log_prob computation in PPO
-            actions_t = batch["actions"][i:i+1]
-            logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=actions_t)
+            logits_t, values_t, _ = self.network.evaluate(obs_t, mask_t, actions=None)
             logits_list.append(logits_t)
             values_list.append(values_t)
-        logits = torch.cat(logits_list, dim=0)
-        values = torch.cat(values_list, dim=0)
+        logits = torch.cat(logits_list, dim=0)  # [T, n_actions]
+        values = torch.cat(values_list, dim=0)  # [T]
 
         # Convert logits to log probabilities for PPO ratio computation
-        log_probs_all = torch.nn.functional.log_softmax(logits, dim=-1)
-        new_log_probs = log_probs_all.gather(-1, batch["actions"].unsqueeze(-1)).squeeze(-1)
+        log_probs_all = torch.nn.functional.log_softmax(logits, dim=-1)  # [T, n_actions]
+        # Gather log probs for the actions taken
+        actions_expanded = batch["actions"].view(-1, 1)  # Ensure [T, 1]
+        new_log_probs = log_probs_all.gather(-1, actions_expanded).squeeze(-1)  # [T]
 
         # Compute ratio and clipped surrogate loss (advantages already normalized by collector)
         ratio = torch.exp(new_log_probs - old_log_probs)
@@ -245,6 +245,16 @@ class PPOAgent(BaseAgent):
             + self.value_coef * value_loss
             + self.entropy_coef * entropy_loss
         )
+
+        # DEBUG: Check loss signs (remove after verification)
+        # If total_loss is consistently negative and decreasing, gradients may be inverted
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            import sys
+            print(f"WARNING: total_loss is {total_loss.item()}", file=sys.stderr)
+            print(f"  policy_loss={policy_loss.item():.6f}", file=sys.stderr)
+            print(f"  value_loss={value_loss.item():.6f}", file=sys.stderr)
+            print(f"  entropy_loss={entropy_loss.item():.6f}", file=sys.stderr)
+            raise RuntimeError(f"NaN or Inf loss detected: {total_loss}")
 
         # Optimization step
         grad_norm = torch.tensor(0.0, device=total_loss.device)

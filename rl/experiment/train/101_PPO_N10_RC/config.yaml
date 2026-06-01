@@ -1,42 +1,41 @@
 trainer:
   name: meta
-  collector:
-    name: gae
-    params:
+  estimators:
+    ppo:
       gamma: 0.99
       gae_lambda: 0.95
   agents:
     meta_agent:
       name: meta
-      learning_rate: 0.001
+      learning_rate: 0.0001
       optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
-      entropy_coef: 0.01
+      entropy_coef: 0.05
       max_grad_norm: 0.5
     sub_agent:
       name: ppo
-      learning_rate: 0.001
+      learning_rate: 0.0001
       optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
-      entropy_coef: 0.01
+      entropy_coef: 0.05
       max_grad_norm: 0.5
     tune_agent:
       name: ppo
-      learning_rate: 0.001
+      learning_rate: 0.0001
       optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
-      entropy_coef: 0.01
+      entropy_coef: 0.05
       max_grad_norm: 0.5
     eval_agent:
       name: ppo
-      learning_rate: 0.001
+      learning_rate: 0.0001
       optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
-      entropy_coef: 0.01
+      entropy_coef: 0.05
       max_grad_norm: 0.5
   evaluators:
     meta_eval:
@@ -63,18 +62,20 @@ trainer:
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
-        patience: 20
+        patience: 1000
         min_delta: 0.0001
     fine_tuning:
       enabled: true
       control:
-        epochs: 50
-        batches_per_epoch: 100
-        ppo_epochs: 3
+        batch_size: 1
+        n_iteration: 100
+        rollout_length: 256
+        ppo_epochs: 1
+        minibatch_size: 32
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
-        patience: 10
+        patience: 1000
         min_delta: 0.0001
 network:
   name: geman
@@ -121,7 +122,7 @@ environment:
     drone_landing_min: 1.0
     service_time_min: 5.0
     tasks:
-    - 003_N10_F2_C
+    - 001_N10_F2_RC
 device: cpu
 reproducibility:
   seed:
@@ -129,7 +130,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: test_105_PPO_N10_C
+  name: 101_PPO_N10_RC
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train

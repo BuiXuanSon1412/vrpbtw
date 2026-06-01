@@ -200,9 +200,8 @@ def build_trainer(
 
     cls = _TRAINER_REGISTRY[trainer_type]
 
-    # Build collector from trainer config
-    collector_cfg = trainer_cfg.get("collector", {})
-    collector = build_collector(collector_cfg)
+    # Extract environment config for vectorized env support
+    env_cfg = cfg.get("environment", {})
 
     return cls.from_config(
         trainer_cfg=trainer_cfg,
@@ -210,7 +209,7 @@ def build_trainer(
         env=env,
         evaluators=evaluators,
         logger=logger,
-        collector=collector,
+        env_cfg=env_cfg,
     )
 
 

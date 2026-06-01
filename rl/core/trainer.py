@@ -26,7 +26,7 @@ from torch.func import functional_call
 
 import globals
 from core.agent import BaseAgent
-from core.collector import BaseCollector
+from core.utils import obs_to_tensor
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ class BaseTrainer(ABC):
         env: Any,
         evaluators: Dict[str, Any],
         logger: Any,
-        collector: BaseCollector,
+        env_cfg: Dict[str, Any],
     ) -> "BaseTrainer":
         """Factory method: instantiate trainer from config.
 
@@ -61,7 +61,7 @@ class BaseTrainer(ABC):
             env: environment instance (has tasks list and reset interface)
             evaluators: dict of evaluator instances (keyed by phase name, or "default" for single-phase)
             logger: logger instance
-            collector: collector instance for trajectory collection
+            env_cfg: environment configuration dict (optional)
         """
         ...
 
@@ -90,14 +90,14 @@ class MetaTrainer(BaseTrainer):
         trainer_cfg: Dict[str, Any],
         evaluators: Dict[str, Any],
         logger: Any,
-        collector: BaseCollector,
+        env_cfg: Dict[str, Any],
     ):
         self.agents = agents
         self.meta_agent = agents["meta_agent"]
         self.sub_agent = agents["sub_agent"]
         self.tune_agent = agents["tune_agent"]
         self.env = env
-        self.collector = collector
+        self.env_cfg = env_cfg or {}
         self.active_tasks = {env.tasks[0]}  # Start with first (easiest) task
         self.meta_evaluator = evaluators["meta_eval"]
         self.fine_evaluator = evaluators["tune_eval"]
@@ -105,6 +105,7 @@ class MetaTrainer(BaseTrainer):
 
         # Extract config from trainer structure
         phases_cfg = trainer_cfg.get("phases", {})
+        estimators_cfg = trainer_cfg.get("estimators", {})
 
         # Get meta_learning phase
         meta_phase = phases_cfg.get("meta_learning", {})
@@ -131,20 +132,33 @@ class MetaTrainer(BaseTrainer):
         fine_control_cfg = fine_tune_phase.get("control", {})
         fine_early_stop = fine_control_cfg.get("early_stopping", {})
 
-        # Fine-tuning config: epochs/batches instead of timesteps
+        # Fine-tuning config: per-task PPO training with optional parallelization
+        # Structure: for each task → for each iteration → collect rollout → PPO updates
+        ppo_estimator = estimators_cfg.get("ppo", {})
         self.fcfg = {
-            "epochs": int(fine_control_cfg.get("epochs", 50)),
-            "batches_per_epoch": int(fine_control_cfg.get("batches_per_epoch", 100)),
-            "ppo_epochs": int(fine_control_cfg.get("ppo_epochs", 3)),
+            # Rollout collection (parallel or serial)
+            "batch_size": int(fine_control_cfg.get("batch_size", 1)),
+            "n_iteration": int(fine_control_cfg.get("n_iteration", 100)),
+            "rollout_length": int(fine_control_cfg.get("rollout_length", 256)),
+            # PPO optimization on collected data
+            "ppo_epochs": int(fine_control_cfg.get("ppo_epochs", 1)),
+            "minibatch_size": int(fine_control_cfg.get("minibatch_size", 32)),
+            # Advantage estimation hyperparameters
+            "gamma": float(ppo_estimator.get("gamma", 0.99)),
+            "gae_lambda": float(ppo_estimator.get("gae_lambda", 0.95)),
+            # Evaluation and checkpointing
             "eval_interval": int(fine_control_cfg.get("eval_interval", 1)),
             "checkpoint_interval": int(fine_control_cfg.get("checkpoint_interval", 10)),
+            # Early stopping
             "patience": int(fine_early_stop.get("patience", 10)),
             "min_delta": float(fine_early_stop.get("min_delta", 0.0001)),
         }
 
         # Training state
         self._total_updates = 0
-        self._best_objective = float("inf")  # For minimization problems, lower is better
+        self._best_objective = float(
+            "inf"
+        )  # For minimization problems, lower is better
         self._patience_counter = 0
         self._curriculum_check_counter = 0
 
@@ -156,7 +170,7 @@ class MetaTrainer(BaseTrainer):
         env: Any,
         evaluators: Dict[str, Any],
         logger: Any,
-        collector: BaseCollector,
+        env_cfg: Dict[str, Any],
     ) -> "MetaTrainer":
         if not env.tasks:
             raise ValueError("MetaTrainer.from_config requires env.tasks")
@@ -170,7 +184,7 @@ class MetaTrainer(BaseTrainer):
             trainer_cfg=trainer_cfg,
             evaluators=evaluators,
             logger=logger,
-            collector=collector,
+            env_cfg=env_cfg,
         )
 
     def train(self) -> Dict[str, Any]:
@@ -325,11 +339,13 @@ class MetaTrainer(BaseTrainer):
                         "meta/loss_mean": 0.0,
                         "meta/loss_std": 0.0,
                     }
-                train_metrics.update({
-                    "meta/num_active_tasks": float(len(self.active_tasks)),
-                    "meta/total_updates": float(self._total_updates),
-                    "meta/epoch_time_s": epoch_time,
-                })
+                train_metrics.update(
+                    {
+                        "meta/num_active_tasks": float(len(self.active_tasks)),
+                        "meta/total_updates": float(self._total_updates),
+                        "meta/epoch_time_s": epoch_time,
+                    }
+                )
 
                 # Evaluation every eval_interval epochs
                 eval_metrics = {}
@@ -424,112 +440,518 @@ class MetaTrainer(BaseTrainer):
         self.logger.log_event("meta_training_complete", self._total_updates, **summary)
         return summary
 
-    def fine_tune(self) -> Dict[str, Any]:
-        """Fine-tune policy on each task independently after meta-training.
+    def collect_episode(
+        self,
+        agent: BaseAgent,
+        env: Any,
+    ) -> Dict[str, Any]:
+        """Collect one complete episode with GAE advantage estimation (meta-learning).
 
-        Uses the tune_agent to adapt the meta-learned policy
-        to each task independently using PPO-style optimization.
+        Used during meta-training to collect complete episodes from serial environment.
+
+        Args:
+            agent: Policy agent
+            env: Single environment instance
+
+        Returns:
+            dict with observations, actions, log_probs, advantages, returns, entropies
+        """
+        from core.collector import _compute_gae
+
+        gamma = 0.99  # Default values for meta-learning
+        gae_lambda = 0.95
+
+        observations = []
+        masks = []
+        actions = []
+        log_probs = []
+        values = []
+        entropies = []
+        rewards = []
+        dones = []
+
+        obs, info = env.reset()
+        action_mask = info["action_mask"]
+
+        with torch.no_grad():
+            is_truncated = False
+            while True:
+                obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+                mask_t = torch.tensor(
+                    action_mask, dtype=torch.bool, device=globals.DEVICE
+                ).unsqueeze(0)
+                action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
+                action = int(action_t.item())
+
+                next_obs, reward, terminated, truncated, info = env.step(action)
+
+                observations.append(obs_t)
+                masks.append(mask_t)
+                actions.append(action_t)
+                log_probs.append(lp)
+                values.append(val)
+                entropies.append(ent)
+                rewards.append(reward)
+                dones.append(terminated or truncated)
+
+                obs = next_obs
+                action_mask = info["action_mask"]
+
+                if terminated or truncated or not action_mask.any():
+                    is_truncated = truncated
+                    break
+
+            # Get bootstrap value at episode end
+            if is_truncated and action_mask.any():
+                obs_end = obs_to_tensor(obs, device=globals.DEVICE)
+                mask_end = torch.tensor(
+                    action_mask, dtype=torch.bool, device=globals.DEVICE
+                ).unsqueeze(0)
+                _, _, bootstrap_val, _ = agent.act(
+                    obs_end, mask_end, deterministic=False
+                )
+            else:
+                bootstrap_val = torch.tensor(0.0, device=globals.DEVICE)
+
+        # Compute GAE
+        observations_tensor = observations
+        masks_tensor = torch.cat(masks, dim=0)
+        actions_tensor = torch.cat(actions, dim=0)
+        log_probs_tensor = torch.stack(log_probs).squeeze(-1)
+        values_tensor = torch.stack(values).squeeze(-1)
+        entropies_tensor = torch.stack(entropies).squeeze(-1)
+        rewards_tensor = torch.tensor(
+            rewards, dtype=torch.float32, device=globals.DEVICE
+        )
+        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=globals.DEVICE)
+
+        bootstrap_val_1d = bootstrap_val.view(-1)
+        values_with_bootstrap = torch.cat([values_tensor, bootstrap_val_1d], dim=0)
+
+        advantages, returns = _compute_gae(
+            rewards_tensor,
+            values_with_bootstrap,
+            dones_tensor,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+        )
+
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        return {
+            "observations": observations_tensor,
+            "masks": masks_tensor,
+            "actions": actions_tensor,
+            "log_probs": log_probs_tensor,
+            "advantages": advantages,
+            "returns": returns,
+            "entropies": entropies_tensor,
+        }
+
+    def collect(
+        self,
+        agent: BaseAgent,
+        env: Any,
+        rollout_length: int,
+    ) -> Dict[str, Any]:
+        """Collect trajectory data with GAE advantage estimation (fine-tuning).
+
+        Collects rollout_length timesteps from vectorized environment (SubprocVecEnv)
+        and computes per-env advantages using GAE.
+
+        Args:
+            agent: Policy agent
+            env: SubprocVecEnv instance
+            rollout_length: Target timesteps to collect per environment
+
+        Returns:
+            dict with observations, actions, log_probs, advantages, returns, entropies
+        """
+        from core.vec_env import stack_obs, batch_obs_to_tensor
+
+        gamma = self.fcfg["gamma"]
+        gae_lambda = self.fcfg["gae_lambda"]
+        n_envs = env.n_envs
+
+        obs_list, info_list = env.reset()
+        action_masks = np.stack([info["action_mask"] for info in info_list])
+
+        obs_buffer = []
+        mask_buffer = []
+        action_buffer = []
+        logprob_buffer = []
+        value_buffer = []
+        entropy_buffer = []
+        reward_buffer = []
+        done_buffer = []
+
+        # Initialize for tracking final episode states (for bootstrap value masking)
+        terminateds: np.ndarray = np.zeros(n_envs, dtype=bool)
+        truncateds: np.ndarray = np.zeros(n_envs, dtype=bool)
+
+        with torch.no_grad():
+            for t in range(rollout_length):
+                stacked_obs = stack_obs(obs_list)
+                obs_t = batch_obs_to_tensor(stacked_obs, device=globals.DEVICE)
+                mask_t = torch.tensor(
+                    action_masks, dtype=torch.bool, device=globals.DEVICE
+                )
+
+                actions_t, log_probs_t, values_t, entropies_t = agent.act(
+                    obs_t, mask_t, deterministic=False
+                )
+
+                obs_list, rewards, terminateds, truncateds, info_list = env.step(
+                    actions_t.cpu().numpy()
+                )
+                action_masks = np.stack([info["action_mask"] for info in info_list])
+
+                obs_buffer.append(stacked_obs)
+                mask_buffer.append(mask_t)
+                action_buffer.append(actions_t)
+                # Keep batch dimension: values_t shape is (n_envs,) from agent.act()
+                logprob_buffer.append(
+                    log_probs_t if log_probs_t.dim() == 1 else log_probs_t.squeeze(-1)
+                )
+                value_buffer.append(
+                    values_t if values_t.dim() == 1 else values_t.squeeze(-1)
+                )
+                entropy_buffer.append(
+                    entropies_t if entropies_t.dim() == 1 else entropies_t.squeeze(-1)
+                )
+                reward_buffer.append(
+                    torch.tensor(rewards, dtype=torch.float32, device=globals.DEVICE)
+                )
+                done_buffer.append(
+                    torch.tensor(
+                        np.logical_or(terminateds, truncateds),
+                        dtype=torch.float32,
+                        device=globals.DEVICE,
+                    )
+                )
+
+            stacked_final = stack_obs(obs_list)
+            obs_final = batch_obs_to_tensor(stacked_final, device=globals.DEVICE)
+            mask_final = torch.tensor(
+                action_masks, dtype=torch.bool, device=globals.DEVICE
+            )
+            _, _, bootstrap_vals, _ = agent.act(
+                obs_final, mask_final, deterministic=False
+            )
+            bootstrap_vals = bootstrap_vals.squeeze(-1)
+            # Mask out bootstrap values for episodes that terminated
+            done_mask = torch.tensor(
+                np.logical_or(terminateds, truncateds),
+                dtype=torch.bool,
+                device=globals.DEVICE,
+            )
+            bootstrap_vals = bootstrap_vals * (~done_mask).float()
+
+        # Compute per-env advantages and returns
+        advantages_list = []
+        returns_list = []
+
+        for b in range(n_envs):
+            rewards_b = torch.stack(
+                [reward_buffer[t][b] for t in range(rollout_length)]
+            )
+            values_b = torch.stack([value_buffer[t][b] for t in range(rollout_length)])
+            dones_b = torch.stack([done_buffer[t][b] for t in range(rollout_length)])
+            v_with_bootstrap = torch.cat([values_b, bootstrap_vals[b : b + 1]], dim=0)
+
+            from core.collector import _compute_gae
+
+            adv_b, ret_b = _compute_gae(
+                rewards_b,
+                v_with_bootstrap,
+                dones_b,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+            )
+            advantages_list.append(adv_b)
+            returns_list.append(ret_b)
+
+        advantages = torch.stack(advantages_list, dim=0)
+        returns = torch.stack(returns_list, dim=0)
+
+        advantages = advantages.view(-1)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        returns = returns.view(-1)
+
+        masks_stacked = torch.stack(mask_buffer, dim=0)
+        masks_flat = masks_stacked.view(n_envs * rollout_length, -1)
+
+        actions_flat = torch.cat(action_buffer, dim=0)
+        logprobs_flat = torch.cat(logprob_buffer, dim=0)
+        entropies_flat = torch.cat(entropy_buffer, dim=0)
+
+        return {
+            "observations": obs_buffer,
+            "masks": masks_flat,
+            "actions": actions_flat,
+            "log_probs": logprobs_flat,
+            "advantages": advantages,
+            "returns": returns,
+            "entropies": entropies_flat,
+        }
+
+    def fine_tune(self) -> Dict[str, Any]:
+        """Fine-tune policy on each task independently using PPO with optional parallelization.
+
+        For each task:
+          1. For each iteration (0 to n_iteration):
+             - Collect rollout_length timesteps from batch_size parallel environments (or 1 serial env)
+             - Compute advantages/returns with GAE per-environment
+          2. PPO optimization:
+             - For each ppo_epoch (0 to ppo_epochs):
+               - Shuffle collected data and do mini-batch SGD with minibatch_size
+               - Compute PPO loss: policy + value + entropy terms
+             - Evaluate and checkpoint
+
+        Parallel collection (batch_size > 1):
+          - Uses SubprocVecEnv: N worker processes, genuine parallelism
+          - Uses GAECollector: per-env GAE computation
+          - Mini-batch loop handles both graph (list of dicts) and tensor observations
+
+        Serial collection (batch_size = 1):
+          - Uses single environment, standard GAECollector
         """
         self._print_header_tune()
         start_time = time.time()
         agent = self.tune_agent
 
-        total_epochs = 0
-        best_objective = float("inf")  # For minimization problems, lower is better
+        # Extract fine-tuning config
+        batch_size = int(self.fcfg.get("batch_size", 1))
+        n_iteration = int(self.fcfg.get("n_iteration", 100))
+        rollout_length = int(self.fcfg.get("rollout_length", 256))
+        ppo_epochs = int(self.fcfg.get("ppo_epochs", 1))
+        minibatch_size = int(self.fcfg.get("minibatch_size", 32))
+        eval_interval = int(self.fcfg.get("eval_interval", 1))
+        checkpoint_interval = int(self.fcfg.get("checkpoint_interval", 10))
+
+        # Validate batch_size
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+
+        # Setup vectorized environment (serial or parallel)
+        from core.vec_env import SubprocVecEnv
+
+        vec_env = SubprocVecEnv(
+            env_class=type(self.env),
+            env_cfg=self.env_cfg,
+            n_envs=batch_size,
+            base_seed=42,
+        )
+
+        best_objective = float("inf")
         task_summaries = {}
 
         try:
             for task_id in self.env.tasks:
                 self._print_header_task(task_id)
-                task_best_objective = float("inf")  # For minimization problems, lower is better
+                task_best_objective = float("inf")
                 task_patience_counter = 0
-                epoch = -1
+                iteration = -1
 
                 try:
-                    for epoch in range(self.fcfg["epochs"]):
-                        epoch_start = time.time()
-                        epoch_losses = []
-                        epoch_grad_norms = []
+                    for iteration in range(n_iteration):
+                        iteration_start = time.time()
+                        loss_buffer = []  # List of dicts: {policy, value, entropy, total}
+                        grad_norm_buffer = []
 
                         try:
-                            for batch_idx in range(self.fcfg["batches_per_epoch"]):
-                                # Collect trajectory
-                                self.env.retask(task_id)
-                                batch = self.collector.collect(agent, self.env)
+                            # Step 1: Collect rollout_length timesteps from parallel/serial environment
+                            # - Parallel: collects from batch_size envs, returns (batch_size * rollout_length) timesteps
+                            # - Serial: collects from 1 env, returns rollout_length timesteps
+                            vec_env.retask(task_id)
+                            batch = self.collect(agent, vec_env, rollout_length)
 
-                                # Multiple gradient steps with mini-batch shuffling (proper PPO)
-                                trajectory_length = len(batch["observations"])
-                                mini_batch_size = max(1, trajectory_length // 4)  # 1/4 of episode per mini-batch
+                            # Prepare collected data for PPO updates
+                            observations = batch["observations"]
+                            masks = batch["masks"]
+                            actions = batch["actions"]
+                            old_log_probs = batch["log_probs"]
+                            advantages = batch["advantages"]
+                            returns = batch["returns"]
+                            entropies = batch["entropies"]
 
-                                for ppo_epoch in range(self.fcfg["ppo_epochs"]):
-                                    # Shuffle trajectory indices for this PPO epoch
-                                    indices = torch.randperm(trajectory_length)
+                            num_timesteps = len(actions)
 
-                                    # Process mini-batches in shuffled order
-                                    for start_idx in range(0, trajectory_length, mini_batch_size):
-                                        end_idx = min(start_idx + mini_batch_size, trajectory_length)
-                                        mini_batch_indices = indices[start_idx:end_idx]
+                            # Step 2: PPO optimization - ppo_epochs passes over collected data
+                            # Each pass: shuffle and do mini-batch SGD on minibatch_size timesteps
+                            for ppo_epoch in range(ppo_epochs):
+                                # Shuffle indices
+                                indices = torch.randperm(
+                                    num_timesteps, device=old_log_probs.device
+                                )
 
-                                        # Create mini-batch from full batch
-                                        mini_batch = {}
-                                        for key, value in batch.items():
-                                            if isinstance(value, torch.Tensor):
-                                                mini_batch[key] = value[mini_batch_indices]
-                                            elif isinstance(value, list):
-                                                # For list of observations (graph-based)
-                                                mini_batch[key] = [value[i.item()] for i in mini_batch_indices]
-                                            else:
-                                                mini_batch[key] = value
+                                # Mini-batch SGD
+                                for start_idx in range(
+                                    0, num_timesteps, minibatch_size
+                                ):
+                                    end_idx = min(
+                                        start_idx + minibatch_size, num_timesteps
+                                    )
+                                    batch_indices = indices[start_idx:end_idx]
 
-                                        # Update on mini-batch
-                                        metrics = agent.update(mini_batch)
-                                        self._total_updates += 1
-                                        loss_val = metrics.get("loss", 0.0)
-                                        loss_val = (
-                                            loss_val.detach()
-                                            if isinstance(loss_val, torch.Tensor)
-                                            else loss_val
+                                    # Extract mini-batch
+                                    if isinstance(observations, list):
+                                        if batch_size > 1:
+                                            mb_observations = []
+                                            for flat_idx in batch_indices.cpu().numpy():
+                                                timestep_idx = flat_idx // batch_size
+                                                env_idx = flat_idx % batch_size
+                                                stacked_obs = observations[timestep_idx]
+                                                single_obs = {}
+                                                for k, v in stacked_obs.items():
+                                                    if "edge_index" in k:
+                                                        single_obs[k] = v
+                                                    else:
+                                                        single_obs[k] = v[
+                                                            env_idx : env_idx + 1
+                                                        ]
+                                                mb_observations.append(single_obs)
+                                        else:
+                                            mb_observations = [
+                                                observations[i]
+                                                for i in batch_indices.cpu().numpy()
+                                            ]
+                                    else:
+                                        mb_observations = observations[batch_indices]
+
+                                    mb_masks = masks[batch_indices]
+                                    mb_actions = actions[batch_indices]
+                                    mb_old_log_probs = old_log_probs[batch_indices]
+                                    mb_advantages = advantages[batch_indices]
+                                    mb_returns = returns[batch_indices]
+                                    mb_entropies = entropies[batch_indices]
+
+                                    # Forward pass
+                                    if isinstance(mb_observations, list):
+                                        logits_list = []
+                                        values_list = []
+                                        for i, obs_t in enumerate(mb_observations):
+                                            mask_t = mb_masks[i : i + 1]
+                                            logits_t, values_t, _ = (
+                                                agent.network.evaluate(
+                                                    obs_t, mask_t, actions=None
+                                                )
+                                            )
+                                            logits_list.append(logits_t)
+                                            values_list.append(values_t)
+                                        logits = torch.cat(logits_list, dim=0)
+                                        values = torch.cat(values_list, dim=0)
+                                    else:
+                                        logits, values, _ = agent.network.evaluate(
+                                            mb_observations, mb_masks, actions=None
                                         )
-                                        epoch_losses.append(float(loss_val))
-                                        grad_norm_val = metrics.get("grad_norm", -1.0)
-                                        grad_norm_val = (
-                                            grad_norm_val.detach()
-                                            if isinstance(grad_norm_val, torch.Tensor)
-                                            else grad_norm_val
+
+                                    # Compute PPO loss
+                                    log_probs_all = torch.nn.functional.log_softmax(
+                                        logits, dim=-1
+                                    )
+                                    new_log_probs = log_probs_all.gather(
+                                        -1, mb_actions.unsqueeze(-1)
+                                    ).squeeze(-1)
+
+                                    clip_eps = getattr(agent, "clip_eps", 0.2)
+                                    value_coef = getattr(agent, "value_coef", 0.5)
+                                    entropy_coef = getattr(agent, "entropy_coef", 0.01)
+
+                                    ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                                    surr1 = ratio * mb_advantages
+                                    surr2 = (
+                                        torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+                                        * mb_advantages
+                                    )
+                                    policy_loss = -torch.min(surr1, surr2).mean()
+
+                                    value_loss = torch.nn.functional.mse_loss(
+                                        values, mb_returns
+                                    )
+
+                                    if (
+                                        isinstance(mb_entropies, torch.Tensor)
+                                        and mb_entropies.numel() > 0
+                                    ):
+                                        entropy_loss = -mb_entropies.mean()
+                                    else:
+                                        entropy_loss = torch.tensor(
+                                            0.0, device=policy_loss.device
                                         )
-                                        epoch_grad_norms.append(float(grad_norm_val))
+
+                                    total_loss = (
+                                        policy_loss
+                                        + value_coef * value_loss
+                                        + entropy_coef * entropy_loss
+                                    )
+
+                                    # Optimization step
+                                    if agent.optimizer is not None:
+                                        agent.optimizer.zero_grad()
+                                        total_loss.backward()
+                                        grad_norm = torch.nn.utils.clip_grad_norm_(
+                                            agent.network.parameters(),
+                                            agent.max_grad_norm,
+                                        )
+                                        agent.optimizer.step()
+                                        loss_buffer.append({
+                                            "policy": float(policy_loss.detach()),
+                                            "value": float(value_loss.detach()),
+                                            "entropy": float(entropy_loss.detach()),
+                                            "total": float(total_loss.detach()),
+                                        })
+                                        grad_norm_buffer.append(float(grad_norm))
+
+                                    self._total_updates += 1
+
                         except Exception as e:
                             self.logger.log_exception(
                                 e,
-                                message=f"Error during batch collection/update for task {task_id} in epoch {epoch}",
+                                message=f"Error during PPO update for task {task_id} in iteration {iteration}",
                                 step=self._total_updates,
                                 task=str(task_id),
-                                epoch=epoch,
+                                iteration=iteration,
                             )
                             raise
 
-                        # Per-epoch aggregation
-                        epoch_time = time.time() - epoch_start
+                        # Per-iteration aggregation
+                        iteration_time = time.time() - iteration_start
                         train_metrics = {
-                            "tune/loss_mean": float(np.mean(epoch_losses))
-                            if epoch_losses
-                            else 0.0,
-                            "tune/loss_std": float(np.std(epoch_losses))
-                            if epoch_losses
-                            else 0.0,
-                            "tune/grad_norm_mean": float(np.mean(epoch_grad_norms))
-                            if epoch_grad_norms
-                            else 0.0,
-                            "tune/grad_norm_max": float(np.max(epoch_grad_norms))
-                            if epoch_grad_norms
-                            else 0.0,
                             "tune/total_updates": float(self._total_updates),
-                            "tune/epoch_time_s": epoch_time,
+                            "tune/iteration_time_s": iteration_time,
                         }
+
+                        # Log aggregated loss components and gradient norm at eval_interval
+                        if (iteration + 1) % eval_interval == 0 and loss_buffer:
+                            # Extract loss components
+                            policy_losses = torch.tensor([l["policy"] for l in loss_buffer])
+                            value_losses = torch.tensor([l["value"] for l in loss_buffer])
+                            entropy_losses = torch.tensor([l["entropy"] for l in loss_buffer])
+                            total_losses = torch.tensor([l["total"] for l in loss_buffer])
+                            grad_norm_array = torch.tensor(grad_norm_buffer)
+
+                            train_metrics.update({
+                                # Policy loss
+                                "tune/loss_policy_mean": float(policy_losses.mean()),
+                                "tune/loss_policy_std": float(policy_losses.std()),
+                                # Value loss (raw, not scaled)
+                                "tune/loss_value_mean": float(value_losses.mean()),
+                                "tune/loss_value_std": float(value_losses.std()),
+                                # Entropy loss (raw, not scaled)
+                                "tune/loss_entropy_mean": float(entropy_losses.mean()),
+                                "tune/loss_entropy_std": float(entropy_losses.std()),
+                                # Total (combined)
+                                "tune/loss_total_mean": float(total_losses.mean()),
+                                "tune/loss_total_std": float(total_losses.std()),
+                                # Gradient norm
+                                "tune/grad_norm_mean": float(grad_norm_array.mean()),
+                                "tune/grad_norm_std": float(grad_norm_array.std()),
+                            })
 
                         # Evaluation
                         eval_metrics = {}
-                        if (epoch + 1) % self.fcfg["eval_interval"] == 0:
+                        if (iteration + 1) % eval_interval == 0:
                             try:
                                 eval_stats = self.fine_evaluator.evaluate(task_id)
                                 eval_metrics = {
@@ -539,9 +961,8 @@ class MetaTrainer(BaseTrainer):
                                 mean_obj = eval_stats.get(
                                     "mean_objective", float("inf")
                                 )
-                                if (
-                                    mean_obj
-                                    < task_best_objective - self.fcfg["min_delta"]
+                                if mean_obj < task_best_objective - self.fcfg.get(
+                                    "min_delta", 0.0001
                                 ):
                                     task_best_objective = mean_obj
                                     task_patience_counter = 0
@@ -549,7 +970,7 @@ class MetaTrainer(BaseTrainer):
                                         f"tune_best_{task_id}",
                                         {
                                             "network_state": agent.network.state_dict(),
-                                            "epoch": epoch + 1,
+                                            "iteration": iteration + 1,
                                         },
                                     )
                                     self.logger.log_event(
@@ -561,31 +982,39 @@ class MetaTrainer(BaseTrainer):
                                 else:
                                     task_patience_counter += 1
 
-                                if task_patience_counter >= self.fcfg["patience"]:
-                                    self.logger.log_event(
-                                        "tune_early_stop",
-                                        self._total_updates,
-                                        task=task_id,
-                                        patience=self.fcfg["patience"],
-                                    )
-                                    break
                             except Exception as e:
                                 self.logger.log_exception(
                                     e,
-                                    message=f"Error during evaluation for task {task_id} in epoch {epoch}",
+                                    message=f"Error during evaluation for task {task_id} in iteration {iteration}",
                                     step=self._total_updates,
                                     task=str(task_id),
-                                    epoch=epoch,
+                                    iteration=iteration,
                                 )
                                 raise
 
-                        # Log all metrics
+                        # Checkpointing
+                        if (iteration + 1) % checkpoint_interval == 0:
+                            self.logger.save_checkpoint(
+                                f"tune_{task_id}_iter_{iteration + 1}",
+                                {
+                                    "network_state": agent.network.state_dict(),
+                                    "iteration": iteration + 1,
+                                },
+                            )
+
+                        # Log metrics
                         all_metrics = {**train_metrics, **eval_metrics}
-                        print_keys = [
-                            "tune/loss_mean",
-                            "tune/grad_norm_mean",
-                            "tune/total_updates",
-                        ]
+                        print_keys = ["tune/total_updates"]
+
+                        # Add loss components to print if available
+                        if "tune/loss_policy_mean" in train_metrics:
+                            print_keys.extend([
+                                "tune/loss_policy_mean",
+                                "tune/loss_value_mean",
+                                "tune/loss_entropy_mean",
+                                "tune/loss_total_mean",
+                            ])
+
                         if eval_metrics:
                             print_keys.append("eval/mean_objective")
                             if "eval/mean_service_rate" in eval_metrics:
@@ -598,29 +1027,31 @@ class MetaTrainer(BaseTrainer):
                             step=self._total_updates,
                             print_keys=print_keys,
                         )
+
                 except Exception as e:
                     self.logger.log_exception(
                         e,
-                        message=f"Error during fine-tuning epoch loop for task {task_id}",
+                        message=f"Error during fine-tuning iteration loop for task {task_id}",
                         step=self._total_updates,
                         task=str(task_id),
                     )
                     raise
 
                 best_objective = min(best_objective, task_best_objective)
-                total_epochs += epoch + 1
                 task_summaries[task_id] = {
                     "best_objective": float(task_best_objective),
-                    "epochs_completed": epoch + 1,
+                    "iterations_completed": iteration + 1,
                 }
 
+                # Final checkpoint
                 self.logger.save_checkpoint(
                     f"tune_final_{task_id}",
                     {
                         "network_state": agent.network.state_dict(),
-                        "epoch": epoch + 1,
+                        "iteration": iteration + 1,
                     },
                 )
+
         except Exception as e:
             self.logger.log_exception(
                 e,
@@ -628,10 +1059,12 @@ class MetaTrainer(BaseTrainer):
                 step=self._total_updates,
             )
             raise
+        finally:
+            vec_env.close()
 
         summary = {
             "stop_reason": "completed",
-            "total_epochs": total_epochs,
+            "total_iterations": n_iteration,
             "total_updates": self._total_updates,
             "best_objective": best_objective,
             "training_time_s": round(time.time() - start_time, 1),
@@ -645,7 +1078,7 @@ class MetaTrainer(BaseTrainer):
             f"\n{'=' * 64}\n"
             f"  Fine-Tuning Phase\n"
             f"  Tasks: {len(self.env.tasks)}\n"
-            f"  Epochs/task: {self.fcfg['epochs']} × {self.fcfg['batches_per_epoch']} batches\n"
+            f"  Iterations/task: {self.fcfg['n_iteration']} (rollout_length={self.fcfg['rollout_length']}, ppo_epochs={self.fcfg['ppo_epochs']})\n"
             f"{'=' * 64}"
         )
 
@@ -679,7 +1112,7 @@ class MetaTrainer(BaseTrainer):
 
             # Inner loop: collect support set and compute gradients (FOMAML)
             self.env.retask(task_id)
-            support_batch = self.collector.collect(sub_agent, self.env)
+            support_batch = self.collect_episode(sub_agent, self.env)
 
             # Compute support loss manually to retain graph for adapted parameters
             observations = support_batch["observations"]
@@ -713,24 +1146,34 @@ class MetaTrainer(BaseTrainer):
                 f"Support logits batch shape {logits.shape[:-1]} != actions shape {support_batch['actions'].shape}"
             )
 
-            # Normalize advantages for stable PPO training (consistent with fine-tuning)
-            advantages_normalized = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
             ratio = torch.exp(
                 torch.nn.functional.log_softmax(logits, dim=-1)
                 .gather(-1, support_batch["actions"].unsqueeze(-1))
                 .squeeze(-1)
                 - old_log_probs
             )
-            surr1 = ratio * advantages_normalized
-            surr2 = (
-                torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-                * advantages_normalized
-            )
-            support_loss = -torch.min(
-                surr1, surr2
-            ).mean() + value_coef * torch.nn.functional.mse_loss(
-                values, returns
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * advantages
+            support_policy_loss = -torch.min(surr1, surr2).mean()
+            support_value_loss = torch.nn.functional.mse_loss(values, returns)
+
+            # Entropy regularization (match fine-tuning phase)
+            entropy_coef = getattr(self.sub_agent, "entropy_coef", 0.01)
+            support_entropies = support_batch.get("entropies", torch.tensor(0.0))
+            if (
+                isinstance(support_entropies, torch.Tensor)
+                and support_entropies.numel() > 0
+            ):
+                support_entropy_loss = -support_entropies.mean()
+            else:
+                support_entropy_loss = torch.tensor(
+                    0.0, device=support_policy_loss.device
+                )
+
+            support_loss = (
+                support_policy_loss
+                + value_coef * support_value_loss
+                + entropy_coef * support_entropy_loss
             )
             support_loss_tensor = support_loss.detach()
 
@@ -759,7 +1202,7 @@ class MetaTrainer(BaseTrainer):
 
             # Outer loop: collect query set and evaluate with adapted parameters
             self.env.retask(task_id)
-            query_batch = self.collector.collect(sub_agent, self.env)
+            query_batch = self.collect_episode(sub_agent, self.env)
 
             # Evaluate query loss with adapted parameters using functional_call
             # This maintains gradient flow through the adaptation for proper meta-gradients
@@ -810,6 +1253,7 @@ class MetaTrainer(BaseTrainer):
             query_old_log_probs = query_batch["log_probs"]
             query_advantages = query_batch["advantages"]
             query_returns = query_batch["returns"]
+            query_entropies = query_batch.get("entropies", torch.tensor(0.0))
 
             # Verify shape compatibility for gather operation
             assert query_logits.shape[:-1] == query_batch["actions"].shape, (
@@ -824,13 +1268,25 @@ class MetaTrainer(BaseTrainer):
             )
             query_surr1 = query_ratio * query_advantages
             query_surr2 = (
-                torch.clamp(query_ratio, 1 - clip_eps, 1 + clip_eps)
-                * query_advantages
+                torch.clamp(query_ratio, 1 - clip_eps, 1 + clip_eps) * query_advantages
             )
-            query_loss = -torch.min(
-                query_surr1, query_surr2
-            ).mean() + value_coef * torch.nn.functional.mse_loss(
-                query_values, query_returns
+            query_policy_loss = -torch.min(query_surr1, query_surr2).mean()
+            query_value_loss = torch.nn.functional.mse_loss(query_values, query_returns)
+
+            # Entropy regularization (match fine-tuning phase)
+            entropy_coef = getattr(self.sub_agent, "entropy_coef", 0.01)
+            if (
+                isinstance(query_entropies, torch.Tensor)
+                and query_entropies.numel() > 0
+            ):
+                query_entropy_loss = -query_entropies.mean()
+            else:
+                query_entropy_loss = torch.tensor(0.0, device=query_policy_loss.device)
+
+            query_loss = (
+                query_policy_loss
+                + value_coef * query_value_loss
+                + entropy_coef * query_entropy_loss
             )
 
             task_losses.append(query_loss)
@@ -866,20 +1322,22 @@ class MetaTrainer(BaseTrainer):
             algo = "INVALID"
 
         # Calculate training statistics
-        # Note: Each batch is one complete episode (no fixed rollout_length)
+        # Meta-learning: each batch is one complete episode
         meta_batches = (
             self.mcfg["epochs"] * self.mcfg["batches_per_epoch"]
             if self.enable_meta_learning
             else 0
         )
 
-        fine_batches = (
-            self.fcfg["epochs"] * self.fcfg["batches_per_epoch"]
+        # Fine-tuning: n_iteration rollout collections per task × rollout_length timesteps
+        fine_timesteps = (
+            len(self.env.tasks) * self.fcfg["n_iteration"] * self.fcfg["rollout_length"]
             if self.enable_fine_tuning
             else 0
         )
+        # PPO updates: ppo_epochs passes over all collected timesteps
         fine_ppo_steps = (
-            fine_batches * self.fcfg["ppo_epochs"] if self.enable_fine_tuning else 0
+            fine_timesteps * self.fcfg["ppo_epochs"] if self.enable_fine_tuning else 0
         )
 
         total_updates = meta_batches + fine_ppo_steps
@@ -922,13 +1380,12 @@ class MetaTrainer(BaseTrainer):
             lines.extend(
                 [
                     f"  Fine-Tuning Phase",
-                    f"    Epochs              : {self.fcfg['epochs']}",
-                    f"    Batches/Epoch       : {self.fcfg['batches_per_epoch']}",
-                    f"    PPO Epochs          : {self.fcfg['ppo_epochs']} (updates per batch)",
-                    f"    Episodes/Batch      : 1 (collects complete episode per batch)",
-                    f"    Total Batches       : {fine_batches:,}",
+                    f"    Iterations/Task     : {self.fcfg['n_iteration']}",
+                    f"    Rollout Length      : {self.fcfg['rollout_length']} timesteps per iteration",
+                    f"    PPO Epochs          : {self.fcfg['ppo_epochs']} (gradient passes per rollout)",
+                    f"    Mini-batch Size     : {self.fcfg['minibatch_size']}",
+                    f"    Total Timesteps     : {fine_timesteps:,}",
                     f"    Total PPO Updates   : {fine_ppo_steps:,}",
-                    f"    Total Episodes      : {fine_batches:,}",
                     f"    Tasks               : {len(self.env.tasks)} task(s)",
                 ]
             )
@@ -937,8 +1394,8 @@ class MetaTrainer(BaseTrainer):
             [
                 f"",
                 f"Training Summary",
-                f"  Total Episodes          : {meta_batches + fine_batches:,} (one episode per batch)",
-                f"  Total Updates           : {total_updates:,}",
+                f"  Total Timesteps (Meta+Fine) : {meta_batches + fine_timesteps:,}",
+                f"  Total Gradient Updates      : {total_updates:,}",
                 f"  Environment             : {self.env.__class__.__name__}",
                 f"  Device                  : {globals.DEVICE}",
                 f"",
@@ -1008,14 +1465,12 @@ class POMOTrainer(BaseTrainer):
         trainer_cfg: Dict[str, Any],
         evaluators: Dict[str, Any],
         logger: Any,
-        collector: BaseCollector,
     ):
         self.agents = agents
         self.train_agent = agents["train_agent"]
         self.env = env
         self.evaluator = evaluators["train_eval"]
         self.logger = logger
-        self.collector = collector
 
         # Setup task iteration from env
         if not env.tasks:
@@ -1048,7 +1503,7 @@ class POMOTrainer(BaseTrainer):
         env: Any,
         evaluators: Dict[str, Any],
         logger: Any,
-        collector: BaseCollector,
+        env_cfg: Dict[str, Any],
     ) -> "POMOTrainer":
         return cls(
             agents=agents,
@@ -1056,8 +1511,110 @@ class POMOTrainer(BaseTrainer):
             trainer_cfg=trainer_cfg,
             evaluators=evaluators,
             logger=logger,
-            collector=collector,
         )
+
+    def collect(
+        self,
+        agent: BaseAgent,
+        env: Any,
+    ) -> Dict[str, Any]:
+        """Collect episodes from multiple starting points (POMO-style).
+
+        For each feasible starting action:
+          - Compute log_prob for that action
+          - Take that action and roll out complete episode
+          - Accumulate log probabilities and rewards
+          - Store (episode_log_prob_sum, episode_return)
+
+        Args:
+            agent: agent instance
+            env: environment (already initialized with a task)
+
+        Returns:
+            dict with keys:
+              - "log_probs": list of summed log_probs (one per episode)
+              - "rewards": list of episode returns (one per episode)
+              - "entropies": list of episode entropies
+        """
+        obs, info = env.reset()
+        action_mask = info["action_mask"]
+
+        # Compute log probs for all feasible starting actions
+        obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+        mask_t = torch.tensor(
+            action_mask, dtype=torch.bool, device=globals.DEVICE
+        ).unsqueeze(0)
+
+        feasible_actions = np.where(action_mask)[0].tolist()
+        if not feasible_actions:
+            return {"log_probs": [], "rewards": [], "entropies": []}
+
+        action_log_probs = {}
+        for action in feasible_actions:
+            act_t = torch.tensor([action], dtype=torch.long, device=globals.DEVICE)
+            log_prob, _, _ = agent.network.evaluate(obs_t, mask_t, actions=act_t)
+            action_log_probs[int(action)] = log_prob
+
+        episode_log_probs = []
+        episode_returns = []
+        episode_entropies = []
+
+        for starting_action, starting_log_prob in action_log_probs.items():
+            obs, info = env.reset()
+
+            # First step with starting action
+            episode_log_prob = starting_log_prob
+            episode_reward = 0.0
+            step_entropies = []
+            next_obs, reward, terminated, truncated, next_info = env.step(
+                int(starting_action)
+            )
+            episode_reward += reward if reward is not None else 0.0
+
+            if not terminated and not truncated and next_info["action_mask"].any():
+                obs = next_obs
+                mask = next_info["action_mask"]
+
+                # Collect rest of trajectory, accumulating log probabilities and rewards
+                while True:
+                    obs_t = obs_to_tensor(obs, device=globals.DEVICE)
+                    mask_t = torch.tensor(
+                        mask, dtype=torch.bool, device=globals.DEVICE
+                    ).unsqueeze(0)
+                    action_t, lp, _, entropy = agent.act(
+                        obs_t, mask_t, deterministic=False
+                    )
+                    action = int(action_t.item())
+                    episode_log_prob = episode_log_prob + lp
+                    step_entropies.append(entropy)
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    episode_reward += reward if reward is not None else 0.0
+
+                    if terminated or truncated or not info["action_mask"].any():
+                        break
+
+                    obs = next_obs
+                    mask = info["action_mask"]
+
+            # Store episode results
+            episode_return = torch.tensor(
+                episode_reward, dtype=torch.float32, device=globals.DEVICE
+            )
+            episode_log_probs.append(episode_log_prob)
+            episode_returns.append(episode_return)
+
+            # Compute episode-level entropy as mean of step-level entropies
+            if step_entropies:
+                episode_entropy = torch.stack(step_entropies).mean()
+            else:
+                episode_entropy = torch.tensor(0.0, device=globals.DEVICE)
+            episode_entropies.append(episode_entropy)
+
+        return {
+            "log_probs": episode_log_probs,
+            "rewards": episode_returns,
+            "entropies": episode_entropies,
+        }
 
     def train(self) -> Dict[str, Any]:
         """Run POMO training loop with epoch-based batch training per task.
@@ -1102,7 +1659,7 @@ class POMOTrainer(BaseTrainer):
 
                     for _ in range(instances_per_batch):
                         self.env.retask(task_id)
-                        batch_data = self.collector.collect(agent, self.env)
+                        batch_data = self.collect(agent, self.env)
                         # Stack episodes for this instance
                         if batch_data["log_probs"]:
                             instance_log_probs = torch.stack(batch_data["log_probs"])
@@ -1147,9 +1704,7 @@ class POMOTrainer(BaseTrainer):
                     ]
                     if gpu_rewards:
                         batch_rewards_gpu = torch.cat(gpu_rewards)
-                        epoch_returns.extend(
-                            batch_rewards_gpu.detach().cpu().tolist()
-                        )
+                        epoch_returns.extend(batch_rewards_gpu.detach().cpu().tolist())
                     # Handle non-tensor rewards
                     for r in batch_rewards:
                         if not isinstance(r, torch.Tensor):
