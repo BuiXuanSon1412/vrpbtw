@@ -35,7 +35,7 @@ if filename and subfolder:
 if filename:
     files.append(filename)
 else:
-    subfolder_path = os.path.join(RESULT_ROOT, subfolder)
+    subfolder_path = os.path.join(RESULT_ROOT, "f", subfolder)
     files = [
         file
         for file in os.listdir(subfolder_path)
@@ -47,7 +47,7 @@ def run(filename: str):
     parts = filename.split("_")
     subfolder = parts[1]
     data_path = os.path.join(DATA_ROOT, subfolder, filename)
-    result_path = os.path.join(RESULT_ROOT, subfolder, filename)
+    result_path = os.path.join(RESULT_ROOT, "f", subfolder, filename)
 
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Data file not found: {data_path}")
