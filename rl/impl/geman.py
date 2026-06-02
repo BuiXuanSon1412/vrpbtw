@@ -367,15 +367,7 @@ class GEMANActorCritic(ActorCritic):
         self.graph_encoder = GraphEncoder(D, n_graph_layers, drop)
         self.node_decoder = NodeDecoder(D, clip)
         self.vehicle_decoder = VehicleDecoder(D, clip)
-        self.value_head = nn.Sequential(
-            nn.Linear(D * 3, D),
-            nn.ReLU(),
-            nn.Dropout(drop),
-            nn.Linear(D, D),
-            nn.ReLU(),
-            nn.Dropout(drop),
-            nn.Linear(D, 1)
-        )
+        self.value_head = nn.Sequential(nn.Linear(D * 3, D), nn.ReLU(), nn.Linear(D, 1))
 
         ortho_init: bool = (
             cfg.get("regularization", {}).get("ortho_init", True)
