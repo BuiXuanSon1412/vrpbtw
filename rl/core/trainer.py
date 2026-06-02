@@ -157,8 +157,8 @@ class MetaTrainer(BaseTrainer):
         # Training state
         self._total_updates = 0
         self._best_objective = float(
-            "inf"
-        )  # For minimization problems, lower is better
+            "-inf"
+        )  # For maximization problems, higher is better
         self._patience_counter = 0
         self._curriculum_check_counter = 0
 
@@ -236,9 +236,9 @@ class MetaTrainer(BaseTrainer):
             "total_updates": self._total_updates,
             "total_epochs": meta_summary.get("total_epochs", 0)
             + fine_tune_summary.get("total_epochs", 0),
-            "best_objective": min(
-                meta_summary.get("best_objective", float("inf")),
-                fine_tune_summary.get("best_objective", float("inf")),
+            "best_objective": max(
+                meta_summary.get("best_objective", float("-inf")),
+                fine_tune_summary.get("best_objective", float("-inf")),
             ),
             "training_time_s": round(time.time() - start_time, 1),
             "meta_learning_enabled": self.enable_meta_learning,
@@ -356,8 +356,8 @@ class MetaTrainer(BaseTrainer):
                         eval_stats = self.meta_evaluator.evaluate(eval_task_id)
                         eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
-                        mean_obj = eval_stats.get("mean_objective", float("inf"))
-                        if mean_obj < self._best_objective - self.mcfg["min_delta"]:
+                        mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                        if mean_obj > self._best_objective + self.mcfg["min_delta"]:
                             self._best_objective = mean_obj
                             self._patience_counter = 0
                             self.logger.save_checkpoint(
@@ -743,13 +743,13 @@ class MetaTrainer(BaseTrainer):
             base_seed=42,
         )
 
-        best_objective = float("inf")
+        best_objective = float("-inf")
         task_summaries = {}
 
         try:
             for task_id in self.env.tasks:
                 self._print_header_task(task_id)
-                task_best_objective = float("inf")
+                task_best_objective = float("-inf")
                 task_patience_counter = 0
                 iteration = -1
 
@@ -959,9 +959,9 @@ class MetaTrainer(BaseTrainer):
                                 }
 
                                 mean_obj = eval_stats.get(
-                                    "mean_objective", float("inf")
+                                    "mean_objective", float("-inf")
                                 )
-                                if mean_obj < task_best_objective - self.fcfg.get(
+                                if mean_obj > task_best_objective + self.fcfg.get(
                                     "min_delta", 0.0001
                                 ):
                                     task_best_objective = mean_obj
@@ -1037,7 +1037,7 @@ class MetaTrainer(BaseTrainer):
                     )
                     raise
 
-                best_objective = min(best_objective, task_best_objective)
+                best_objective = max(best_objective, task_best_objective)
                 task_summaries[task_id] = {
                     "best_objective": float(task_best_objective),
                     "iterations_completed": iteration + 1,
@@ -1754,7 +1754,7 @@ class POMOTrainer(BaseTrainer):
             self._print_header_task(task_id)
             self.env.retask(task_id)
 
-            best_objective = float("inf")  # For minimization problems, lower is better
+            best_objective = float("-inf")  # For maximization problems, higher is better
             best_epoch = -1
             patience_counter = 0
 
@@ -1875,8 +1875,8 @@ class POMOTrainer(BaseTrainer):
                     eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
                     # Track best objective with early stopping
-                    mean_obj = eval_stats.get("mean_objective", float("inf"))
-                    if mean_obj < best_objective - self.tcfg["min_delta"]:
+                    mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                    if mean_obj > best_objective + self.tcfg["min_delta"]:
                         best_objective = mean_obj
                         best_epoch = epoch + 1
                         patience_counter = 0

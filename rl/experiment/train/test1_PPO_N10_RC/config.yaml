@@ -67,7 +67,7 @@ trainer:
     fine_tuning:
       enabled: true
       control:
-        batch_size: 1
+        batch_size: 2
         n_iteration: 100
         rollout_length: 256
         ppo_epochs: 3
@@ -130,7 +130,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: test_PPO_N10_RC
+  name: test1_PPO_N10_RC
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train
