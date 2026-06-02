@@ -1,20 +1,28 @@
 """
 scripts/plot_solution.py
 ------------------------
-Visualize truck routes and drone trips from trained checkpoints.
+Generate problem instances for specific tasks and plot solutions from trained checkpoints.
 
-Loads checkpoints for a specific task and plots solution routes on a 100x100 map.
-Generates two plots: one from best checkpoint and one from final checkpoint.
+Generates fresh instances for a task and runs trained agent to solve them,
+then visualizes the resulting solutions (truck routes and drone trips).
+
+Task IDs are read from config.yaml of each experiment.
 
 Usage:
-  # Plot solutions for default task (009_N50_F5_C)
-  python scripts/plot_solution.py
+  # Generate and plot 3 instances for all tasks across all experiments
+  python scripts/plot_solution.py --num-instances 3
 
-  # Plot solutions for specific task
-  python scripts/plot_solution.py 003_N10_F2_C
+  # Plot 5 instances for specific experiment
+  python scripts/plot_solution.py --num-instances 5 --exp-name PPO_N10_RC
 
-  # Use specific experiment (if multiple experiments have the same task)
-  python scripts/plot_solution.py 009_N50_F5_C --experiment 202_PPO_N50_C
+  # Plot specific task from specific experiment
+  python scripts/plot_solution.py --num-instances 3 --exp-name PPO_N10_RC --task-id 001_N10_F2_RC
+
+  # Plot specific task across all experiments
+  python scripts/plot_solution.py --num-instances 3 --task-id 001_N10_F2_RC
+
+  # Use GPU and custom seed
+  python scripts/plot_solution.py --num-instances 3 --device cuda --seed 42
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,33 +41,43 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import globals
 from config import load_config
 from core import SeedManager
-from core.environment import Solution
 from core.registry import build_agents, build_environment
 from core.utils import obs_to_tensor
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Plot truck routes and drone trips from trained checkpoints.",
+        description="Generate and plot solutions from trained checkpoints",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "task_id",
-        nargs="?",
-        default="009_N50_F5_C",
-        help="Task ID (default: 009_N50_F5_C). Format: {difficulty}_N{customers}_F{fleets}_{distribution}",
+        "--num-instances",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Number of instances to generate and plot per task (default: 3)",
     )
     p.add_argument(
-        "--experiment",
+        "--exp-name",
+        type=str,
         default=None,
         metavar="NAME",
-        help="Specific experiment name. If not provided, uses first experiment with the task.",
+        help="Specific experiment directory name (e.g., PPO_N10_RC). If not specified, use all experiments.",
     )
     p.add_argument(
-        "--output-dir",
+        "--task-id",
+        type=str,
         default=None,
-        metavar="PATH",
-        help="Output directory for plots (default: experiment/train/{experiment_name}/artifacts/)",
+        metavar="TASK",
+        help="Specific task ID to plot (e.g., 001_N10_F2_RC). If not specified, plot all tasks.",
+    )
+    p.add_argument(
+        "--checkpoint-type",
+        type=str,
+        default="best",
+        choices=["best", "final"],
+        metavar="TYPE",
+        help="Which checkpoint to use (best or final, default: best)",
     )
     p.add_argument(
         "--device",
@@ -74,62 +92,86 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="SEED",
         help="Random seed (default: 42)",
     )
+    p.add_argument(
+        "--map-size",
+        type=float,
+        default=100.0,
+        metavar="SIZE",
+        help="Map size for visualization (default: 100.0)",
+    )
+    p.add_argument(
+        "--dpi",
+        type=int,
+        default=150,
+        metavar="DPI",
+        help="DPI for saved figures (default: 150)",
+    )
     return p
 
 
-def _find_experiments_with_task(task_id: str) -> list[Path]:
-    """Find all experiments in experiment/train/ that have the given task and checkpoints."""
+def _find_experiments() -> List[Path]:
+    """Find all experiments in experiment/train/."""
     train_dir = Path("experiment/train")
     if not train_dir.exists():
-        raise FileNotFoundError(f"Training directory not found: {train_dir}")
+        return []
 
     experiments = []
     for exp_dir in sorted(train_dir.iterdir()):
-        if not exp_dir.is_dir():
-            continue
-
-        config_path = exp_dir / "config.yaml"
-        if not config_path.exists():
-            continue
-
-        # Check if checkpoints directory exists
-        checkpoint_dir = exp_dir / "checkpoints"
-        if not checkpoint_dir.exists():
-            continue
-
-        try:
-            cfg = load_config(str(config_path))
-            tasks = cfg.get("environment", {}).get("properties", {}).get("tasks", [])
-            if task_id in tasks:
-                experiments.append(exp_dir)
-        except Exception:
-            continue
+        if exp_dir.is_dir() and (exp_dir / "config.yaml").exists():
+            experiments.append(exp_dir)
 
     return experiments
 
 
-def _get_checkpoints(experiment_dir: Path) -> tuple[Path, Path]:
-    """Get best and final checkpoints from experiment."""
+def _filter_experiments(
+    experiments: List[Path],
+    exp_name: Optional[str] = None,
+) -> List[Path]:
+    """Filter experiments by exact name."""
+    if exp_name is None:
+        return experiments
+
+    filtered = []
+    for exp_dir in experiments:
+        if exp_dir.name == exp_name:
+            filtered.append(exp_dir)
+
+    return filtered
+
+
+def _get_tasks_from_config(config_path: Path) -> List[str]:
+    """Extract task IDs from config.yaml."""
+    try:
+        cfg = load_config(str(config_path))
+        tasks = cfg.get("environment", {}).get("properties", {}).get("tasks", [])
+        return list(tasks) if tasks else []
+    except Exception as e:
+        print(f"    Warning: Could not load config from {config_path}: {e}")
+        return []
+
+
+def _get_checkpoint(experiment_dir: Path, task_id: str, checkpoint_type: str) -> Optional[Path]:
+    """Get checkpoint for a specific task."""
     checkpoint_dir = experiment_dir / "checkpoints"
     if not checkpoint_dir.exists():
-        raise FileNotFoundError(f"Checkpoints directory not found: {checkpoint_dir}")
+        return None
 
-    best_checkpoints = sorted(checkpoint_dir.glob("*tune_best*.pt"))
-    final_checkpoints = sorted(checkpoint_dir.glob("*tune_final*.pt"))
+    # Find checkpoint matching task_id and type
+    pattern = f"*{checkpoint_type}*{task_id}*"
+    matches = list(checkpoint_dir.glob(pattern))
 
-    if not best_checkpoints:
-        raise FileNotFoundError(f"No best checkpoints found in {checkpoint_dir}")
-    if not final_checkpoints:
-        raise FileNotFoundError(f"No final checkpoints found in {checkpoint_dir}")
+    if matches:
+        return sorted(matches)[-1]
 
-    return best_checkpoints[-1], final_checkpoints[-1]
+    return None
 
 
-def _plot_routes(
-    solution: Solution,
+def _plot_solution(
+    solution: Any,
     output_path: Path,
     env: Any = None,
     map_size: float = 100.0,
+    dpi: int = 150,
 ) -> None:
     """Plot truck routes and drone trips on a 2D map."""
     metadata = solution.metadata
@@ -137,11 +179,15 @@ def _plot_routes(
     drone_trips = metadata.get("drone_trips", [])
 
     # Get coordinates from environment
-    if env is None or not hasattr(env, "coords"):
-        print(f"Warning: Could not extract coordinates from environment")
-        return
+    coords = None
+    if env is not None and hasattr(env, "coords"):
+        coords = env.coords
+    elif hasattr(solution, "coords"):
+        coords = solution.coords
 
-    coords = env.coords
+    if coords is None:
+        print(f"    Warning: Could not extract coordinates")
+        return
 
     fig, ax = plt.subplots(figsize=(8, 8))
 
@@ -157,7 +203,7 @@ def _plot_routes(
             for i in range(len(route) - 1):
                 x1, y1 = coords[route[i]]
                 x2, y2 = coords[route[i + 1]]
-                ax.plot([x1, x2], [y1, y2], "b-", linewidth=1.5)
+                ax.plot([x1, x2], [y1, y2], "b-", linewidth=1.5, alpha=0.7)
 
     # Plot drone trips (red edges)
     for vehicle_trips in drone_trips:
@@ -166,79 +212,42 @@ def _plot_routes(
                 for i in range(len(trip) - 1):
                     x1, y1 = coords[trip[i]]
                     x2, y2 = coords[trip[i + 1]]
-                    ax.plot([x1, x2], [y1, y2], "r-", linewidth=1.5)
+                    ax.plot([x1, x2], [y1, y2], "r-", linewidth=1.5, alpha=0.7)
 
-    # Plot all nodes (black dots)
-    ax.scatter(coords[:, 0], coords[:, 1], c="black", s=10, zorder=3)
+    # Plot all nodes
+    ax.scatter(coords[1:, 0], coords[1:, 1], c="black", s=20, zorder=3, label="Customers")
+    ax.scatter(coords[0, 0], coords[0, 1], c="green", s=50, zorder=4, marker="s", label="Depot")
 
-    ax.set_title(
-        f"Objective: {solution.objective:.2f} | "
-        f"Served: {metadata.get('served_count', 0)}/{metadata.get('n_customers', 0)}"
-    )
+    objective = solution.objective
+    served = metadata.get("served_count", 0)
+    total = metadata.get("n_customers", 0)
+
+    ax.set_title(f"Objective: {objective:.2f} | Served: {served}/{total}")
+    ax.legend(loc="upper right")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {output_path}")
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    print(f"      Saved: {output_path}")
     plt.close(fig)
 
 
-def _evaluate_checkpoint(
-    checkpoint_path: Path,
-    cfg: Dict[str, Any],
-    device: str,
-    seed: int,
-    output_dir: Path,
+def _run_inference(
+    agent: Any,
+    env: Any,
     task_id: str,
-    checkpoint_type: str,
-) -> None:
-    """Evaluate checkpoint and generate plot."""
-
-    print(f"\n  Checkpoint ({checkpoint_type}): {checkpoint_path.name}")
-
-    # Set reproducibility
-    reproducibility_cfg = cfg.get("reproducibility", {})
-    seed_cfg = reproducibility_cfg.get("seed", {})
-    seed_mgr = SeedManager(
-        random_seed=seed_cfg.get("random_seed", seed),
-        numpy_seed=seed_cfg.get("numpy_seed", seed),
-        torch_seed=seed_cfg.get("torch_seed", seed),
-    )
-    seed_mgr.seed_everything()
-
-    globals.DEVICE = device
-
-    # Build environment and agents
-    env = build_environment(cfg)
-    agents = build_agents(cfg=cfg)
-    agent = next(iter(agents.values()))
-
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    if isinstance(checkpoint, dict) and "network_state" in checkpoint:
-        agent.network.load_state_dict(checkpoint["network_state"])
-    elif isinstance(checkpoint, dict) and "agent" in checkpoint:
-        agent.network.load_state_dict(checkpoint["agent"])
-    elif isinstance(checkpoint, dict):
-        agent.network.load_state_dict(checkpoint)
-
-    agent.network.eval()
-
-    # Retask environment for the specific task
+    device: str,
+) -> Any:
+    """Run inference on environment and return solution."""
     env.retask(task_id)
-
-    # Reset environment
     obs, info = env.reset()
 
-    # Greedy decoding
     with torch.no_grad():
         mask = info["action_mask"]
         done = False
 
         while not done:
             obs_tensor = obs_to_tensor(obs, device=device)
-            mask_tensor = torch.tensor(mask, dtype=torch.bool, device=device).unsqueeze(
-                0
-            )
+            mask_tensor = torch.tensor(mask, dtype=torch.bool, device=device).unsqueeze(0)
 
             action, _, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=False)
             action = int(action.item())
@@ -247,94 +256,139 @@ def _evaluate_checkpoint(
             mask = info["action_mask"]
             done = terminated or truncated
 
-    # Get current solution
-    solution = env.current_solution()
-
-    # Plot solution
-    output_path = output_dir / f"solution_{checkpoint_type}.png"
-    _plot_routes(solution, output_path, env=env)
-
-    print(
-        f"    Objective: {solution.objective:.2f} | "
-        f"Served: {solution.metadata.get('served_count', 0)}/{solution.metadata.get('n_customers', 0)}"
-    )
+    return env.current_solution()
 
 
 def main() -> None:
     args = _build_parser().parse_args()
 
-    task_id = args.task_id
+    print(f"\n{'=' * 80}")
+    print(f"  Generating and Plotting Solutions")
+    print(f"{'=' * 80}")
 
-    print(f"\n{'=' * 70}")
-    print(f"  Task ID: {task_id}")
-
-    # Find experiments with this task
-    experiments = _find_experiments_with_task(task_id)
+    # Find experiments
+    experiments = _find_experiments()
     if not experiments:
-        raise FileNotFoundError(f"No experiments found with task {task_id}")
+        print("  No experiments found in experiment/train/")
+        return
 
-    # Select experiment
-    if args.experiment:
-        exp_dir = Path("experiment/train") / args.experiment
-        if not exp_dir.exists():
-            raise FileNotFoundError(f"Experiment not found: {exp_dir}")
+    # Filter by exp_name if specified
+    if args.exp_name:
+        experiments = _filter_experiments(experiments, exp_name=args.exp_name)
+        if not experiments:
+            print(f"  No experiments found matching: {args.exp_name}")
+            return
 
-        # Verify experiment has the requested task
+    print(f"  Found {len(experiments)} experiment(s)")
+    print(f"  Num instances per task: {args.num_instances}")
+    print(f"  Checkpoint type: {args.checkpoint_type}")
+    print(f"  Device: {args.device}")
+    if args.task_id:
+        print(f"  Task filter: {args.task_id}")
+    if args.exp_name:
+        print(f"  Experiment filter: {args.exp_name}")
+    print()
+
+    total_plots = 0
+    globals.DEVICE = args.device
+
+    # Process each experiment
+    for exp_idx, exp_dir in enumerate(experiments, 1):
+        exp_name = exp_dir.name
         config_path = exp_dir / "config.yaml"
-        cfg_check = load_config(str(config_path))
-        tasks = cfg_check.get("environment", {}).get("properties", {}).get("tasks", [])
-        if task_id not in tasks:
-            raise ValueError(
-                f"Experiment {args.experiment} does not have task {task_id}. Available tasks: {tasks}"
-            )
-    else:
-        exp_dir = experiments[0]
 
-    print(f"  Experiment: {exp_dir.name}")
-    print(f"  Found {len(experiments)} experiment(s) with this task")
+        if not config_path.exists():
+            print(f"  {exp_idx}. {exp_name}")
+            print(f"     Warning: config.yaml not found, skipping")
+            continue
 
-    # Load training config
-    config_path = exp_dir / "config.yaml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
+        # Load config and setup reproducibility
+        try:
+            cfg = load_config(str(config_path))
+        except Exception as e:
+            print(f"  {exp_idx}. {exp_name}")
+            print(f"     Warning: Could not load config: {e}")
+            continue
 
-    cfg = load_config(str(config_path))
+        reproducibility_cfg = cfg.get("reproducibility", {})
+        seed_cfg = reproducibility_cfg.get("seed", {})
+        seed_mgr = SeedManager(
+            random_seed=seed_cfg.get("random_seed", args.seed),
+            numpy_seed=seed_cfg.get("numpy_seed", args.seed),
+            torch_seed=seed_cfg.get("torch_seed", args.seed),
+        )
+        seed_mgr.seed_everything()
 
-    # Setup output directory
-    output_dir = Path(args.output_dir or exp_dir / "artifacts")
-    output_dir.mkdir(parents=True, exist_ok=True)
+        # Get tasks from config
+        tasks = _get_tasks_from_config(config_path)
+        if not tasks:
+            print(f"  {exp_idx}. {exp_name}")
+            print(f"     Warning: No tasks found in config, skipping")
+            continue
 
-    print(f"  Output Directory: {output_dir}")
+        # Filter tasks if specified - exact match
+        if args.task_id:
+            tasks = [t for t in tasks if t == args.task_id]
+            if not tasks:
+                print(f"  {exp_idx}. {exp_name}")
+                print(f"     Task '{args.task_id}' not found in config")
+                continue
 
-    # Get checkpoints
-    best_checkpoint, final_checkpoint = _get_checkpoints(exp_dir)
-    print(f"  Found checkpoints: best and final")
+        print(f"  {exp_idx}. {exp_name} ({len(tasks)} task(s))")
 
-    # Generate plots
-    print(f"\n{'=' * 70}")
-    print(f"  Generating plots...")
-    _evaluate_checkpoint(
-        checkpoint_path=best_checkpoint,
-        cfg=cfg,
-        device=args.device,
-        seed=args.seed,
-        output_dir=output_dir,
-        task_id=task_id,
-        checkpoint_type="best",
-    )
+        # Build environment and agents
+        try:
+            env = build_environment(cfg)
+            agents = build_agents(cfg=cfg)
+            agent = next(iter(agents.values()))
+        except Exception as e:
+            print(f"     Warning: Could not build environment/agents: {e}")
+            continue
 
-    _evaluate_checkpoint(
-        checkpoint_path=final_checkpoint,
-        cfg=cfg,
-        device=args.device,
-        seed=args.seed,
-        output_dir=output_dir,
-        task_id=task_id,
-        checkpoint_type="final",
-    )
+        # Process each task
+        for task_id in tasks:
+            # Get checkpoint
+            checkpoint_path = _get_checkpoint(exp_dir, task_id, args.checkpoint_type)
+            if not checkpoint_path or not checkpoint_path.exists():
+                print(f"     {task_id}: No {args.checkpoint_type} checkpoint found")
+                continue
 
-    print(f"\n{'=' * 70}")
-    print(f"  Plots saved to: {output_dir}\n")
+            # Load checkpoint
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=args.device)
+                if isinstance(checkpoint, dict) and "network_state" in checkpoint:
+                    agent.network.load_state_dict(checkpoint["network_state"])
+                elif isinstance(checkpoint, dict) and "agent" in checkpoint:
+                    agent.network.load_state_dict(checkpoint["agent"])
+                elif isinstance(checkpoint, dict):
+                    agent.network.load_state_dict(checkpoint)
+            except Exception as e:
+                print(f"     {task_id}: Could not load checkpoint: {e}")
+                continue
+
+            agent.network.eval()
+
+            print(f"     {task_id} ({args.num_instances} instance(s))")
+
+            # Create output directory
+            output_dir = exp_dir / "artifacts" / "solutions" / task_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate and plot instances
+            for instance_idx in range(args.num_instances):
+                try:
+                    solution = _run_inference(agent, env, task_id, args.device)
+                    output_path = output_dir / f"instance_{instance_idx:02d}_solution.png"
+                    _plot_solution(solution, output_path, env=env, map_size=args.map_size, dpi=args.dpi)
+                    total_plots += 1
+                except Exception as e:
+                    print(f"       instance {instance_idx}: Error - {e}")
+                    continue
+
+    print()
+    print(f"{'=' * 80}")
+    print(f"  Total plots generated: {total_plots}")
+    print(f"{'=' * 80}\n")
 
 
 if __name__ == "__main__":
