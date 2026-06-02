@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import numpy as np
 
 
@@ -56,24 +57,51 @@ def load_metrics_jsonl(jsonl_path: Path) -> List[Dict]:
     return metrics
 
 
-def find_exp_dirs(exp_ids: Optional[List[int]] = None) -> List[Path]:
-    """Find experiment directories."""
+def find_exp_dirs(exp_specs: Optional[List[str]] = None) -> List[Path]:
+    """Find experiment directories by ID or name.
+
+    Supports both formats:
+    - Numeric IDs: "100" matches "100_PPO_N10_RC"
+    - Official names: "PPO_N10_RC" matches exact directory "PPO_N10_RC"
+
+    Args:
+        exp_specs: List of experiment identifiers (numeric IDs or exact names)
+    """
     base_dir = Path("experiment/train")
     if not base_dir.exists():
         return []
+
+    # Parse specs into numeric IDs and names
+    numeric_ids = []
+    names = []
+    if exp_specs:
+        for spec in exp_specs:
+            try:
+                numeric_ids.append(int(spec))
+            except ValueError:
+                names.append(spec)
 
     exp_dirs = []
     for d in sorted(base_dir.iterdir()):
         if not d.is_dir():
             continue
 
-        # Extract exp ID from directory name (e.g., "100_PPO_N10_C" -> 100)
-        try:
-            exp_id = int(d.name.split("_")[0])
-            if exp_ids is None or exp_id in exp_ids:
+        if exp_specs is None:
+            # No filter, include all
+            exp_dirs.append(d)
+        else:
+            # Try to extract numeric ID from start of directory name
+            try:
+                dir_id = int(d.name.split("_")[0])
+                if dir_id in numeric_ids:
+                    exp_dirs.append(d)
+                    continue
+            except (ValueError, IndexError):
+                pass
+
+            # Try exact directory name match
+            if d.name in names:
                 exp_dirs.append(d)
-        except (ValueError, IndexError):
-            continue
 
     return exp_dirs
 
@@ -111,36 +139,30 @@ def plot_convergence_per_task(
     if not metrics:
         return
 
-    # Extract metric arrays
-    steps = []
-    loss_means = []
-    loss_stds = []
+    # Extract metric arrays (aligned by step)
+    steps_loss = []
+    loss_totals = []
+    steps_grad = []
     grad_norms = []
+    steps_obj = []
     objectives = []
+    steps_sr = []
     service_rates = []
 
     for m in metrics:
         if "step" not in m:
             continue
 
-        steps.append(m["step"])
-
-        # Handle both tune/ and train/ prefixes
+        # Handle both dense per-update logging (tune/loss_total, train/loss_total)
+        # and per-epoch aggregation (tune/loss_mean, train/loss_mean for backward compatibility)
         loss_key = None
-        for key in ["tune/loss_mean", "train/loss_mean"]:
+        for key in ["tune/loss_total", "train/loss_total", "tune/loss_mean", "train/loss_mean"]:
             if key in m:
                 loss_key = key
                 break
         if loss_key:
-            loss_means.append(m[loss_key])
-
-        loss_std_key = None
-        for key in ["tune/loss_std", "train/loss_std"]:
-            if key in m:
-                loss_std_key = key
-                break
-        if loss_std_key:
-            loss_stds.append(m[loss_std_key])
+            steps_loss.append(m["step"])
+            loss_totals.append(m[loss_key])
 
         grad_key = None
         for key in ["tune/grad_norm_mean", "train/grad_norm_mean"]:
@@ -148,33 +170,28 @@ def plot_convergence_per_task(
                 grad_key = key
                 break
         if grad_key:
+            steps_grad.append(m["step"])
             grad_norms.append(m[grad_key])
 
         if "eval/mean_objective" in m:
+            steps_obj.append(m["step"])
             objectives.append(m["eval/mean_objective"])
 
         if "eval/mean_service_rate" in m:
+            steps_sr.append(m["step"])
             service_rates.append(m["eval/mean_service_rate"])
 
-    if not steps:
+    if not (steps_loss or steps_obj or steps_sr or steps_grad):
         return
 
     if output_dir is None:
         output_dir = exp_dir / "artifacts"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Plot 1: Loss convergence
-    if loss_means:
+    # Plot 1: Loss convergence (total loss per update)
+    if loss_totals:
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(steps[:len(loss_means)], loss_means, "b-", linewidth=2, label="loss_mean")
-        if loss_stds:
-            loss_stds_trimmed = loss_stds[:len(loss_means)]
-            ax.fill_between(
-                steps[:len(loss_means)],
-                np.array(loss_means) - np.array(loss_stds_trimmed),
-                np.array(loss_means) + np.array(loss_stds_trimmed),
-                alpha=0.2,
-            )
+        ax.plot(steps_loss, loss_totals, "b-", linewidth=1.5, label="loss_total")
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss")
         ax.set_title(f"Training Loss Convergence - {exp_dir.name}")
@@ -192,7 +209,7 @@ def plot_convergence_per_task(
     if objectives:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(
-            steps[:len(objectives)],
+            steps_obj,
             objectives,
             "g-",
             linewidth=2,
@@ -222,7 +239,7 @@ def plot_convergence_per_task(
     if service_rates:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(
-            steps[:len(service_rates)],
+            steps_sr,
             service_rates,
             "m-",
             linewidth=2,
@@ -238,7 +255,7 @@ def plot_convergence_per_task(
         ax.set_xlabel("Step")
         ax.set_ylabel("Service Rate")
         ax.set_title(f"Service Rate Convergence - {exp_dir.name}")
-        ax.set_ylim([0, 1.05])
+        ax.set_ylim((0, 1.05))
         ax.grid(True, alpha=0.3)
         ax.legend()
         plt.tight_layout()
@@ -252,7 +269,7 @@ def plot_convergence_per_task(
     # Plot 4: Gradient norm stability
     if grad_norms:
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(steps[:len(grad_norms)], grad_norms, "orange", linewidth=2, label="grad_norm_mean")
+        ax.plot(steps_grad, grad_norms, "orange", linewidth=2, label="grad_norm_mean")
         ax.axhline(y=1.0, color="r", linestyle="--", alpha=0.5, label="safe_bound=1.0")
         ax.set_xlabel("Step")
         ax.set_ylabel("Gradient Norm")
@@ -281,7 +298,8 @@ def plot_convergence_comparison(
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     fig.suptitle(f"Convergence Comparison (Experiments)", fontsize=14, fontweight="bold")
 
-    colors = plt.cm.tab10(np.linspace(0, 1, len(exp_dirs)))
+    cmap = cm.get_cmap('tab10')
+    colors = cmap(np.linspace(0, 1, len(exp_dirs)))
 
     for idx, exp_dir in enumerate(exp_dirs):
         color = colors[idx]
@@ -296,24 +314,25 @@ def plot_convergence_comparison(
         if not metrics:
             continue
 
-        # Extract data
-        steps = []
+        # Extract data (aligned by metric type)
+        steps_obj = []
         objectives = []
+        steps_sr = []
         service_rates = []
 
         for m in metrics:
-            if "step" in m:
-                steps.append(m["step"])
             if "eval/mean_objective" in m:
+                steps_obj.append(m["step"])
                 objectives.append(m["eval/mean_objective"])
             if "eval/mean_service_rate" in m:
+                steps_sr.append(m["step"])
                 service_rates.append(m["eval/mean_service_rate"])
 
         # Plot objective
         ax = axes[0, 0]
         if objectives:
             ax.plot(
-                steps[:len(objectives)],
+                steps_obj,
                 objectives,
                 color=color,
                 linewidth=2,
@@ -326,7 +345,7 @@ def plot_convergence_comparison(
         ax = axes[0, 1]
         if service_rates:
             ax.plot(
-                steps[:len(service_rates)],
+                steps_sr,
                 service_rates,
                 color=color,
                 linewidth=2,
@@ -372,7 +391,7 @@ def plot_convergence_comparison(
     axes[0, 1].set_ylabel("Service Rate")
     axes[0, 1].set_title("Service Rate Convergence Comparison")
     axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].set_ylim([0, 1.05])
+    axes[0, 1].set_ylim((0, 1.05))
     axes[0, 1].legend()
 
     axes[1, 0].set_ylabel("Best Objective")
@@ -381,7 +400,7 @@ def plot_convergence_comparison(
 
     axes[1, 1].set_ylabel("Best Service Rate")
     axes[1, 1].set_title("Best Service Rate by Experiment")
-    axes[1, 1].set_ylim([0, 1.05])
+    axes[1, 1].set_ylim((0, 1.05))
     axes[1, 1].grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
@@ -404,9 +423,8 @@ def main():
     )
     parser.add_argument(
         "--exp-ids",
-        type=int,
         nargs="+",
-        help="Experiment IDs to plot (e.g., 100 102 106)",
+        help="Experiment IDs (numeric, e.g., 100 102) or names (e.g., PPO_N10_RC MetaTrainer_NoMetaLearning)",
     )
     parser.add_argument(
         "--phase",

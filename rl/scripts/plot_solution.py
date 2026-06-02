@@ -236,9 +236,11 @@ def _evaluate_checkpoint(
 
         while not done:
             obs_tensor = obs_to_tensor(obs, device=device)
-            mask_tensor = torch.tensor(mask, dtype=torch.bool, device=device).unsqueeze(0)
+            mask_tensor = torch.tensor(mask, dtype=torch.bool, device=device).unsqueeze(
+                0
+            )
 
-            action, _, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=True)
+            action, _, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=False)
             action = int(action.item())
 
             obs, reward, terminated, truncated, info = env.step(action)
@@ -282,7 +284,9 @@ def main() -> None:
         cfg_check = load_config(str(config_path))
         tasks = cfg_check.get("environment", {}).get("properties", {}).get("tasks", [])
         if task_id not in tasks:
-            raise ValueError(f"Experiment {args.experiment} does not have task {task_id}. Available tasks: {tasks}")
+            raise ValueError(
+                f"Experiment {args.experiment} does not have task {task_id}. Available tasks: {tasks}"
+            )
     else:
         exp_dir = experiments[0]
 

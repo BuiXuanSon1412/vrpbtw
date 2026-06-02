@@ -1476,6 +1476,57 @@ class VRPBTWEnv(Environment):
     This is O(N^2) numpy work — fast enough for N<=50.
     """
 
+    def _filter_edges_sparse(self, src: np.ndarray, dst: np.ndarray, state: "VRPBTWState") -> tuple:
+        """Sparse edge filtering: keep only routing-relevant edges.
+
+        Removes edges involving served nodes to reduce graph complexity during routing.
+        Produces variable-size edge sets depending on state.
+
+        Args:
+            src, dst: Complete edge indices (N*(N-1),)
+            state: Current problem state
+
+        Returns:
+            (truck_edge_indices, drone_edge_indices) - filtered edge pairs
+        """
+        # Keep routing-relevant nodes
+        keep_truck = ~state.served  # unserved customers
+        keep_truck[DEPOT] = True
+        for k in range(self.K):
+            keep_truck[int(state.truck_node[k])] = True
+            if state.drone_active[k]:
+                for lc_idx in state.drone_land_indices[k]:
+                    lc_node = state.truck_routes[k][lc_idx]
+                    keep_truck[lc_node] = True
+
+        keep_drone = keep_truck.copy()
+        for k in range(self.K):
+            keep_drone[int(state.drone_node[k])] = True
+
+        t_mask = keep_truck[src] & keep_truck[dst]
+        d_mask = keep_drone[src] & keep_drone[dst]
+
+        truck_edge_index = np.stack([src[t_mask], dst[t_mask]], axis=0).astype(np.int32)
+        drone_edge_index = np.stack([src[d_mask], dst[d_mask]], axis=0).astype(np.int32)
+
+        return truck_edge_index, drone_edge_index
+
+    def _filter_edges_complete(self, src: np.ndarray, dst: np.ndarray, state: "VRPBTWState") -> tuple:
+        """Complete edge filtering: keep all edges.
+
+        Returns full complete graph (all src-dst pairs). Enables efficient batching
+        across multiple parallel environments since graphs have fixed size.
+
+        Args:
+            src, dst: Complete edge indices (N*(N-1),)
+            state: Current problem state (unused, kept for API consistency)
+
+        Returns:
+            (truck_edge_indices, drone_edge_indices) - all edges
+        """
+        edge_index = np.stack([src, dst], axis=0).astype(np.int32)
+        return edge_index, edge_index  # Same edges for both truck and drone
+
     def state_to_obs(self, state) -> dict:
         N1 = self.n_customers + 1
         # Universal spatial normalizer: longest possible distance (Manhattan, corner to corner)
@@ -1573,55 +1624,39 @@ class VRPBTWEnv(Environment):
             np.float32
         )
 
-        # ── Sparse edge sets ──────────────────────────────────────────────
-        #
-        # Truck subgraph — keep endpoints that are routing-relevant for the truck:
-        #   • unserved customers        (future truck targets)
-        #   • depot                     (always kept — trucks return, drones land)
-        #   • current truck node(s)     (planning origin)
-        #   • landing candidates        (post-launch truck nodes the active drone
-        #                                can rendezvous with; kept so the GNN
-        #                                propagates structure around those sites)
-        #
-        # Drone subgraph — same keep set as truck, plus the current drone node:
-        #   • current drone node(s)     (active: extend-trip or land decisions;
-        #                                inactive: next-launch origin)
-        #
-        # Edges where EITHER endpoint falls outside the keep set are dropped.
-        # Nodes left with no edges in either subgraph still participate in the
-        # attention encoders (NodeEncoder / VehicleEncoder) but receive no GNN
-        # message aggregation — their Z_graph embedding is feature-only.
+        # ── Filter edges using sparsification strategy ────────────────────
+        # Use _filter_edges_complete for fixed-size graphs (batching)
+        # Use _filter_edges_sparse for variable-size graphs (efficiency)
+        # Swap method call below to change strategy:
+        #   self._filter_edges_complete(src, dst, state)  # ← Fixed-size (batching-friendly)
+        #   self._filter_edges_sparse(src, dst, state)    # ← Variable-size (efficiency)
+        truck_edge_index, drone_edge_index = self._filter_edges_complete(src, dst, state)
 
-        keep_truck = ~state.served  # unserved customers
-        keep_truck[DEPOT] = True
-        for k in range(self.K):
-            keep_truck[int(state.truck_node[k])] = True  # current truck pos
-            if state.drone_active[k]:
-                for lc_idx in state.drone_land_indices[k]:  # feasible landing indices
-                    lc_node = state.truck_routes[k][lc_idx]
-                    keep_truck[lc_node] = True
+        # Get edge attributes for selected edges
+        if truck_edge_index.shape[1] == len(src):
+            # Complete graph: all edges selected (truck_edge_index has all edges)
+            truck_edge_attr = truck_edge_attr_all
+            drone_edge_attr = drone_edge_attr_all
+        else:
+            # Sparse graph: need to find which edges were selected
+            # Create masks by matching edge pairs
+            edge_pairs_all = set(zip(src, dst))
+            t_pairs = set(zip(truck_edge_index[0], truck_edge_index[1]))
+            d_pairs = set(zip(drone_edge_index[0], drone_edge_index[1]))
 
-        keep_drone = keep_truck.copy()
-        for k in range(self.K):
-            keep_drone[int(state.drone_node[k])] = True  # current drone pos
+            t_mask = np.array([(src[i], dst[i]) in t_pairs for i in range(len(src))])
+            d_mask = np.array([(src[i], dst[i]) in d_pairs for i in range(len(src))])
 
-        t_mask = keep_truck[src] & keep_truck[dst]
-        d_mask = keep_drone[src] & keep_drone[dst]
-
-        truck_edge_index = np.stack([src[t_mask], dst[t_mask]], axis=0).astype(
-            np.int32
-        )  # (2, E_t)
-        drone_edge_index = np.stack([src[d_mask], dst[d_mask]], axis=0).astype(
-            np.int32
-        )  # (2, E_d)
+            truck_edge_attr = truck_edge_attr_all[t_mask]
+            drone_edge_attr = drone_edge_attr_all[d_mask]
 
         return {
-            "node_features": node_features,  # (N+1, 5)
-            "vehicle_features": vehicle_features,  # (2K,  5)
-            "truck_edge_index": truck_edge_index,  # (2,   E_t)
-            "truck_edge_attr": truck_edge_attr_all[t_mask],  # (E_t, 2)
-            "drone_edge_index": drone_edge_index,  # (2,   E_d)
-            "drone_edge_attr": drone_edge_attr_all[d_mask],  # (E_d, 2)
+            "node_features": node_features,
+            "vehicle_features": vehicle_features,
+            "truck_edge_index": truck_edge_index,
+            "truck_edge_attr": truck_edge_attr,
+            "drone_edge_index": drone_edge_index,
+            "drone_edge_attr": drone_edge_attr,
         }
 
     # ------------------------------------------------------------------
