@@ -49,7 +49,7 @@ def run(filename):
 
     n_folder = parts[1]  # "N10"
 
-    output_dir = os.path.join(RESULT_ROOT, "cost", n_folder)
+    output_dir = os.path.join(RESULT_ROOT, "f", n_folder)
     os.makedirs(output_dir, exist_ok=True)
 
     output_path = os.path.join(output_dir, filename)
@@ -630,7 +630,7 @@ def run(filename):
                 "tardiness": w2,
             },
             "status": status_str,
-            "objective": solver.Objective().Value(),
+            "objective": -solver.Objective().Value(),
             "time": running_time,
             "routes": [],
         }

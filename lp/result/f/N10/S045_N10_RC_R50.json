@@ -4,8 +4,8 @@
     "tardiness": 0.0
   },
   "status": "Optimal",
-  "objective": -9221.567238358086,
-  "time": 6.758006811141968,
+  "objective": -10778.432761641914,
+  "time": 5.52817177772522,
   "routes": [
     {
       "id": 1,
