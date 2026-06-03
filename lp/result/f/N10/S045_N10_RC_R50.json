@@ -1,11 +1,10 @@
 {
-  "weights": {
-    "cost": 1.0,
-    "tardiness": 0.0
-  },
   "status": "Optimal",
-  "objective": -10778.432761641914,
-  "time": 5.52817177772522,
+  "objective": 9221.567238358086,
+  "f2_cost": 4778.432761641915,
+  "f1_num_served": 7,
+  "f1_service_rate": 0.7,
+  "time": 6.3724753856658936,
   "routes": [
     {
       "id": 1,

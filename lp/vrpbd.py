@@ -282,9 +282,9 @@ def run(filename):
         for k in K for r in R for i in N_all for j in N_end if i != j
     ]) + solver.Sum([y[k, 0, j] * c_b for k in K for j in C])
 
-    # f = f2 + C_T*|C|*(|C| - f1) 
+    # f = f2 + C_T*|C|*(- f1) 
     penalty_weight = Q * len(C)
-    solver.Minimize(cost_expr + penalty_weight * len(C) - penalty_weight * sr_expr)
+    solver.Minimize(cost_expr - penalty_weight * sr_expr)
 
     # solver.Minimize(w1 * cost_expr + w2 * tardiness)
 
@@ -625,12 +625,15 @@ def run(filename):
         status_str = "Optimal" if status == pywraplp.Solver.OPTIMAL else "Feasible"
         
         result_data = {
-            "weights": {
-                "cost": w1,
-                "tardiness": w2,
-            },
+            # "weights": {
+            #     "cost": w1,
+            #     "tardiness": w2,
+            # },
             "status": status_str,
             "objective": -solver.Objective().Value(),
+            "f2_cost":          cost_expr.solution_value(),
+            "f1_num_served":    int(round(sr_expr.solution_value())),
+            "f1_service_rate":  sr_expr.solution_value() / len(C),
             "time": running_time,
             "routes": [],
         }
@@ -662,8 +665,9 @@ def run(filename):
         for k, v in p_tilde.items():
             print(f"\t {k}: {v.solution_value()}")
 
-        print("[TEST]: cost")
-        print(cost_expr.solution_value())
+        print(f"[TEST]: f1 (served) = {int(round(sr_expr.solution_value()))} / {len(C)}")
+        print(f"[TEST]: f2 (cost)   = {cost_expr.solution_value():.4f}")
+        print(f"[TEST]: f  (obj)    = {solver.Objective().Value():.4f}")
 
         for k in K:
             route = [0]
