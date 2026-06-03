@@ -6,19 +6,22 @@ VRPBTW with heterogeneous truck-drone fleets.
 Reward design
 -------------
 Per-step reward uses potential-based shaping:
-    r_t = -(f(s_{t+1}) - f(s_t))
+    r_t = (f(s_{t+1}) - f(s_t)) / normalized_factor
 
-where f(s) = total_cost + c_t * max_dist * N * (N - k)
-    total_cost: total travel cost
+where f(s) = max(c_t, c_d) * max_dist * N * k - cost
+    max(c_t, c_d): maximum cost unit across vehicle types
+    max_dist: maximum distance (2 * max_coord)
     N: total customers
     k: served customers
+    cost: total travel cost
 
 This objective prioritizes serving customers (lexicographic) while minimizing cost.
-Penalties are maintained incrementally in VRPBTWState.
+HIGHER objective = BETTER solution (net value: service reward - cost).
+Costs are maintained incrementally in VRPBTWState.
 
 At termination:
-    feasible   -> r_T = -(f(s_T) - f(s_{T-1}))  (potential-based shaping)
-    infeasible -> r_T = -1e6                     (hard penalty for infeasible end)
+    All actions applied are feasible (policy ensures this)
+    r_T = (f(s_T) - f(s_{T-1})) / normalized_factor  (potential-based shaping)
 
 Constants
 ---------
@@ -394,50 +397,45 @@ class VRPBTWEnv(Environment):
 
     def _compute_objective(self, cost: float, served_count: int) -> float:
         """
-        Lexicographic objective: maximize service rate (primary), minimize cost (secondary).
-        f = total_cost + max(c_t, c_d) * max_dist * N * (N - k)
-
-        f = f2 + 1 * 200 * |C| * (|C| - f1)
-
-        f = f2 + 200 * |C| * (|C| - f1)
+        Objective: maximize service rate (primary), minimize cost (secondary).
+        f = max(c_t, c_d) * max_dist * N * k - cost
 
         Where:
-        - total_cost: total travel cost
-        - c_t: truck cost unit
+        - max(c_t, c_d): maximum cost unit across vehicle types
         - max_dist: maximum distance (2 * max_coord)
         - N: total customers
         - k: served customers
-        - (N-k): unserved customers
+        - cost: total travel cost
 
         This ensures:
-        - Serving k+1 customers is always better than k customers (maximizes service rate)
-        - Among solutions with same service rate, lower cost is better (minimizes cost)
-        - LOWER objective = BETTER solution (cost minimization)
+        - Serving k+1 customers is always better than k customers (adds max(c_t,c_d)*max_dist*N value)
+        - Among solutions with same service rate, lower cost is better (subtracts cost)
+        - HIGHER objective = BETTER solution (net value maximization)
         """
         N = self.n_customers
         k = served_count
         max_dist = 2.0 * self.max_coord
-        unserved_penalty = self.c_t * max_dist * N * (N - k)
-        return cost + unserved_penalty
+        service_reward = max(self.c_t, self.c_d) * max_dist * N * k
+        return service_reward - cost
 
     def compute_return(self) -> float:
-        """Compute return from current solution: -objective / (max_dist * max_cost_unit).
+        """Compute normalized return from current solution: objective / normalized_factor.
 
-        Converts cost minimization to reward maximization by negating the objective.
+        Objective is net value (service reward - cost), so HIGHER is better.
         Normalizes by spatial and cost scales for scale-independence across instances.
 
         Returns
         -------
         float
-            Normalized return in range [-(N), ~0]:
-            - Worst (no customers served): ~-(N) where N = n_customers
-            - Best (all served, minimal cost): ~-ε (negative but small)
+            Normalized return in range [-(cost_bound), N*max(c_t, c_d)*max_dist*N]:
+            - Worst (no customers served, high cost): negative
+            - Best (all served, minimal cost): ~N*max(c_t, c_d)*max_dist*N / normalized_factor
         """
         solution = self.current_solution()
         normalized_factor = (
             2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
         )
-        return -solution.objective / normalized_factor
+        return solution.objective / normalized_factor
 
     # ------------------------------------------------------------------
     # initial_state
@@ -1158,16 +1156,16 @@ class VRPBTWEnv(Environment):
 
         terminated = self._is_terminated(state)
 
-        # Compute reward: potential-based shaping = -(f_next - f_prev)
-        # Since objective is a cost (positive), we negate the improvement
+        # Compute reward: potential-based shaping = (f_next - f_prev) / normalized_factor
+        # Objective is net value (service reward - cost), so HIGHER is better
         curr_served = int(state.served[1:].sum())
         curr_obj = self._compute_objective(state.current_cost, curr_served)
         normalized_factor = (
             2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
         )
 
-        # When objective decreases (good), reward is positive
-        reward = -(curr_obj - prev_obj) / normalized_factor
+        # When objective increases (good), reward is positive
+        reward = (curr_obj - prev_obj) / normalized_factor
 
         next_mask = (
             self.get_action_mask(state)

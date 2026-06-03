@@ -157,8 +157,8 @@ class MetaTrainer(BaseTrainer):
         # Training state
         self._total_updates = 0
         self._best_objective = float(
-            "inf"
-        )  # For minimization problems, lower is better
+            "-inf"
+        )  # For maximization problems, higher is better
         self._patience_counter = 0
         self._curriculum_check_counter = 0
 
@@ -236,9 +236,9 @@ class MetaTrainer(BaseTrainer):
             "total_updates": self._total_updates,
             "total_epochs": meta_summary.get("total_epochs", 0)
             + fine_tune_summary.get("total_epochs", 0),
-            "best_objective": min(
-                meta_summary.get("best_objective", float("inf")),
-                fine_tune_summary.get("best_objective", float("inf")),
+            "best_objective": max(
+                meta_summary.get("best_objective", float("-inf")),
+                fine_tune_summary.get("best_objective", float("-inf")),
             ),
             "training_time_s": round(time.time() - start_time, 1),
             "meta_learning_enabled": self.enable_meta_learning,
@@ -356,8 +356,8 @@ class MetaTrainer(BaseTrainer):
                         eval_stats = self.meta_evaluator.evaluate(eval_task_id)
                         eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
-                        mean_obj = eval_stats.get("mean_objective", float("inf"))
-                        if mean_obj < self._best_objective - self.mcfg["min_delta"]:
+                        mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                        if mean_obj > self._best_objective + self.mcfg["min_delta"]:
                             self._best_objective = mean_obj
                             self._patience_counter = 0
                             self.logger.save_checkpoint(
@@ -743,13 +743,13 @@ class MetaTrainer(BaseTrainer):
             base_seed=42,
         )
 
-        best_objective = float("inf")
+        best_objective = float("-inf")
         task_summaries = {}
 
         try:
             for task_id in self.env.tasks:
                 self._print_header_task(task_id)
-                task_best_objective = float("inf")
+                task_best_objective = float("-inf")
                 task_patience_counter = 0
                 iteration = -1
 
@@ -959,9 +959,9 @@ class MetaTrainer(BaseTrainer):
                                 }
 
                                 mean_obj = eval_stats.get(
-                                    "mean_objective", float("inf")
+                                    "mean_objective", float("-inf")
                                 )
-                                if mean_obj < task_best_objective - self.fcfg.get(
+                                if mean_obj > task_best_objective + self.fcfg.get(
                                     "min_delta", 0.0001
                                 ):
                                     task_best_objective = mean_obj
@@ -1037,7 +1037,7 @@ class MetaTrainer(BaseTrainer):
                     )
                     raise
 
-                best_objective = min(best_objective, task_best_objective)
+                best_objective = max(best_objective, task_best_objective)
                 task_summaries[task_id] = {
                     "best_objective": float(task_best_objective),
                     "iterations_completed": iteration + 1,
@@ -1074,13 +1074,81 @@ class MetaTrainer(BaseTrainer):
         return summary
 
     def _print_header_tune(self) -> None:
-        print(
-            f"\n{'=' * 64}\n"
-            f"  Fine-Tuning Phase\n"
-            f"  Tasks: {len(self.env.tasks)}\n"
-            f"  Iterations/task: {self.fcfg['n_iteration']} (rollout_length={self.fcfg['rollout_length']}, ppo_epochs={self.fcfg['ppo_epochs']})\n"
-            f"{'=' * 64}"
+        from datetime import datetime
+
+        # Get tune agent hyperparameters
+        tune_lr = getattr(self.tune_agent, "learning_rate", 0.001)
+        tune_optimizer = (
+            self.tune_agent.optimizer.__class__.__name__
+            if self.tune_agent.optimizer
+            else "None"
         )
+        entropy_coef = getattr(self.tune_agent, "entropy_coef", 0.01)
+        max_grad_norm = getattr(self.tune_agent, "max_grad_norm", 0.5)
+
+        # Calculate statistics
+        # Per-task statistics
+        timesteps_per_iteration = (
+            self.fcfg["rollout_length"] * self.fcfg["batch_size"]
+        )
+        timesteps_per_task = (
+            self.fcfg["n_iteration"] * timesteps_per_iteration
+        )
+        total_timesteps = len(self.env.tasks) * timesteps_per_task
+
+        # PPO updates per task = number of gradient steps on mini-batches per task
+        minibatches_per_epoch = (
+            -(-timesteps_per_iteration // self.fcfg["minibatch_size"])
+        )  # ceiling division
+        ppo_updates_per_task = (
+            self.fcfg["n_iteration"]
+            * self.fcfg["ppo_epochs"]
+            * minibatches_per_epoch
+        )
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = [
+            f"\n{'=' * 80}",
+            f"                       FINE-TUNING PHASE STARTED",
+            f"{'=' * 80}",
+            f"Timestamp               : {timestamp}",
+            f"",
+            f"Training Schedule",
+            f"  Tasks                   : {len(self.env.tasks)}",
+            f"  Iterations/Task         : {self.fcfg['n_iteration']}",
+            f"  Rollout Length          : {self.fcfg['rollout_length']} timesteps per iteration",
+            f"  Batch Size              : {self.fcfg['batch_size']} (parallel environments)",
+            f"  PPO Epochs              : {self.fcfg['ppo_epochs']} (gradient passes per rollout)",
+            f"  Mini-batch Size         : {self.fcfg['minibatch_size']}",
+            f"  Total Timesteps (All Tasks) : {total_timesteps:,}",
+            f"  Timesteps Per Task      : {timesteps_per_task:,}",
+            f"  PPO Updates Per Task    : {ppo_updates_per_task:,}",
+            f"",
+            f"Evaluation & Checkpointing",
+            f"  Eval Interval           : {self.fcfg['eval_interval']} iteration(s)",
+            f"  Checkpoint Interval     : {self.fcfg['checkpoint_interval']} iteration(s)",
+            f"  Early Stopping Patience : {self.fcfg['patience']} evals",
+            f"  Min Delta (improvement) : {self.fcfg['min_delta']}",
+            f"",
+            f"Configuration",
+            f"  Fine-Tune LR            : {tune_lr}",
+            f"  Fine-Tune Optimizer     : {tune_optimizer}",
+            f"  Entropy Coefficient     : {entropy_coef}",
+            f"  Max Grad Norm           : {max_grad_norm}",
+            f"  GAE Lambda              : {self.fcfg['gae_lambda']}",
+            f"  Gamma (discount)        : {self.fcfg['gamma']}",
+            f"  Device                  : {globals.DEVICE}",
+            f"",
+            f"Output Directories",
+            f"  Experiment              : {self.logger.log_dir.parent}",
+            f"  Checkpoints             : {self.logger.checkpoint_dir}",
+            f"  Logs                    : {self.logger.log_dir}",
+            f"",
+            f"{'=' * 80}",
+        ]
+
+        print("\n".join(lines))
 
     def _compute_task_losses(
         self,
@@ -1329,16 +1397,30 @@ class MetaTrainer(BaseTrainer):
             else 0
         )
 
-        # Fine-tuning: n_iteration rollout collections per task × rollout_length timesteps
-        fine_timesteps = (
-            len(self.env.tasks) * self.fcfg["n_iteration"] * self.fcfg["rollout_length"]
-            if self.enable_fine_tuning
-            else 0
-        )
-        # PPO updates: ppo_epochs passes over all collected timesteps
-        fine_ppo_steps = (
-            fine_timesteps * self.fcfg["ppo_epochs"] if self.enable_fine_tuning else 0
-        )
+        # Fine-tuning: per-task statistics
+        if self.enable_fine_tuning:
+            timesteps_per_iteration = (
+                self.fcfg["rollout_length"] * self.fcfg["batch_size"]
+            )
+            timesteps_per_task = (
+                self.fcfg["n_iteration"] * timesteps_per_iteration
+            )
+            fine_timesteps = len(self.env.tasks) * timesteps_per_task
+
+            # PPO updates per task = gradient steps on mini-batches per task
+            minibatches_per_epoch = (
+                -(-timesteps_per_iteration // self.fcfg["minibatch_size"])
+            )  # ceiling division
+            fine_ppo_steps_per_task = (
+                self.fcfg["n_iteration"]
+                * self.fcfg["ppo_epochs"]
+                * minibatches_per_epoch
+            )
+            fine_ppo_steps = len(self.env.tasks) * fine_ppo_steps_per_task
+        else:
+            fine_timesteps = 0
+            fine_ppo_steps = 0
+            fine_ppo_steps_per_task = 0
 
         total_updates = meta_batches + fine_ppo_steps
 
@@ -1349,6 +1431,19 @@ class MetaTrainer(BaseTrainer):
             if self.meta_agent.optimizer
             else "None"
         )
+
+        # Get tune-agent hyperparameters (if fine-tuning enabled)
+        tune_lr = None
+        tune_optimizer = None
+        entropy_coef = None
+        if self.enable_fine_tuning:
+            tune_lr = getattr(self.tune_agent, "learning_rate", 0.001)
+            tune_optimizer = (
+                self.tune_agent.optimizer.__class__.__name__
+                if self.tune_agent.optimizer
+                else "None"
+            )
+            entropy_coef = getattr(self.tune_agent, "entropy_coef", 0.01)
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1385,6 +1480,7 @@ class MetaTrainer(BaseTrainer):
                     f"    PPO Epochs          : {self.fcfg['ppo_epochs']} (gradient passes per rollout)",
                     f"    Mini-batch Size     : {self.fcfg['minibatch_size']}",
                     f"    Total Timesteps     : {fine_timesteps:,}",
+                    f"    PPO Updates/Task    : {fine_ppo_steps_per_task:,}",
                     f"    Total PPO Updates   : {fine_ppo_steps:,}",
                     f"    Tasks               : {len(self.env.tasks)} task(s)",
                 ]
@@ -1396,19 +1492,36 @@ class MetaTrainer(BaseTrainer):
                 f"Training Summary",
                 f"  Total Timesteps (Meta+Fine) : {meta_batches + fine_timesteps:,}",
                 f"  Total Gradient Updates      : {total_updates:,}",
-                f"  Environment             : {self.env.__class__.__name__}",
-                f"  Device                  : {globals.DEVICE}",
+                f"  Environment                 : {self.env.__class__.__name__}",
+                f"  Device                      : {globals.DEVICE}",
                 f"",
                 f"Configuration",
-                f"  Meta LR                 : {meta_lr}",
-                f"  Meta Optimizer          : {meta_optimizer}",
-                f"  Max Grad Norm           : {self.meta_agent.max_grad_norm if hasattr(self.meta_agent, 'max_grad_norm') else 0.5}",
-                f"  Rollout Strategy        : Serial (1 environment), variable-length batches",
+                f"  Meta LR                     : {meta_lr}",
+                f"  Meta Optimizer              : {meta_optimizer}",
+                f"  Meta Max Grad Norm          : {self.meta_agent.max_grad_norm if hasattr(self.meta_agent, 'max_grad_norm') else 0.5}",
+            ]
+        )
+
+        if self.enable_fine_tuning:
+            lines.extend(
+                [
+                    f"  Tune LR                     : {tune_lr}",
+                    f"  Tune Optimizer              : {tune_optimizer}",
+                    f"  Tune Max Grad Norm          : {self.tune_agent.max_grad_norm if hasattr(self.tune_agent, 'max_grad_norm') else 0.5}",
+                    f"  Entropy Coefficient         : {entropy_coef}",
+                    f"  GAE Lambda                  : {self.fcfg['gae_lambda']}",
+                    f"  Gamma (discount)            : {self.fcfg['gamma']}",
+                ]
+            )
+
+        lines.extend(
+            [
+                f"  Rollout Strategy            : Serial (1 environment), variable-length batches",
                 f"",
                 f"Output Directories",
-                f"  Experiment              : {self.logger.log_dir.parent}",
-                f"  Checkpoints             : {self.logger.checkpoint_dir}",
-                f"  Logs                    : {self.logger.log_dir}",
+                f"  Experiment                  : {self.logger.log_dir.parent}",
+                f"  Checkpoints                 : {self.logger.checkpoint_dir}",
+                f"  Logs                        : {self.logger.log_dir}",
                 f"",
                 f"{'=' * 80}",
             ]
@@ -1641,7 +1754,7 @@ class POMOTrainer(BaseTrainer):
             self._print_header_task(task_id)
             self.env.retask(task_id)
 
-            best_objective = float("inf")  # For minimization problems, lower is better
+            best_objective = float("-inf")  # For maximization problems, higher is better
             best_epoch = -1
             patience_counter = 0
 
@@ -1762,8 +1875,8 @@ class POMOTrainer(BaseTrainer):
                     eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
                     # Track best objective with early stopping
-                    mean_obj = eval_stats.get("mean_objective", float("inf"))
-                    if mean_obj < best_objective - self.tcfg["min_delta"]:
+                    mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                    if mean_obj > best_objective + self.tcfg["min_delta"]:
                         best_objective = mean_obj
                         best_epoch = epoch + 1
                         patience_counter = 0

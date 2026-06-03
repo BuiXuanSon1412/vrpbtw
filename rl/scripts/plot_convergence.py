@@ -144,6 +144,8 @@ def plot_convergence_per_task(
     loss_totals = []
     steps_grad = []
     grad_norms = []
+    steps_entropy = []
+    entropy_losses = []
     steps_obj = []
     objectives = []
     steps_sr = []
@@ -153,10 +155,9 @@ def plot_convergence_per_task(
         if "step" not in m:
             continue
 
-        # Handle both dense per-update logging (tune/loss_total, train/loss_total)
-        # and per-epoch aggregation (tune/loss_mean, train/loss_mean for backward compatibility)
+        # Handle loss_total_mean from fine-tuning and loss_mean from meta-learning
         loss_key = None
-        for key in ["tune/loss_total", "train/loss_total", "tune/loss_mean", "train/loss_mean"]:
+        for key in ["tune/loss_total_mean", "train/loss_total_mean", "meta/loss_mean", "tune/loss_mean", "train/loss_mean"]:
             if key in m:
                 loss_key = key
                 break
@@ -173,6 +174,16 @@ def plot_convergence_per_task(
             steps_grad.append(m["step"])
             grad_norms.append(m[grad_key])
 
+        # Extract entropy loss
+        entropy_key = None
+        for key in ["tune/loss_entropy_mean", "train/loss_entropy_mean", "meta/loss_entropy_mean"]:
+            if key in m:
+                entropy_key = key
+                break
+        if entropy_key:
+            steps_entropy.append(m["step"])
+            entropy_losses.append(m[entropy_key])
+
         if "eval/mean_objective" in m:
             steps_obj.append(m["step"])
             objectives.append(m["eval/mean_objective"])
@@ -181,7 +192,7 @@ def plot_convergence_per_task(
             steps_sr.append(m["step"])
             service_rates.append(m["eval/mean_service_rate"])
 
-    if not (steps_loss or steps_obj or steps_sr or steps_grad):
+    if not (steps_loss or steps_obj or steps_sr or steps_grad or steps_entropy):
         return
 
     if output_dir is None:
@@ -284,6 +295,37 @@ def plot_convergence_per_task(
         print(f"  Saved: {filepath}")
         plt.close()
 
+    # Plot 5: Entropy convergence (policy learning/convergence indicator)
+    if entropy_losses:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(steps_entropy, entropy_losses, "purple", linewidth=2, label="entropy_loss")
+        ax.axhline(
+            y=0.0,
+            color="g",
+            linestyle="--",
+            alpha=0.5,
+            label="zero_entropy (full convergence)",
+        )
+        ax.fill_between(
+            steps_entropy,
+            entropy_losses,
+            0,
+            alpha=0.2,
+            color="purple",
+        )
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Entropy Loss (−mean entropy)")
+        ax.set_title(f"Policy Entropy Convergence - {exp_dir.name}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+
+        filename = f"convergence_{phase}_entropy.png"
+        filepath = output_dir / filename
+        plt.savefig(filepath, dpi=dpi, bbox_inches="tight")
+        print(f"  Saved: {filepath}")
+        plt.close()
+
 
 def plot_convergence_comparison(
     exp_dirs: List[Path],
@@ -295,7 +337,7 @@ def plot_convergence_comparison(
     if not exp_dirs or not all(d.exists() for d in exp_dirs):
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     fig.suptitle(f"Convergence Comparison (Experiments)", fontsize=14, fontweight="bold")
 
     cmap = cm.get_cmap('tab10')
@@ -319,6 +361,8 @@ def plot_convergence_comparison(
         objectives = []
         steps_sr = []
         service_rates = []
+        steps_entropy = []
+        entropy_losses = []
 
         for m in metrics:
             if "eval/mean_objective" in m:
@@ -327,6 +371,15 @@ def plot_convergence_comparison(
             if "eval/mean_service_rate" in m:
                 steps_sr.append(m["step"])
                 service_rates.append(m["eval/mean_service_rate"])
+            # Extract entropy loss
+            entropy_key = None
+            for key in ["tune/loss_entropy_mean", "train/loss_entropy_mean", "meta/loss_entropy_mean"]:
+                if key in m:
+                    entropy_key = key
+                    break
+            if entropy_key:
+                steps_entropy.append(m["step"])
+                entropy_losses.append(m[entropy_key])
 
         # Plot objective
         ax = axes[0, 0]
@@ -380,6 +433,32 @@ def plot_convergence_comparison(
                 label=f"{exp_name}: {best_sr:.3f}",
             )
 
+        # Plot entropy convergence
+        ax = axes[0, 2]
+        if entropy_losses:
+            ax.plot(
+                steps_entropy,
+                entropy_losses,
+                color=color,
+                linewidth=2,
+                marker="^",
+                markersize=4,
+                label=exp_name,
+            )
+
+        # Plot final entropy
+        ax = axes[1, 2]
+        if entropy_losses:
+            final_entropy = entropy_losses[-1]
+            min_entropy = min(entropy_losses)
+            ax.bar(
+                idx,
+                min_entropy,
+                color=color,
+                alpha=0.7,
+                label=f"{exp_name}: {min_entropy:.4f}",
+            )
+
     # Configure subplots
     axes[0, 0].set_xlabel("Step")
     axes[0, 0].set_ylabel("Objective")
@@ -394,6 +473,12 @@ def plot_convergence_comparison(
     axes[0, 1].set_ylim((0, 1.05))
     axes[0, 1].legend()
 
+    axes[0, 2].set_xlabel("Step")
+    axes[0, 2].set_ylabel("Entropy Loss (−mean entropy)")
+    axes[0, 2].set_title("Policy Entropy Convergence Comparison")
+    axes[0, 2].grid(True, alpha=0.3)
+    axes[0, 2].legend()
+
     axes[1, 0].set_ylabel("Best Objective")
     axes[1, 0].set_title("Best Objective by Experiment")
     axes[1, 0].grid(True, alpha=0.3, axis="y")
@@ -402,6 +487,10 @@ def plot_convergence_comparison(
     axes[1, 1].set_title("Best Service Rate by Experiment")
     axes[1, 1].set_ylim((0, 1.05))
     axes[1, 1].grid(True, alpha=0.3, axis="y")
+
+    axes[1, 2].set_ylabel("Min Entropy Loss")
+    axes[1, 2].set_title("Best (Lowest) Entropy by Experiment")
+    axes[1, 2].grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
 

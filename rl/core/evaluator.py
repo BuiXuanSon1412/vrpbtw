@@ -106,8 +106,8 @@ class Evaluator:
         stats: Dict[str, float] = {
             "mean_objective": float(np.mean(objectives)),
             "std_objective": float(np.std(objectives)),
-            "best_objective": float(np.min(objectives)),  # For minimization problems, lower is better
-            "worst_objective": float(np.max(objectives)),  # For minimization problems, higher is worse
+            "best_objective": float(np.max(objectives)),  # For maximization problems, higher is better
+            "worst_objective": float(np.min(objectives)),  # For maximization problems, lower is worse
             "median_objective": float(np.median(objectives)),
             "mean_reward": float(np.mean(rewards)),
             "mean_time_s": float(np.mean(times)),
@@ -131,7 +131,7 @@ class Evaluator:
         if costs:
             stats["mean_cost"] = float(np.mean(costs))
             stats["std_cost"] = float(np.std(costs))
-            stats["best_cost"] = float(np.min(costs))
+            stats["best_cost"] = float(np.max(costs))
 
         if service_rates:
             stats["mean_service_rate"] = float(np.mean(service_rates))
@@ -269,8 +269,8 @@ class Evaluator:
         stats = {
             "mean_objective": float(np.mean(objs)),
             "std_objective": float(np.std(objs)),
-            "best_objective": float(np.min(objs)),  # For minimization problems, lower is better
-            "worst_objective": float(np.max(objs)),  # For minimization problems, higher is worse
+            "best_objective": float(np.max(objs)),  # For maximization problems, higher is better
+            "worst_objective": float(np.min(objs)),  # For maximization problems, lower is worse
             "median_objective": float(np.median(objs)),
             "n_solutions": float(len(solutions)),
         }

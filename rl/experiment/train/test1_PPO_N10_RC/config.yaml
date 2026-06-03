@@ -27,7 +27,7 @@ trainer:
       optimizer: adam
       clip_eps: 0.2
       value_coef: 0.5
-      entropy_coef: 0.0
+      entropy_coef: 0.01
       max_grad_norm: 0.5
     eval_agent:
       name: ppo
@@ -67,10 +67,10 @@ trainer:
     fine_tuning:
       enabled: true
       control:
-        batch_size: 1
+        batch_size: 2
         n_iteration: 100
         rollout_length: 256
-        ppo_epochs: 1
+        ppo_epochs: 3
         minibatch_size: 32
         eval_interval: 1
         checkpoint_interval: 10
@@ -130,7 +130,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: 103_PPO_N10_RC
+  name: test1_PPO_N10_RC
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train

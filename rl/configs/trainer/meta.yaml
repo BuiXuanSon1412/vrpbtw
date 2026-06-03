@@ -38,8 +38,8 @@ trainer:
       learning_rate: 0.0001
       optimizer: adam
       clip_eps: 0.2
-      value_coef: 0.05
-      entropy_coef: 0.1
+      value_coef: 0.5
+      entropy_coef: 0.01
       max_grad_norm: 0.5
     eval_agent:
       name: ppo
@@ -60,7 +60,7 @@ trainer:
     tune_eval:
       agent: tune_agent
       n_episodes: 100
-      deterministic: true
+      deterministic: false
       decoding:
         beam_width: 1 
 
@@ -83,12 +83,12 @@ trainer:
       enabled: true  # Set to false to skip fine-tuning phase (only meta-learning)
       control:
         # Rollout collection
-        batch_size: 1             # Number of parallel environments (1=sequential, N>1=parallel with SubprocVecEnv)
+        batch_size: 2             # Number of parallel environments (1=sequential, N>1=parallel with SubprocVecEnv)
         n_iteration: 100          # Number of rollout collections per task
         rollout_length: 256       # Timesteps per environment per rollout collection
 
         # PPO optimization on collected data
-        ppo_epochs: 1             # Gradient steps per rollout (1=single pass, higher=risk of overfitting)
+        ppo_epochs: 3             # Gradient steps per rollout (1=single pass, higher=risk of overfitting)
         minibatch_size: 32        # Mini-batch size for SGD over collected timesteps
 
         # Evaluation and checkpointing
