@@ -895,12 +895,14 @@ class MetaTrainer(BaseTrainer):
                                             agent.max_grad_norm,
                                         )
                                         agent.optimizer.step()
-                                        loss_buffer.append({
-                                            "policy": float(policy_loss.detach()),
-                                            "value": float(value_loss.detach()),
-                                            "entropy": float(entropy_loss.detach()),
-                                            "total": float(total_loss.detach()),
-                                        })
+                                        loss_buffer.append(
+                                            {
+                                                "policy": float(policy_loss.detach()),
+                                                "value": float(value_loss.detach()),
+                                                "entropy": float(entropy_loss.detach()),
+                                                "total": float(total_loss.detach()),
+                                            }
+                                        )
                                         grad_norm_buffer.append(float(grad_norm))
 
                                     self._total_updates += 1
@@ -925,29 +927,47 @@ class MetaTrainer(BaseTrainer):
                         # Log aggregated loss components and gradient norm at eval_interval
                         if (iteration + 1) % eval_interval == 0 and loss_buffer:
                             # Extract loss components
-                            policy_losses = torch.tensor([l["policy"] for l in loss_buffer])
-                            value_losses = torch.tensor([l["value"] for l in loss_buffer])
-                            entropy_losses = torch.tensor([l["entropy"] for l in loss_buffer])
-                            total_losses = torch.tensor([l["total"] for l in loss_buffer])
+                            policy_losses = torch.tensor(
+                                [l["policy"] for l in loss_buffer]
+                            )
+                            value_losses = torch.tensor(
+                                [l["value"] for l in loss_buffer]
+                            )
+                            entropy_losses = torch.tensor(
+                                [l["entropy"] for l in loss_buffer]
+                            )
+                            total_losses = torch.tensor(
+                                [l["total"] for l in loss_buffer]
+                            )
                             grad_norm_array = torch.tensor(grad_norm_buffer)
 
-                            train_metrics.update({
-                                # Policy loss
-                                "tune/loss_policy_mean": float(policy_losses.mean()),
-                                "tune/loss_policy_std": float(policy_losses.std()),
-                                # Value loss (raw, not scaled)
-                                "tune/loss_value_mean": float(value_losses.mean()),
-                                "tune/loss_value_std": float(value_losses.std()),
-                                # Entropy loss (raw, not scaled)
-                                "tune/loss_entropy_mean": float(entropy_losses.mean()),
-                                "tune/loss_entropy_std": float(entropy_losses.std()),
-                                # Total (combined)
-                                "tune/loss_total_mean": float(total_losses.mean()),
-                                "tune/loss_total_std": float(total_losses.std()),
-                                # Gradient norm
-                                "tune/grad_norm_mean": float(grad_norm_array.mean()),
-                                "tune/grad_norm_std": float(grad_norm_array.std()),
-                            })
+                            train_metrics.update(
+                                {
+                                    # Policy loss
+                                    "tune/loss_policy_mean": float(
+                                        policy_losses.mean()
+                                    ),
+                                    "tune/loss_policy_std": float(policy_losses.std()),
+                                    # Value loss (raw, not scaled)
+                                    "tune/loss_value_mean": float(value_losses.mean()),
+                                    "tune/loss_value_std": float(value_losses.std()),
+                                    # Entropy loss (raw, not scaled)
+                                    "tune/loss_entropy_mean": float(
+                                        entropy_losses.mean()
+                                    ),
+                                    "tune/loss_entropy_std": float(
+                                        entropy_losses.std()
+                                    ),
+                                    # Total (combined)
+                                    "tune/loss_total_mean": float(total_losses.mean()),
+                                    "tune/loss_total_std": float(total_losses.std()),
+                                    # Gradient norm
+                                    "tune/grad_norm_mean": float(
+                                        grad_norm_array.mean()
+                                    ),
+                                    "tune/grad_norm_std": float(grad_norm_array.std()),
+                                }
+                            )
 
                         # Evaluation
                         eval_metrics = {}
@@ -1008,12 +1028,14 @@ class MetaTrainer(BaseTrainer):
 
                         # Add loss components to print if available
                         if "tune/loss_policy_mean" in train_metrics:
-                            print_keys.extend([
-                                "tune/loss_policy_mean",
-                                "tune/loss_value_mean",
-                                "tune/loss_entropy_mean",
-                                "tune/loss_total_mean",
-                            ])
+                            print_keys.extend(
+                                [
+                                    "tune/loss_policy_mean",
+                                    "tune/loss_value_mean",
+                                    "tune/loss_entropy_mean",
+                                    "tune/loss_total_mean",
+                                ]
+                            )
 
                         if eval_metrics:
                             print_keys.append("eval/mean_objective")
@@ -1088,22 +1110,16 @@ class MetaTrainer(BaseTrainer):
 
         # Calculate statistics
         # Per-task statistics
-        timesteps_per_iteration = (
-            self.fcfg["rollout_length"] * self.fcfg["batch_size"]
-        )
-        timesteps_per_task = (
-            self.fcfg["n_iteration"] * timesteps_per_iteration
-        )
+        timesteps_per_iteration = self.fcfg["rollout_length"] * self.fcfg["batch_size"]
+        timesteps_per_task = self.fcfg["n_iteration"] * timesteps_per_iteration
         total_timesteps = len(self.env.tasks) * timesteps_per_task
 
         # PPO updates per task = number of gradient steps on mini-batches per task
-        minibatches_per_epoch = (
-            -(-timesteps_per_iteration // self.fcfg["minibatch_size"])
+        minibatches_per_epoch = -(
+            -timesteps_per_iteration // self.fcfg["minibatch_size"]
         )  # ceiling division
         ppo_updates_per_task = (
-            self.fcfg["n_iteration"]
-            * self.fcfg["ppo_epochs"]
-            * minibatches_per_epoch
+            self.fcfg["n_iteration"] * self.fcfg["ppo_epochs"] * minibatches_per_epoch
         )
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1121,7 +1137,7 @@ class MetaTrainer(BaseTrainer):
             f"  Batch Size              : {self.fcfg['batch_size']} (parallel environments)",
             f"  PPO Epochs              : {self.fcfg['ppo_epochs']} (gradient passes per rollout)",
             f"  Mini-batch Size         : {self.fcfg['minibatch_size']}",
-            f"  Total Timesteps (All Tasks) : {total_timesteps:,}",
+            f"  Total Timesteps         : {total_timesteps:,}",
             f"  Timesteps Per Task      : {timesteps_per_task:,}",
             f"  PPO Updates Per Task    : {ppo_updates_per_task:,}",
             f"",
@@ -1402,14 +1418,12 @@ class MetaTrainer(BaseTrainer):
             timesteps_per_iteration = (
                 self.fcfg["rollout_length"] * self.fcfg["batch_size"]
             )
-            timesteps_per_task = (
-                self.fcfg["n_iteration"] * timesteps_per_iteration
-            )
+            timesteps_per_task = self.fcfg["n_iteration"] * timesteps_per_iteration
             fine_timesteps = len(self.env.tasks) * timesteps_per_task
 
             # PPO updates per task = gradient steps on mini-batches per task
-            minibatches_per_epoch = (
-                -(-timesteps_per_iteration // self.fcfg["minibatch_size"])
+            minibatches_per_epoch = -(
+                -timesteps_per_iteration // self.fcfg["minibatch_size"]
             )  # ceiling division
             fine_ppo_steps_per_task = (
                 self.fcfg["n_iteration"]
@@ -1754,7 +1768,9 @@ class POMOTrainer(BaseTrainer):
             self._print_header_task(task_id)
             self.env.retask(task_id)
 
-            best_objective = float("-inf")  # For maximization problems, higher is better
+            best_objective = float(
+                "-inf"
+            )  # For maximization problems, higher is better
             best_epoch = -1
             patience_counter = 0
 

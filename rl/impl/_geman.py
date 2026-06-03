@@ -107,14 +107,12 @@ class NodeEncoder(nn.Module):
                 for _ in range(n_layers)
             ]
         )
-        self.pool = nn.Linear(D, 1)
 
     def forward(self, node_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         h = self.input_proj(node_feat)
         for layer in self.layers:
             h = layer(h)
-        w = torch.softmax(self.pool(h), dim=1)  # (B, N+1, 1)
-        return h, (w * h).sum(dim=1)            # (B, N+1, D), (B, D)
+        return h, h.mean(dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -148,21 +146,32 @@ class VehicleEncoder(nn.Module):
         use_instance_norm: bool,
     ):
         super().__init__()
-        self.input_proj = nn.Linear(VEH_FEAT_DIM, D)
+        self.truck_proj = nn.Linear(VEH_FEAT_DIM, D)
+        self.drone_proj = nn.Linear(VEH_FEAT_DIM, D)
         self.layers = nn.ModuleList(
             [
                 _VehicleEncoderLayer(D, n_heads, dropout, use_instance_norm)
                 for _ in range(n_layers)
             ]
         )
-        self.pool = nn.Linear(D, 1)
 
-    def forward(self, veh_feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = self.input_proj(veh_feat)
+    def forward(
+        self, veh_feat: torch.Tensor, Z_node: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, V2K, _ = veh_feat.shape
+        K = V2K // 2
+
+        h = torch.cat(
+            [
+                self.truck_proj(veh_feat[:, :K]),
+                self.drone_proj(veh_feat[:, K:]),
+            ],
+            dim=1,
+        )
+
         for layer in self.layers:
             h = layer(h)
-        w = torch.softmax(self.pool(h), dim=1)  # (B, 2K, 1)
-        return h, (w * h).sum(dim=1)            # (B, 2K, D), (B, D)
+        return h, h.mean(dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +253,6 @@ class GraphEncoder(nn.Module):
             [_MRGNNLayer(D, GRAPH_EDGE_DIM, dropout) for _ in range(n_layers)]
         )
         self.out_norm = nn.LayerNorm(D)
-        self.pool = nn.Linear(D, 1)
 
     def forward(
         self,
@@ -258,8 +266,7 @@ class GraphEncoder(nn.Module):
         for layer in self.layers:
             h = layer(h, t_ei, t_ea, d_ei, d_ea)
         h = self.out_norm(h)
-        w = torch.softmax(self.pool(h), dim=1)  # (B, N+1, 1)
-        return h, (w * h).sum(dim=1)            # (B, N+1, D), (B, D)
+        return h, h.mean(dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +458,7 @@ class GEMANActorCritic(ActorCritic):
         V2K = vf.shape[1]
 
         Z_node, g_node = self.node_encoder(nf)
-        Z_veh, g_veh = self.vehicle_encoder(vf)
+        Z_veh, g_veh = self.vehicle_encoder(vf, Z_node)
 
         # GraphEncoder receives [x, y, tw_open, tw_close] only — demand is a
         # delivery semantic, not a routing-structure signal.  Dropping it keeps

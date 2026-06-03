@@ -1,0 +1,23 @@
+{
+  "stop_reason": "completed",
+  "total_updates": 800,
+  "total_epochs": 0,
+  "best_objective": 64177.0859375,
+  "training_time_s": 11700.4,
+  "meta_learning_enabled": false,
+  "fine_tuning_enabled": true,
+  "meta_summary": null,
+  "fine_tune_summary": {
+    "stop_reason": "completed",
+    "total_iterations": 100,
+    "total_updates": 800,
+    "best_objective": 64177.0859375,
+    "training_time_s": 11700.4,
+    "task_summaries": {
+      "004_N20_F3_RC": {
+        "best_objective": 64177.0859375,
+        "iterations_completed": 100
+      }
+    }
+  }
+}
