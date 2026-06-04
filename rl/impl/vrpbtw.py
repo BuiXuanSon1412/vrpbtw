@@ -334,7 +334,7 @@ class VRPBTWEnv(Environment):
                 )
             )
 
-            demand = float(int(np.random.randint(demand_range[0], demand_range[1] + 1)))
+            demand = float(int(np.random.randint(demand_range[0], demand_range[1])))
             if node_type == "BACKHAUL":
                 demand = -demand
             customers.append(

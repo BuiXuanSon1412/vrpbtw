@@ -778,134 +778,81 @@ class MetaTrainer(BaseTrainer):
                             num_timesteps = len(actions)
 
                             # Step 2: PPO optimization - ppo_epochs passes over collected data
-                            # Each pass: shuffle and do mini-batch SGD on minibatch_size timesteps
+                            # For batch_size > 1: process each environment's timesteps separately
+                            # For batch_size = 1: same logic, just 1 environment
                             for ppo_epoch in range(ppo_epochs):
-                                # Shuffle indices
-                                indices = torch.randperm(
-                                    num_timesteps, device=old_log_probs.device
-                                )
-
-                                # Mini-batch SGD
-                                for start_idx in range(
-                                    0, num_timesteps, minibatch_size
-                                ):
-                                    end_idx = min(
-                                        start_idx + minibatch_size, num_timesteps
+                                # Process each environment's timesteps independently
+                                for env_idx in range(batch_size):
+                                    # Get all timesteps for this environment
+                                    # With batch_size=4, env_idx=0 gets [0, 4, 8, 12, ...]
+                                    # With batch_size=1, env_idx=0 gets [0, 1, 2, 3, ...]
+                                    env_timestep_indices = torch.arange(
+                                        env_idx, num_timesteps, batch_size,
+                                        device=old_log_probs.device, dtype=torch.long
                                     )
-                                    batch_indices = indices[start_idx:end_idx]
 
-                                    # Extract mini-batch
-                                    if isinstance(observations, list):
-                                        if batch_size > 1:
-                                            mb_observations = []
-                                            for flat_idx in batch_indices.cpu().numpy():
-                                                timestep_idx = flat_idx // batch_size
-                                                env_idx = flat_idx % batch_size
-                                                stacked_obs = observations[timestep_idx]
-                                                single_obs = {}
-                                                for k, v in stacked_obs.items():
-                                                    if "edge_index" in k:
-                                                        single_obs[k] = v
-                                                    else:
-                                                        single_obs[k] = v[
-                                                            env_idx : env_idx + 1
-                                                        ]
-                                                mb_observations.append(single_obs)
+                                    # Shuffle within this environment only
+                                    shuffled_indices = env_timestep_indices[
+                                        torch.randperm(len(env_timestep_indices),
+                                                     device=old_log_probs.device)
+                                    ]
+
+                                    # Mini-batch SGD on this environment's data
+                                    for start_idx in range(0, len(shuffled_indices), minibatch_size):
+                                        end_idx = min(start_idx + minibatch_size, len(shuffled_indices))
+                                        batch_indices = shuffled_indices[start_idx:end_idx]
+
+                                        # Extract mini-batch
+                                        if isinstance(observations, list):
+                                            if batch_size > 1:
+                                                mb_observations = []
+                                                for flat_idx in batch_indices.cpu().numpy():
+                                                    timestep_idx = flat_idx // batch_size
+                                                    env_idx = flat_idx % batch_size
+                                                    stacked_obs = observations[timestep_idx]
+                                                    single_obs = {}
+                                                    for k, v in stacked_obs.items():
+                                                        if "edge_index" in k:
+                                                            single_obs[k] = v
+                                                        else:
+                                                            single_obs[k] = v[
+                                                                env_idx : env_idx + 1
+                                                            ]
+                                                    mb_observations.append(single_obs)
+                                            else:
+                                                mb_observations = [
+                                                    observations[i]
+                                                    for i in batch_indices.cpu().numpy()
+                                                ]
                                         else:
-                                            mb_observations = [
-                                                observations[i]
-                                                for i in batch_indices.cpu().numpy()
-                                            ]
-                                    else:
-                                        mb_observations = observations[batch_indices]
+                                            mb_observations = observations[batch_indices]
 
-                                    mb_masks = masks[batch_indices]
-                                    mb_actions = actions[batch_indices]
-                                    mb_old_log_probs = old_log_probs[batch_indices]
-                                    mb_advantages = advantages[batch_indices]
-                                    mb_returns = returns[batch_indices]
-                                    mb_entropies = entropies[batch_indices]
+                                        # Prepare mini-batch dict for agent.update()
+                                        minibatch = {
+                                            "observations": mb_observations,
+                                            "masks": masks[batch_indices],
+                                            "actions": actions[batch_indices],
+                                            "log_probs": old_log_probs[batch_indices],
+                                            "advantages": advantages[batch_indices],
+                                            "returns": returns[batch_indices],
+                                            "entropies": entropies[batch_indices],
+                                        }
 
-                                    # Forward pass
-                                    if isinstance(mb_observations, list):
-                                        logits_list = []
-                                        values_list = []
-                                        for i, obs_t in enumerate(mb_observations):
-                                            mask_t = mb_masks[i : i + 1]
-                                            logits_t, values_t, _ = (
-                                                agent.network.evaluate(
-                                                    obs_t, mask_t, actions=None
-                                                )
-                                            )
-                                            logits_list.append(logits_t)
-                                            values_list.append(values_t)
-                                        logits = torch.cat(logits_list, dim=0)
-                                        values = torch.cat(values_list, dim=0)
-                                    else:
-                                        logits, values, _ = agent.network.evaluate(
-                                            mb_observations, mb_masks, actions=None
-                                        )
+                                        # Delegate all PPO logic to agent
+                                        update_metrics = agent.update(minibatch)
 
-                                    # Compute PPO loss
-                                    log_probs_all = torch.nn.functional.log_softmax(
-                                        logits, dim=-1
-                                    )
-                                    new_log_probs = log_probs_all.gather(
-                                        -1, mb_actions.unsqueeze(-1)
-                                    ).squeeze(-1)
-
-                                    clip_eps = getattr(agent, "clip_eps", 0.2)
-                                    value_coef = getattr(agent, "value_coef", 0.5)
-                                    entropy_coef = getattr(agent, "entropy_coef", 0.01)
-
-                                    ratio = torch.exp(new_log_probs - mb_old_log_probs)
-                                    surr1 = ratio * mb_advantages
-                                    surr2 = (
-                                        torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-                                        * mb_advantages
-                                    )
-                                    policy_loss = -torch.min(surr1, surr2).mean()
-
-                                    value_loss = torch.nn.functional.mse_loss(
-                                        values, mb_returns
-                                    )
-
-                                    if (
-                                        isinstance(mb_entropies, torch.Tensor)
-                                        and mb_entropies.numel() > 0
-                                    ):
-                                        entropy_loss = -mb_entropies.mean()
-                                    else:
-                                        entropy_loss = torch.tensor(
-                                            0.0, device=policy_loss.device
-                                        )
-
-                                    total_loss = (
-                                        policy_loss
-                                        + value_coef * value_loss
-                                        + entropy_coef * entropy_loss
-                                    )
-
-                                    # Optimization step
-                                    if agent.optimizer is not None:
-                                        agent.optimizer.zero_grad()
-                                        total_loss.backward()
-                                        grad_norm = torch.nn.utils.clip_grad_norm_(
-                                            agent.network.parameters(),
-                                            agent.max_grad_norm,
-                                        )
-                                        agent.optimizer.step()
+                                        # Collect metrics
                                         loss_buffer.append(
                                             {
-                                                "policy": float(policy_loss.detach()),
-                                                "value": float(value_loss.detach()),
-                                                "entropy": float(entropy_loss.detach()),
-                                                "total": float(total_loss.detach()),
+                                                "policy": float(update_metrics["policy_loss"].detach()),
+                                                "value": float(update_metrics["value_loss"].detach()),
+                                                "entropy": float(update_metrics["entropy"].detach()),
+                                                "total": float(update_metrics["loss"].detach()),
                                             }
                                         )
-                                        grad_norm_buffer.append(float(grad_norm))
+                                        grad_norm_buffer.append(float(update_metrics["grad_norm"].detach()))
 
-                                    self._total_updates += 1
+                                        self._total_updates += 1
 
                         except Exception as e:
                             self.logger.log_exception(

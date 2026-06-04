@@ -26,8 +26,8 @@ trainer:
       learning_rate: 0.0001
       optimizer: adam
       clip_eps: 0.2
-      value_coef: 0.1
-      entropy_coef: 0.01
+      value_coef: 0.5
+      entropy_coef: 0.05
       max_grad_norm: 0.5
     eval_agent:
       name: ppo

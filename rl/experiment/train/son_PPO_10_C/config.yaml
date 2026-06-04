@@ -47,7 +47,7 @@ trainer:
     tune_eval:
       agent: tune_agent
       n_episodes: 100
-      deterministic: true
+      deterministic: false
       decoding:
         beam_width: 1
   phases:
@@ -122,7 +122,7 @@ environment:
     drone_landing_min: 1.0
     service_time_min: 5.0
     tasks:
-    - 001_N10_F2_RC
+    - 003_N10_F2_C
 device: cpu
 reproducibility:
   seed:
@@ -130,7 +130,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: 100_PPO_N10_RC
+  name: son_PPO_10_C
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train

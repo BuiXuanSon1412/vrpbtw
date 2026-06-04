@@ -237,13 +237,19 @@ class _MRGNNLayer(nn.Module):
 
 
 class GraphEncoder(nn.Module):
-    def __init__(self, D: int, n_layers: int = 3, dropout: float = 0.0):
+    def __init__(
+        self,
+        D: int,
+        n_layers: int = 3,
+        dropout: float = 0.0,
+        use_instance_norm: bool = False,
+    ):
         super().__init__()
         self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
         self.layers = nn.ModuleList(
             [_MRGNNLayer(D, GRAPH_EDGE_DIM, dropout) for _ in range(n_layers)]
         )
-        self.out_norm = nn.LayerNorm(D)
+        self.out_norm = _make_norm(use_instance_norm, D)
         self.pool = nn.Linear(D, 1)
 
     def forward(
@@ -263,16 +269,273 @@ class GraphEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# EGALayer - Expander Graph Attention (for ablation studies)
+# ---------------------------------------------------------------------------
+
+
+class _EGALayer(nn.Module):
+    """Single EGA layer with sparse attention via dynamic graph construction.
+
+    Uses k-NN + hierarchical + depot connections for sparse attention.
+    Includes relative positional encoding based on euclidean distances.
+    """
+
+    def __init__(self, D: int, dropout: float = 0.0, d_sparse: int = 16):
+        super().__init__()
+        self.D = D
+        self.dropout = nn.Dropout(dropout)
+
+        # Multi-head attention projections
+        self.n_heads = 4  # Default, matches GEMAN
+        self.d_k = D // self.n_heads
+        self.W_Q = nn.Linear(D, D, bias=False)
+        self.W_K = nn.Linear(D, D, bias=False)
+        self.W_V = nn.Linear(D, D, bias=False)
+        self.W_O = nn.Linear(D, D, bias=False)
+
+        # Relative positional encoding (distance-based)
+        self.d_sparse = d_sparse
+        self.rel_pos_embed = nn.Embedding(32, self.n_heads * self.d_k)  # 32 distance buckets
+
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(D, D * 2),
+            nn.ReLU(),
+            nn.Linear(D * 2, D),
+        )
+
+        # Normalization
+        self.norm1 = nn.LayerNorm(D)
+        self.norm2 = nn.LayerNorm(D)
+
+    @staticmethod
+    def _build_sparse_mask(B: int, N: int, device: torch.device, k: int = 3) -> torch.Tensor:
+        """Build sparse attention mask using fixed k-NN pattern.
+
+        Returns:
+            mask: (B, N, N) with 0 where connected, -inf where not
+        """
+        # For simplicity: allow each node to attend to itself, neighbors, and depot
+        # Can be extended with dynamic k-NN based on embeddings
+        adj = torch.zeros(B, N, N, device=device)
+
+        # Self-attention
+        adj[:, range(N), range(N)] = 1
+
+        # Depot (0) connects to all
+        adj[:, 0, :] = 1
+        adj[:, :, 0] = 1
+
+        # k-NN approximation: sequential neighbors (spatial locality)
+        for i in range(N):
+            for j in range(max(0, i - k), min(N, i + k + 1)):
+                adj[:, i, j] = 1
+                adj[:, j, i] = 1
+
+        # Convert to attention mask: 0 → 0, 1 → 0, else → -inf
+        mask = torch.where(adj > 0, torch.tensor(0.0, device=device), torch.tensor(float('-inf'), device=device))
+        return mask
+
+    def _compute_rel_pos_encoding(self, node_coords: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Compute relative positional encoding based on euclidean distances.
+
+        Args:
+            node_coords: (B, N, 2) node coordinates
+            mask: (B, N, N) attention mask
+
+        Returns:
+            r_ij: (B, N, N, n_heads, d_k) relative position embeddings
+        """
+        B, N, _ = node_coords.shape
+        device = node_coords.device
+
+        # Pairwise distances
+        coords_i = node_coords.unsqueeze(2)  # (B, N, 1, 2)
+        coords_j = node_coords.unsqueeze(1)  # (B, 1, N, 2)
+        distances = torch.norm(coords_i - coords_j, dim=-1)  # (B, N, N)
+
+        # Bucket distances into 32 bins
+        max_dist = distances.max()
+        dist_buckets = (distances / (max_dist + 1e-6) * 31).long().clamp(0, 31)
+
+        # Look up embeddings
+        r_ij = self.rel_pos_embed(dist_buckets)  # (B, N, N, n_heads * d_k)
+        r_ij = r_ij.view(B, N, N, self.n_heads, self.d_k)
+
+        return r_ij
+
+    def forward(self, h: torch.Tensor, coords: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """EGA forward pass with sparse attention.
+
+        Args:
+            h: (B, N, D) node embeddings
+            coords: (B, N, 2) node coordinates for distance-based relative positions
+
+        Returns:
+            h: (B, N, D) updated node embeddings
+        """
+        B, N, D = h.shape
+        device = h.device
+
+        # Build sparse attention mask
+        mask = self._build_sparse_mask(B, N, device, k=3)  # 3-NN sparse attention
+
+        # Compute Q, K, V
+        Q = self.W_Q(h).view(B, N, self.n_heads, self.d_k).transpose(1, 2)  # (B, n_heads, N, d_k)
+        K = self.W_K(h).view(B, N, self.n_heads, self.d_k).transpose(1, 2)  # (B, n_heads, N, d_k)
+        V = self.W_V(h).view(B, N, self.n_heads, self.d_k).transpose(1, 2)  # (B, n_heads, N, d_k)
+
+        # Scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)  # (B, n_heads, N, N)
+
+        # Add relative position encoding if coordinates provided
+        if coords is not None:
+            r_ij = self._compute_rel_pos_encoding(coords, mask)  # (B, N, N, n_heads, d_k)
+            r_ij = r_ij.permute(0, 3, 1, 2, 4)  # (B, n_heads, N, N, d_k)
+            Q_expanded = Q.unsqueeze(-2)  # (B, n_heads, N, 1, d_k)
+            rel_scores = (Q_expanded * r_ij).sum(dim=-1)  # (B, n_heads, N, N)
+            scores = scores + rel_scores
+
+        # Apply sparse mask
+        scores = scores + mask.unsqueeze(1)  # (B, 1, N, N)
+
+        # Softmax and dropout
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Apply attention to values
+        h_attn = torch.matmul(attn_weights, V)  # (B, n_heads, N, d_k)
+        h_attn = h_attn.transpose(1, 2).contiguous().view(B, N, D)  # (B, N, D)
+        h_attn = self.W_O(h_attn)
+
+        # Residual + norm
+        h = self.norm1(h + h_attn)
+
+        # FFN + residual + norm
+        h = self.norm2(h + self.ffn(h))
+
+        return h
+
+
+class EGAEncoder(nn.Module):
+    """Expander Graph Attention Encoder for VRPBTW.
+
+    Alternative to GraphEncoder using sparse attention with dynamic graph construction.
+    Useful for ablation studies to compare attention mechanisms.
+
+    Compatible with GraphEncoder interface:
+        forward(node_feat, t_ei, t_ea, d_ei, d_ea) → (Z_graph, g_graph)
+    """
+
+    def __init__(self, D: int, n_layers: int = 3, dropout: float = 0.0):
+        super().__init__()
+        self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
+        self.layers = nn.ModuleList([_EGALayer(D, dropout, d_sparse=16) for _ in range(n_layers)])
+        self.norm = nn.LayerNorm(D)
+        self.pool = nn.Linear(D, 1)
+
+    def forward(
+        self,
+        node_feat: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea: torch.Tensor,
+        coords: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass.
+
+        Args:
+            node_feat: (B, N+1, GRAPH_NODE_DIM) node features
+            t_ei, t_ea, d_ei, d_ea: Edge indices/attributes (unused, for interface compatibility)
+            coords: (B, N+1, 2) node coordinates for relative position encoding
+
+        Returns:
+            Z: (B, N+1, D) node embeddings
+            g: (B, D) pooled global embedding
+        """
+        h = self.input_proj(node_feat)
+
+        for layer in self.layers:
+            h = layer(h, coords)
+
+        h = self.norm(h)
+        w = torch.softmax(self.pool(h), dim=1)  # (B, N+1, 1)
+        return h, (w * h).sum(dim=1)  # (B, N+1, D), (B, D)
+
+
+# ---------------------------------------------------------------------------
+# ValueHead - Multi-layer value function approximator
+# ---------------------------------------------------------------------------
+
+
+class ValueHead(nn.Module):
+    """Configurable multi-layer value head for state value estimation.
+
+    Args:
+        input_dim: Input dimension (typically D * 3 from concatenated embeddings)
+        hidden_dims: List of hidden layer sizes (e.g., [128, 128])
+        dropout: Dropout rate applied after each layer
+        use_dropout: Whether to apply dropout
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: List[int],
+        dropout: float = 0.1,
+        use_dropout: bool = True,
+    ):
+        super().__init__()
+        layers = [nn.Linear(input_dim, hidden_dims[0]), nn.ReLU()]
+        if use_dropout:
+            layers.append(nn.Dropout(dropout))
+
+        for i in range(len(hidden_dims) - 1):
+            layers.extend(
+                [
+                    nn.Linear(hidden_dims[i], hidden_dims[i + 1]),
+                    nn.ReLU(),
+                ]
+            )
+            if use_dropout:
+                layers.append(nn.Dropout(dropout))
+
+        layers.append(nn.Linear(hidden_dims[-1], 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Estimate state value.
+
+        Args:
+            x: (B, input_dim) tensor
+
+        Returns:
+            (B, 1) tensor of value estimates
+        """
+        return self.net(x)
+
+
+# ---------------------------------------------------------------------------
 # NodeDecoder / VehicleDecoder
 # ---------------------------------------------------------------------------
 
 
 class NodeDecoder(nn.Module):
-    def __init__(self, D: int, clip: float = 10.0):
+    def __init__(
+        self,
+        D: int,
+        clip: float = 10.0,
+        context_hidden_dim: int = 128,
+        context_dropout: float = 0.0,
+    ):
         super().__init__()
         self.clip = clip
-        self.ctx_proj = nn.Sequential(nn.Linear(D * 3, D), nn.ReLU())
-        self.Wq = nn.Linear(D, D, bias=False)
+        layers = [nn.Linear(D * 3, context_hidden_dim), nn.ReLU()]
+        if context_dropout > 0:
+            layers.append(nn.Dropout(context_dropout))
+        self.ctx_proj = nn.Sequential(*layers)
+        self.Wq = nn.Linear(context_hidden_dim, D, bias=False)
         self.Wk = nn.Linear(D, D, bias=False)
         self._scale: Optional[float] = None
 
@@ -297,11 +560,20 @@ class NodeDecoder(nn.Module):
 
 
 class VehicleDecoder(nn.Module):
-    def __init__(self, D: int, clip: float = 10.0):
+    def __init__(
+        self,
+        D: int,
+        clip: float = 10.0,
+        context_hidden_dim: int = 128,
+        context_dropout: float = 0.0,
+    ):
         super().__init__()
         self.clip = clip
-        self.ctx_proj = nn.Sequential(nn.Linear(D * 3, D), nn.ReLU())
-        self.Wq = nn.Linear(D, D, bias=False)
+        layers = [nn.Linear(D * 3, context_hidden_dim), nn.ReLU()]
+        if context_dropout > 0:
+            layers.append(nn.Dropout(context_dropout))
+        self.ctx_proj = nn.Sequential(*layers)
+        self.Wq = nn.Linear(context_hidden_dim, D, bias=False)
         self.Wk = nn.Linear(D, D, bias=False)
         self._scale: Optional[float] = None
 
@@ -338,10 +610,12 @@ class GEMANActorCritic(ActorCritic):
         # Extract encoder and decoder configs
         encoder_cfg = cfg.get("encoder", {})
         decoder_cfg = cfg.get("decoder", {})
+        value_head_cfg = cfg.get("value_head", {})
         node_enc_cfg = encoder_cfg.get("node_encoder", {})
         veh_enc_cfg = encoder_cfg.get("vehicle_encoder", {})
         graph_enc_cfg = encoder_cfg.get("graph_encoder", {})
         node_dec_cfg = decoder_cfg.get("node_decoder", {})
+        veh_dec_cfg = decoder_cfg.get("vehicle_decoder", {})
 
         # Read directly from current config structure
         D: int = int(node_enc_cfg.get("embedding_dim", 128))
@@ -355,19 +629,35 @@ class GEMANActorCritic(ActorCritic):
         n_veh_layers: int = int(veh_enc_cfg.get("n_layers", 3))
         n_graph_layers: int = int(graph_enc_cfg.get("n_layers", 3))
 
+        # Graph encoder instance norm (new config option)
+        graph_use_in: bool = bool(graph_enc_cfg.get("use_instance_norm", False))
+
+        # Decoder context projection parameters (new config options)
+        node_ctx_hidden = int(node_dec_cfg.get("context_hidden_dim", 128))
+        node_ctx_dropout = float(node_dec_cfg.get("context_dropout", 0.0))
+        veh_ctx_hidden = int(veh_dec_cfg.get("context_hidden_dim", 128))
+        veh_ctx_dropout = float(veh_dec_cfg.get("context_dropout", 0.0))
+
         self.node_encoder = NodeEncoder(D, H, n_node_layers, drop, use_in)
         self.vehicle_encoder = VehicleEncoder(D, H, n_veh_layers, drop, use_in)
-        self.graph_encoder = GraphEncoder(D, n_graph_layers, drop)
-        self.node_decoder = NodeDecoder(D, clip)
-        self.vehicle_decoder = VehicleDecoder(D, clip)
-        self.value_head = nn.Sequential(
-            nn.Linear(D * 3, D),
-            nn.ReLU(),
-            nn.Dropout(drop),
-            nn.Linear(D, D),
-            nn.ReLU(),
-            nn.Dropout(drop),
-            nn.Linear(D, 1),
+        self.graph_encoder = GraphEncoder(D, n_graph_layers, drop, graph_use_in)
+        self.node_decoder = NodeDecoder(
+            D, clip, context_hidden_dim=node_ctx_hidden, context_dropout=node_ctx_dropout
+        )
+        self.vehicle_decoder = VehicleDecoder(
+            D, clip, context_hidden_dim=veh_ctx_hidden, context_dropout=veh_ctx_dropout
+        )
+
+        # Build configurable value head from config
+        value_hidden_dims = value_head_cfg.get("hidden_dims", [D, D])
+        value_use_dropout = value_head_cfg.get("use_dropout", True)
+        value_dropout = float(value_head_cfg.get("dropout", 0.1))
+
+        self.value_head = ValueHead(
+            input_dim=D * 3,
+            hidden_dims=value_hidden_dims,
+            dropout=value_dropout,
+            use_dropout=value_use_dropout,
         )
 
         ortho_init: bool = (

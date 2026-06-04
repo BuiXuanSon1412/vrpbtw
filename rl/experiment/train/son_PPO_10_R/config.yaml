@@ -1,8 +1,7 @@
 trainer:
   name: meta
-  collector:
-    name: gae
-    params:
+  estimators:
+    ppo:
       gamma: 0.99
       gae_lambda: 0.95
   agents:
@@ -48,7 +47,7 @@ trainer:
     tune_eval:
       agent: tune_agent
       n_episodes: 100
-      deterministic: true
+      deterministic: false
       decoding:
         beam_width: 1
   phases:
@@ -63,18 +62,20 @@ trainer:
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
-        patience: 20
+        patience: 1000
         min_delta: 0.0001
     fine_tuning:
       enabled: true
       control:
-        epochs: 50
-        batches_per_epoch: 200
+        batch_size: 1
+        n_iteration: 100
+        rollout_length: 256
         ppo_epochs: 1
+        minibatch_size: 32
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
-        patience: 10
+        patience: 1000
         min_delta: 0.0001
 network:
   name: geman
@@ -121,7 +122,7 @@ environment:
     drone_landing_min: 1.0
     service_time_min: 5.0
     tasks:
-    - 001_N10_F2_RC
+    - 002_N10_F2_R
 device: cpu
 reproducibility:
   seed:
@@ -129,7 +130,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: PPO_N10_RC
+  name: son_PPO_10_R
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train

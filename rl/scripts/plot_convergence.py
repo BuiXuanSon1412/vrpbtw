@@ -142,6 +142,8 @@ def plot_convergence_per_task(
     # Extract metric arrays (aligned by step)
     steps_loss = []
     loss_totals = []
+    steps_value = []
+    value_losses = []
     steps_grad = []
     grad_norms = []
     steps_entropy = []
@@ -164,6 +166,16 @@ def plot_convergence_per_task(
         if loss_key:
             steps_loss.append(m["step"])
             loss_totals.append(m[loss_key])
+
+        # Extract value loss
+        value_key = None
+        for key in ["tune/loss_value_mean", "train/loss_value_mean", "meta/loss_value_mean"]:
+            if key in m:
+                value_key = key
+                break
+        if value_key:
+            steps_value.append(m["step"])
+            value_losses.append(m[value_key])
 
         grad_key = None
         for key in ["tune/grad_norm_mean", "train/grad_norm_mean"]:
@@ -192,7 +204,7 @@ def plot_convergence_per_task(
             steps_sr.append(m["step"])
             service_rates.append(m["eval/mean_service_rate"])
 
-    if not (steps_loss or steps_obj or steps_sr or steps_grad or steps_entropy):
+    if not (steps_loss or steps_value or steps_obj or steps_sr or steps_grad or steps_entropy):
         return
 
     if output_dir is None:
@@ -203,7 +215,7 @@ def plot_convergence_per_task(
     if loss_totals:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(steps_loss, loss_totals, "b-", linewidth=1.5, label="loss_total")
-        ax.set_xlabel("Step")
+        ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.set_title(f"Training Loss Convergence - {exp_dir.name}")
         ax.grid(True, alpha=0.3)
@@ -211,6 +223,23 @@ def plot_convergence_per_task(
         plt.tight_layout()
 
         filename = f"convergence_{phase}_loss.png"
+        filepath = output_dir / filename
+        plt.savefig(filepath, dpi=dpi, bbox_inches="tight")
+        print(f"  Saved: {filepath}")
+        plt.close()
+
+    # Plot 1b: Value loss convergence
+    if value_losses:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(steps_value, value_losses, "c-", linewidth=1.5, label="loss_value")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Value Loss")
+        ax.set_title(f"Value Loss Convergence - {exp_dir.name}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+
+        filename = f"convergence_{phase}_value_loss.png"
         filepath = output_dir / filename
         plt.savefig(filepath, dpi=dpi, bbox_inches="tight")
         print(f"  Saved: {filepath}")
@@ -233,7 +262,7 @@ def plot_convergence_per_task(
             alpha=0.5,
             label=f"best={min(objectives):.2f}",
         )
-        ax.set_xlabel("Step")
+        ax.set_xlabel("Epoch")
         ax.set_ylabel("Objective (Cost)")
         ax.set_title(f"Objective Convergence - {exp_dir.name}")
         ax.grid(True, alpha=0.3)
@@ -263,7 +292,7 @@ def plot_convergence_per_task(
             alpha=0.5,
             label=f"best={max(service_rates):.3f}",
         )
-        ax.set_xlabel("Step")
+        ax.set_xlabel("Epoch")
         ax.set_ylabel("Service Rate")
         ax.set_title(f"Service Rate Convergence - {exp_dir.name}")
         ax.set_ylim((0, 1.05))
@@ -282,7 +311,7 @@ def plot_convergence_per_task(
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(steps_grad, grad_norms, "orange", linewidth=2, label="grad_norm_mean")
         ax.axhline(y=1.0, color="r", linestyle="--", alpha=0.5, label="safe_bound=1.0")
-        ax.set_xlabel("Step")
+        ax.set_xlabel("Epoch")
         ax.set_ylabel("Gradient Norm")
         ax.set_title(f"Gradient Norm Stability - {exp_dir.name}")
         ax.grid(True, alpha=0.3)
@@ -313,7 +342,7 @@ def plot_convergence_per_task(
             alpha=0.2,
             color="purple",
         )
-        ax.set_xlabel("Step")
+        ax.set_xlabel("Epoch")
         ax.set_ylabel("Entropy Loss (−mean entropy)")
         ax.set_title(f"Policy Entropy Convergence - {exp_dir.name}")
         ax.grid(True, alpha=0.3)
