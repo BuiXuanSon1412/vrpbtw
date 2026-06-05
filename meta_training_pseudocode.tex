@@ -15,7 +15,7 @@
 \algrenewcommand{\algorithmicrequire}{\textbf{Input:}}
 \algrenewcommand{\algorithmicensure}{\textbf{Output:}}
 
-\title{MetaTrainer: FOMAML with Curriculum Learning and Fine-Tuning for Multi-Task VRP}
+\title{MetaTrainer: FOMAML with Curriculum Expansion and Task-Specific Fine-Tuning}
 \author{}
 \date{}
 
@@ -23,63 +23,66 @@
 
 \maketitle
 
-\section{MetaTrainer: FOMAML with Curriculum Learning}
+\section{Overview}
 
-This section presents the complete pseudocode for MetaTrainer, which implements First-Order Model-Agnostic Meta-Learning (FOMAML) with curriculum expansion and PPO-based fine-tuning.
+MetaTrainer is a two-phase training framework combining First-Order Model-Agnostic Meta-Learning (FOMAML) with entropy-based curriculum expansion and PPO-based task-specific fine-tuning. The algorithm trains a shared policy across multiple tasks via meta-learning, then optimizes task-specific policies through supervised fine-tuning.
+
+\clearpage
 
 % ============================================================================
-% ALGORITHM 1: MAIN TRAINING LOOP
+% MAIN ALGORITHM: MetaTrainer
 % ============================================================================
 
 \begin{algorithm}[h]
-\caption{MetaTrainer Main Training Loop: Meta-Learning + Fine-Tuning}
-\label{alg:main_training}
+\caption{MetaTrainer: Complete Two-Phase Training Pipeline}
+\label{alg:metatrainer}
 \begin{algorithmic}[1]
 
 \Require{
 \begin{itemize}
-	\item Meta agent with policy network: $\pi_\theta$
-	\item Sub agent for inner-loop adaptation: $\pi_{\text{sub}}$
-	\item Tune agent for task-specific fine-tuning: $\pi_{\text{tune}}$
-	\item Environment with task list: $\mathcal{T} = \{t_1, t_2, \ldots, t_K\}$
-	\item Meta-learning config: $\text{mcfg}$ (epochs, batches, thresholds)
-	\item Fine-tuning config: $\text{fcfg}$ (iterations, batch size, PPO settings)
-	\item Flags: $\text{enable\_meta\_learning}$, $\text{enable\_fine\_tuning}$
+	\item Shared policy network $\pi_\theta$ with learnable parameters $\theta$
+	\item Task-specific environment with task list $\mathcal{T} = \{t_1, \ldots, t_K\}$
+	\item Meta-learning configuration $\mathcal{C}_{\text{meta}}$ (epochs, batches, entropy threshold)
+	\item Fine-tuning configuration $\mathcal{C}_{\text{tune}}$ (iterations, rollout length, PPO settings)
+	\item Control flags $\text{do\_meta\_learning}, \text{do\_fine\_tuning}$
 \end{itemize}
 }
 
 \Ensure{
 \begin{itemize}
-	\item Trained meta-policy: $\pi_\theta^*$
-	\item Per-task fine-tuned policies and summary statistics
+	\item Converged meta-policy $\pi_{\theta^*}$ (from Phase 1)
+	\item Per-task fine-tuned policies $\{\pi_{\theta_1^*}, \ldots, \pi_{\theta_K^*}\}$ (from Phase 2)
+	\item Training summary: best objectives, convergence logs, checkpoints
 \end{itemize}
 }
 
-\State \textbf{Initialize:} Total updates counter $\text{total\_updates} \leftarrow 0$
-\State \textbf{Initialize:} Best objective tracker $\text{best\_obj} \leftarrow -\infty$
+\State \textbf{Initialize:} $\text{total\_updates} \leftarrow 0$, $\text{best\_objective} \leftarrow -\infty$
 
-\State \textbf{Print} training header with configuration
+\State \textbf{Log training header with configuration}
 
-\If{\texttt{enable\_meta\_learning}}
-	\State \textbf{// Phase 1: Meta-training with curriculum expansion}
-	\State $\text{meta\_summary} \leftarrow \text{MetaTrain}(\pi_\theta, \pi_{\text{sub}}, \text{mcfg})$
-	\State $\text{best\_obj} \leftarrow \max(\text{best\_obj}, \text{meta\_summary.best\_objective})$
-	\State $\text{total\_updates} \leftarrow \text{total\_updates} + \text{meta\_summary.total\_updates}$
+\State \textbf{// Phase 1: Meta-Learning with Curriculum Expansion}
+\If{\text{do\_meta\_learning}}
+	\State $(\theta^*, \text{meta\_summary}) \leftarrow \text{PHASE\_META\_LEARN}(\pi_\theta, \mathcal{C}_{\text{meta}})$
+	\Comment{Algorithm \ref{alg:phase1}}
+	\State $\text{best\_objective} \leftarrow \max(\text{best\_objective}, \text{meta\_summary.best\_obj})$
+	\State $\text{total\_updates} \leftarrow \text{total\_updates} + \text{meta\_summary.num\_updates}$
+	\State $\pi_\theta \leftarrow \theta^*$ \Comment{Update policy with meta-learned weights}
 \Else
-	\State \textbf{Log:} "Meta-learning disabled; starting with untrained network"
+	\State \textbf{Log:} "Meta-learning skipped; using random or pretrained initialization"
 \EndIf
 
-\If{\texttt{enable\_fine\_tuning}}
-	\State \textbf{// Phase 2: Per-task fine-tuning with PPO}
-	\State $\text{fine\_summary} \leftarrow \text{FineTune}(\pi_{\text{tune}}, \text{fcfg})$
-	\State $\text{best\_obj} \leftarrow \max(\text{best\_obj}, \text{fine\_summary.best\_objective})$
-	\State $\text{total\_updates} \leftarrow \text{total\_updates} + \text{fine\_summary.total\_updates}$
+\State \textbf{// Phase 2: Per-Task Fine-Tuning}
+\If{\text{do\_fine\_tuning}}
+	\State $(\text{task\_policies}, \text{tune\_summary}) \leftarrow \text{PHASE\_FINE\_TUNE}(\pi_\theta, \mathcal{C}_{\text{tune}})$
+	\Comment{Algorithm \ref{alg:phase2}}
+	\State $\text{best\_objective} \leftarrow \max(\text{best\_objective}, \text{tune\_summary.best\_obj})$
+	\State $\text{total\_updates} \leftarrow \text{total\_updates} + \text{tune\_summary.num\_updates}$
 \Else
-	\State \textbf{Log:} "Fine-tuning disabled; meta-learning complete"
+	\State \textbf{Log:} "Fine-tuning skipped; meta-learning complete"
 \EndIf
 
-\State \textbf{Print} training footer with summary
-\State \textbf{return} Combined training summary with meta and fine-tuning results
+\State \textbf{Log training footer with summary}
+\State \textbf{return} $(\pi_{\theta^*}, \text{task\_policies}, \text{total\_updates}, \text{best\_objective})$
 
 \end{algorithmic}
 \end{algorithm}
@@ -87,103 +90,80 @@ This section presents the complete pseudocode for MetaTrainer, which implements 
 \clearpage
 
 % ============================================================================
-% ALGORITHM 2: META-TRAINING WITH CURRICULUM EXPANSION
+% PHASE 1: META-LEARNING WITH CURRICULUM
 % ============================================================================
 
 \begin{algorithm}[h]
-\caption{MetaTrain: FOMAML with Entropy-Based Curriculum}
-\label{alg:meta_train}
+\caption{PHASE\_META\_LEARN: FOMAML with Entropy-Based Curriculum}
+\label{alg:phase1}
 \begin{algorithmic}[1]
 
 \Require{
 \begin{itemize}
-	\item Meta-agent: $\pi_\theta$ with parameters $\theta$
-	\item Sub-agent (clone): $\pi_{\text{sub}}$
-	\item Config: epochs, batches\_per\_epoch, entropy\_threshold, check\_interval
-	\item Environment with reset/retask interface
+	\item Policy $\pi_\theta$, Config $\mathcal{C}_{\text{meta}}$
 \end{itemize}
 }
 
 \Ensure{
 \begin{itemize}
-	\item Updated meta-policy: $\pi_\theta^*$
-	\item Meta-training summary: epochs, updates, best objective, curriculum expansion history
+	\item Converged meta-policy parameters $\theta^*$, Summary statistics
 \end{itemize}
 }
 
-\State \textbf{Initialize:} $\text{active\_tasks} \leftarrow \{\text{env.tasks}[0]\}$ \Comment{Start with easiest task}
-\State \textbf{Initialize:} $\text{best\_obj} \leftarrow -\infty$, $\text{patience\_counter} \leftarrow 0$
-\State \textbf{Initialize:} $\text{curriculum\_counter} \leftarrow 0$
+\State \textbf{Initialize:} $\text{active\_tasks} \leftarrow \{t_1\}$ (start with easiest task)
+\State \textbf{Initialize:} $\text{best\_obj} \leftarrow -\infty$, $\text{patience} \leftarrow 0$, $\text{curriculum\_counter} \leftarrow 0$
 
-\For{$e = 1$ to \texttt{mcfg.epochs}}
+\For{epoch $e = 1$ to $\mathcal{C}_{\text{meta}}.\text{num\_epochs}$}
 
-	\State \textbf{Initialize epoch:} $\text{epoch\_losses} \leftarrow []$, $\text{epoch\_task\_metrics} \leftarrow \{\}$
+	\State \textbf{Initialize:} $\text{epoch\_losses} \leftarrow []$, $\text{epoch\_metrics} \leftarrow \{\}$
 
-	\For{$b = 1$ to \texttt{mcfg.batches\_per\_epoch}} \Comment{For each batch}
+	\For{batch $b = 1$ to $\mathcal{C}_{\text{meta}}.\text{batches\_per\_epoch}$}
 
-		\State \textbf{// Compute meta-loss across active tasks}
-		\State $(\text{task\_losses}, \text{task\_metrics}) \leftarrow \text{ComputeTaskLosses}(\pi_{\text{sub}}, \text{active\_tasks})$
-		\Comment{See Algorithm \ref{alg:compute_losses}}
+		\State \textbf{// Compute meta-loss via FOMAML inner-outer loop}
+		\State $(\text{task\_losses}, \text{metrics}) \leftarrow \text{COMPUTE\_FOMAML\_LOSSES}(\pi_\theta, \text{active\_tasks})$
 
-		\State \textbf{// Meta-update on aggregated task losses}
-		\State $\text{meta\_loss} \leftarrow \text{mean}(\text{task\_losses})$
-		\State $\pi_\theta \leftarrow \text{meta\_agent.update}(\{\text{task\_losses}\})$ \Comment{Gradient step}
-		\State $\text{total\_updates} \leftarrow \text{total\_updates} + 1$
+		\State \textbf{// Meta-update: aggregate losses and gradient step}
+		\State $\mathcal{L}_{\text{meta}} \leftarrow \frac{1}{|\text{active\_tasks}|} \sum_{\tau} \mathcal{L}_\tau$
+		\State $\pi_\theta \leftarrow \text{OPTIMIZER\_STEP}(\pi_\theta, \mathcal{L}_{\text{meta}}, \text{learning\_rate})$
 
 		\State \textbf{// Accumulate epoch statistics}
+		\State Merge metrics into $\text{epoch\_metrics}$
 		\State $\text{epoch\_losses} \leftarrow \text{epoch\_losses} + \text{task\_losses}$
-		\For{each task $\tau \in \text{active\_tasks}$}
-			\State Merge $\text{task\_metrics}[\tau]$ into $\text{epoch\_task\_metrics}[\tau]$
-		\EndFor
 
-		\State \textbf{// Curriculum expansion check}
-		\State $\text{max\_entropy} \leftarrow \max_\tau (\text{task\_metrics}[\tau].\text{entropy})$
+		\State \textbf{// Curriculum expansion via entropy threshold}
 		\State $\text{curriculum\_counter} \leftarrow \text{curriculum\_counter} + 1$
-
-		\If{$\text{curriculum\_counter} \geq \text{mcfg.check\_interval}$}
+		\If{$\text{curriculum\_counter} \geq \mathcal{C}_{\text{meta}}.\text{check\_interval}$}
 			\State $\text{curriculum\_counter} \leftarrow 0$
-
-			\If{$\text{max\_entropy} < \text{mcfg.entropy\_threshold}$ \textbf{and} $|\text{active\_tasks}| < |\text{env.tasks}|$}
-				\State \textbf{// Add next task to active set}
-				\State $\text{next\_task} \leftarrow \text{env.tasks}[|\text{active\_tasks}|]$
-				\State $\text{active\_tasks} \leftarrow \text{active\_tasks} \cup \{\text{next\_task}\}$
-				\State \textbf{Log:} $\text{``curriculum\_expansion''}$, num\_tasks = $|\text{active\_tasks}|$
+			\State $\text{max\_entropy} \leftarrow \max_\tau (\text{metrics}[\tau].\text{entropy})$
+			\If{$\text{max\_entropy} < \mathcal{C}_{\text{meta}}.\text{entropy\_threshold}$ \textbf{and} $|\text{active\_tasks}| < |\mathcal{T}|$}
+				\State $\text{next\_idx} \leftarrow |\text{active\_tasks}|$
+				\State $\text{active\_tasks} \leftarrow \text{active\_tasks} \cup \{t_{\text{next\_idx}}\}$
+				\State \textbf{Log:} "Curriculum expansion: added task", $|\text{active\_tasks}|$ tasks active
 			\EndIf
 		\EndIf
 
 	\EndFor
 
-	\State \textbf{// Per-epoch metrics aggregation}
-	\State $\text{epoch\_loss\_mean} \leftarrow \text{mean}(\text{epoch\_losses})$
-	\State $\text{epoch\_loss\_std} \leftarrow \text{std}(\text{epoch\_losses})$
-	\State \textbf{Log metrics:} loss, num\_active\_tasks, epoch, total\_updates
-
-	\State \textbf{// Evaluation and checkpointing}
-	\If{$(e + 1) \mod \text{mcfg.eval\_interval} = 0$}
-
-		\State \textbf{// Evaluate on median-difficulty task}
-		\State $\text{median\_idx} \leftarrow |\text{env.tasks}| / 2$
-		\State $\text{eval\_task} \leftarrow \text{env.tasks}[\text{median\_idx}]$
-		\State $\text{eval\_stats} \leftarrow \text{meta\_evaluator.evaluate}(\text{eval\_task})$
-		\State $\text{mean\_obj} \leftarrow \text{eval\_stats.mean\_objective}$
-
-		\If{$\text{mean\_obj} > \text{best\_obj} + \text{mcfg.min\_delta}$}
-			\State $\text{best\_obj} \leftarrow \text{mean\_obj}$
-			\State $\text{patience\_counter} \leftarrow 0$
-			\State $\text{meta\_agent.save\_checkpoint}(\text{``meta\_best''})$
+	\State \textbf{// Epoch-level evaluation and early stopping}
+	\If{$e \mod \mathcal{C}_{\text{meta}}.\text{eval\_interval} = 0$}
+		\State $\text{eval\_obj} \leftarrow \text{EVALUATE}(\pi_\theta, \text{median\_difficulty\_task})$
+		\If{$\text{eval\_obj} > \text{best\_obj} + \mathcal{C}_{\text{meta}}.\text{min\_delta}$}
+			\State $\text{best\_obj} \leftarrow \text{eval\_obj}$
+			\State $\text{patience} \leftarrow 0$
+			\State \textbf{Save checkpoint:} meta\_best
 		\Else
-			\State $\text{patience\_counter} \leftarrow \text{patience\_counter} + 1$
+			\State $\text{patience} \leftarrow \text{patience} + 1$
 		\EndIf
-
-		\If{$\text{patience\_counter} \geq \text{mcfg.patience}$}
+		\If{$\text{patience} \geq \mathcal{C}_{\text{meta}}.\text{patience}$}
 			\State \textbf{Break} (early stopping)
 		\EndIf
-
 	\EndIf
+
+	\State \textbf{Log:} epoch, loss, num\_active\_tasks, best\_obj
 
 \EndFor
 
-\State \textbf{return} Meta-training summary
+\State \textbf{return} $(\pi_\theta, \{\text{epochs}, \text{best\_obj}, \text{final\_num\_tasks}\})$
 
 \end{algorithmic}
 \end{algorithm}
@@ -191,76 +171,53 @@ This section presents the complete pseudocode for MetaTrainer, which implements 
 \clearpage
 
 % ============================================================================
-% ALGORITHM 3: COMPUTE TASK LOSSES (FOMAML INNER/OUTER LOOP)
+% FOMAML INNER-OUTER LOOP
 % ============================================================================
 
 \begin{algorithm}[h]
-\caption{ComputeTaskLosses: First-Order MAML (FOMAML)}
-\label{alg:compute_losses}
+\caption{COMPUTE\_FOMAML\_LOSSES: Inner-Loop Adaptation + Outer-Loop Evaluation}
+\label{alg:fomaml}
 \begin{algorithmic}[1]
 
 \Require{
 \begin{itemize}
-	\item Sub-agent: $\pi_{\text{sub}}$ with network parameters $\theta$
-	\item Active task set: $\text{active\_tasks}$
-	\item Environment with task-specific reset
-	\item Hyperparameters: $\alpha_{\text{inner}}$ (inner LR), clip\_eps, value\_coef, entropy\_coef
+	\item Policy $\pi_\theta$, Active task set $\text{active\_tasks}$
+	\item Hyperparameters: inner LR $\alpha_{\text{in}}$, clip\_eps, value\_coef, entropy\_coef
 \end{itemize}
 }
 
 \Ensure{
 \begin{itemize}
-	\item Task losses for meta-update: $\{\mathcal{L}_\tau^{\text{query}} : \tau \in \text{active\_tasks}\}$
-	\item Task metrics: entropy, support/query losses, improvements
+	\item Query losses for all tasks, task metrics (entropy, improvements)
 \end{itemize}
 }
 
-\State \textbf{Initialize:} $\text{task\_losses} \leftarrow []$, $\text{task\_metrics} \leftarrow \{\}$
+\State \textbf{Initialize:} $\text{query\_losses} \leftarrow []$, $\text{task\_metrics} \leftarrow \{\}$
 
 \For{each task $\tau \in \text{active\_tasks}$}
 
-	\State \textbf{// Inner loop: Support set adaptation}
-	\State $\pi_{\text{sub}}.{\text{clone}}(\pi_{\text{meta}})$ \Comment{Reset to meta-parameters}
-	\State $\text{env.retask}(\tau)$
-	\State $\text{support\_batch} \leftarrow \text{CollectEpisode}(\pi_{\text{sub}}, \text{env})$ \Comment{Single episode}
+	\State \textbf{// Inner Loop: Collect support set and compute adapted parameters}
+	\State $\theta_{\text{old}} \leftarrow \text{clone}(\pi_\theta)$ \Comment{Clone for this task}
+	\State $\text{batch\_supp} \leftarrow \text{COLLECT\_EPISODE}(\pi_{\theta_{\text{old}}}, \tau)$ \Comment{One complete episode}
+	\State $\mathcal{L}_{\text{supp}} \leftarrow \text{COMPUTE\_PPO\_LOSS}(\text{batch\_supp}, \pi_{\theta_{\text{old}}})$
+	\State $\nabla_\theta \mathcal{L}_{\text{supp}} \leftarrow \text{BACKWARD}(\mathcal{L}_{\text{supp}})$
+	\State $\theta_{\text{adapted}} \leftarrow \theta_{\text{old}} - \alpha_{\text{in}} \cdot \nabla_\theta \mathcal{L}_{\text{supp}}$ \Comment{FOMAML step}
 
-	\State \textbf{// Compute support loss (backward pass, no step)}
-	\State $\mathcal{L}_\tau^{\text{supp}} \leftarrow \text{ComputePPOLoss}(\text{support\_batch}, \pi_{\text{sub}})$
-	\Comment{Policy + Value + Entropy}
+	\State \textbf{// Outer Loop: Collect query set and evaluate with adapted parameters}
+	\State $\text{batch\_query} \leftarrow \text{COLLECT\_EPISODE}(\pi_{\theta_{\text{old}}}, \tau)$ \Comment{Another episode from same task}
+	\State $\mathcal{L}_{\text{query}} \leftarrow \text{COMPUTE\_PPO\_LOSS}(\text{batch\_query}, \pi, \theta_{\text{adapted}})$
+	\Comment{Via functional\_call for gradient flow}
 
-	\State \textbf{// Compute adapted parameters via FOMAML}
-	\State $\nabla_\theta \mathcal{L}_\tau^{\text{supp}} \leftarrow \text{backward}(\mathcal{L}_\tau^{\text{supp}})$
-	\State $\theta_\tau^{\text{adapted}} \leftarrow \theta - \alpha_{\text{inner}} \cdot \nabla_\theta \mathcal{L}_\tau^{\text{supp}}$
-	\Comment{One gradient step, no optimizer.step()}
+	\State \textbf{// Metrics for curriculum and monitoring}
+	\State $\text{entropy} \leftarrow \text{mean}(\text{batch\_query.entropies})$
+	\State $\text{improvement} \leftarrow \mathcal{L}_{\text{supp}} - \mathcal{L}_{\text{query}}$
 
-	\State \textbf{// Outer loop: Query set evaluation}
-	\State $\text{env.retask}(\tau)$
-	\State $\text{query\_batch} \leftarrow \text{CollectEpisode}(\pi_{\text{sub}}, \text{env})$
-
-	\State \textbf{// Evaluate with adapted parameters (functional\_call)}
-	\State $\text{query\_logits}, \text{query\_values} \leftarrow \text{functional\_call}(\pi_{\text{sub}}, \theta_\tau^{\text{adapted}}, \text{query\_batch})$
-	\Comment{Forward pass with adapted $\theta$}
-
-	\State \textbf{// Compute query loss (connected to meta-agent for outer-loop update)}
-	\State $\mathcal{L}_\tau^{\text{query}} \leftarrow \text{ComputePPOLoss}(\text{query\_batch}, \text{logits}=\text{query\_logits})$
-
-	\State \textbf{// Metrics: improvement, entropy}
-	\State $\text{improvement} \leftarrow \mathcal{L}_\tau^{\text{supp}} - \mathcal{L}_\tau^{\text{query}}$
-	\State $\text{entropy} \leftarrow \text{mean}(\text{query\_batch.entropies})$
-
-	\State $\text{task\_losses} \leftarrow \text{task\_losses} + [\mathcal{L}_\tau^{\text{query}}]$
-	\State $\text{task\_metrics}[\tau] \leftarrow \{$
-	\Indent
-		\texttt{support\_loss}: $\mathcal{L}_\tau^{\text{supp}}$,
-		\texttt{query\_loss}: $\mathcal{L}_\tau^{\text{query}}$,
-		\texttt{improvement}: $\text{improvement}$,
-		\texttt{entropy}: $\text{entropy}$
-	\EndIndent
-	\State $\}$
+	\State $\text{query\_losses}.\text{append}(\mathcal{L}_{\text{query}})$
+	\State $\text{task\_metrics}[\tau] \leftarrow \{\text{supp\_loss}, \text{query\_loss}, \text{improvement}, \text{entropy}\}$
 
 \EndFor
 
-\State \textbf{return} $(\text{task\_losses}, \text{task\_metrics})$
+\State \textbf{return} $(\text{query\_losses}, \text{task\_metrics})$
 
 \end{algorithmic}
 \end{algorithm}
@@ -268,111 +225,138 @@ This section presents the complete pseudocode for MetaTrainer, which implements 
 \clearpage
 
 % ============================================================================
-% ALGORITHM 4: FINE-TUNING PHASE (PPO WITH VECTORIZED ENVIRONMENTS)
+% EPISODE COLLECTION
 % ============================================================================
 
 \begin{algorithm}[h]
-\caption{FineTune: Per-Task PPO Optimization}
-\label{alg:fine_tune}
+\caption{COLLECT\_EPISODE: Single Episode with Advantage Estimation}
+\label{alg:collect_ep}
 \begin{algorithmic}[1]
 
 \Require{
 \begin{itemize}
-	\item Tune agent: $\pi_{\text{tune}}$ (possibly initialized from meta-policy)
-	\item Fine-tune config: $\text{fcfg}$ (n\_iteration, rollout\_length, batch\_size, etc.)
-	\item Task list: $\text{env.tasks}$
-	\item Vectorized environment factory: SubprocVecEnv
+	\item Policy $\pi_\theta$, Task $\tau$
+	\item GAE parameters: $\gamma$ (discount), $\lambda$ (GAE factor)
 \end{itemize}
 }
 
 \Ensure{
 \begin{itemize}
-	\item Fine-tuned per-task policies
-	\item Task summaries: best objectives, iterations completed
+	\item Trajectory batch: obs, actions, log\_probs, advantages, returns, entropies
 \end{itemize}
 }
 
-\State \textbf{Initialize:} Vectorized environment with $\text{batch\_size}$ parallel workers
-\State \textbf{Initialize:} $\text{task\_summaries} \leftarrow \{\}$, $\text{best\_objective} \leftarrow -\infty$
+\State \textbf{Initialize:} Empty trajectory buffers, $(s, \text{info}) \leftarrow \text{env.reset}(\tau)$
 
-\For{each task $\tau \in \text{env.tasks}$}
+\State \textbf{// Rollout: execute policy until episode termination}
+\While{\textbf{True}}
+	\State $s_t \leftarrow \text{to\_tensor}(s)$, $\text{mask}_t \leftarrow \text{to\_tensor}(\text{info.action\_mask})$
+	\State $(a_t, \log p_t, v_t, h_t) \leftarrow \pi_\theta.\text{act}(s_t, \text{mask}_t, \text{deterministic}=\text{False})$
+	\State $(s', r_t, \text{done}, \text{truncated}, \text{info}) \leftarrow \text{env.step}(a_t)$
+	\State \textbf{Buffer:} $(s_t, a_t, \log p_t, v_t, h_t, r_t, \text{done})$
+	\State $s \leftarrow s'$
+	\If{\text{done} or \text{truncated} or not $\text{info.action\_mask}$.any()}
+		\State \textbf{break}
+	\EndIf
+\EndWhile
+
+\State \textbf{// Bootstrap value at trajectory end}
+\If{\text{truncated} and $\text{info.action\_mask}$.any()}
+	\State $v_{\text{boot}} \leftarrow \pi_\theta.\text{get\_value}(\text{to\_tensor}(s))$
+\Else
+	\State $v_{\text{boot}} \leftarrow 0$
+\EndIf
+
+\State \textbf{// Compute Generalized Advantage Estimate}
+\State $(A_t, G_t) \leftarrow \text{COMPUTE\_GAE}(R, V, D, v_{\text{boot}}, \gamma, \lambda)$
+\State \textbf{Normalize advantages:} $A_t \leftarrow (A_t - \mu) / (\sigma + \epsilon)$
+
+\State \textbf{return} $\{\text{states}, \text{actions}, \text{logprobs}, A_t, G_t, \text{entropies}\}$
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+
+% ============================================================================
+% PHASE 2: FINE-TUNING
+% ============================================================================
+
+\begin{algorithm}[h]
+\caption{PHASE\_FINE\_TUNE: Per-Task PPO with Vectorized Environments}
+\label{alg:phase2}
+\begin{algorithmic}[1]
+
+\Require{
+\begin{itemize}
+	\item Meta-learned policy $\pi_\theta$ (or random init if Phase 1 skipped)
+	\item Config $\mathcal{C}_{\text{tune}}$ (iterations, rollout\_length, batch\_size, PPO settings)
+\end{itemize}
+}
+
+\Ensure{
+\begin{itemize}
+	\item Per-task fine-tuned policies, Summary with per-task best objectives
+\end{itemize}
+}
+
+\State \textbf{Initialize:} $\text{vec\_env} \leftarrow \text{MAKE\_VECTORIZED\_ENV}(\mathcal{C}_{\text{tune}}.\text{batch\_size})$
+\State \textbf{Initialize:} $\text{task\_policies} \leftarrow \{\}$, $\text{best\_obj} \leftarrow -\infty$
+
+\For{each task $\tau \in \mathcal{T}$}
 
 	\State \textbf{Initialize task:} $\text{task\_best} \leftarrow -\infty$, $\text{patience} \leftarrow 0$
+	\State Create task-specific policy: $\pi_\tau \leftarrow \text{COPY}(\pi_\theta)$
 
-	\For{iter $= 1$ to $\text{fcfg.n\_iteration}$}
+	\For{iteration $i = 1$ to $\mathcal{C}_{\text{tune}}.\text{num\_iterations}$}
 
-		\State \textbf{// Step 1: Collect rollout data from parallel environments}
-		\State $\text{vec\_env.retask}(\tau)$ \Comment{Set task for all workers}
-		\State $\text{batch} \leftarrow \text{Collect}(\pi_{\text{tune}}, \text{vec\_env}, \text{rollout\_length})$
-		\Comment{See Algorithm \ref{alg:collect}}
+		\State \textbf{// Collect rollouts from parallel workers}
+		\State $\text{vec\_env.retask}(\tau)$
+		\State $\text{batch} \leftarrow \text{COLLECT\_ROLLOUTS}(\pi_\tau, \text{vec\_env}, \mathcal{C}_{\text{tune}}.\text{rollout\_length})$
 
-		\State \textbf{// Step 2: PPO optimization on collected data}
-		\State $\text{observations} \leftarrow \text{batch.observations}$
-		\State $\text{actions} \leftarrow \text{batch.actions}$, $\text{old\_logprobs} \leftarrow \text{batch.log\_probs}$
-		\State $\text{advantages} \leftarrow \text{batch.advantages}$, $\text{returns} \leftarrow \text{batch.returns}$
+		\State \textbf{// PPO updates: multiple epochs on collected data}
+		\For{ppo\_epoch $= 1$ to $\mathcal{C}_{\text{tune}}.\text{ppo\_epochs}$}
 
-		\For{ppo\_epoch $= 1$ to $\text{fcfg.ppo\_epochs}$}
-
-			\For{env\_idx $= 1$ to $\text{batch\_size}$} \Comment{Process each environment's data}
-
-				\State \textbf{// Get all timesteps for this environment}
-				\State $\text{env\_indices} \leftarrow \{i : i \equiv \text{env\_idx} \pmod{\text{batch\_size}}\}$
-
-				\State \textbf{// Shuffle and create mini-batches}
-				\State $\text{shuffled} \leftarrow \text{shuffle}(\text{env\_indices})$
-
-				\For{minibatch in chunks of $\text{fcfg.minibatch\_size}$ from shuffled}
-
-					\State \textbf{// Extract mini-batch}
-					\State $\text{mb\_obs}, \text{mb\_actions}, \text{mb\_old\_lp} \leftarrow \text{extract\_minibatch}(...)$
-					\State $\text{mb\_adv}, \text{mb\_ret}, \text{mb\_masks} \leftarrow \text{extract\_minibatch}(...)$
-
-					\State \textbf{// PPO policy update}
-					\State $\text{update\_metrics} \leftarrow \pi_{\text{tune}}.{\text{update}}(\text{minibatch})$
-					\Comment{Returns policy/value/entropy losses, grad\_norm}
-
-					\State $\text{total\_updates} \leftarrow \text{total\_updates} + 1$
-
+			\For{each environment $e = 1$ to $\mathcal{C}_{\text{tune}}.\text{batch\_size}$}
+				\State \textbf{// Get env-specific timesteps and create mini-batches}
+				\State $\text{env\_indices} \leftarrow$ all timesteps from environment $e$
+				\State \textbf{Shuffle} env\_indices
+				\For{minibatch of size $\mathcal{C}_{\text{tune}}.\text{minibatch\_size}$}
+					\State $\text{mb\_batch} \leftarrow$ extract observations, actions, advantages, returns
+					\State $(\mathcal{L}_\text{policy}, \mathcal{L}_\text{value}, \mathcal{L}_\text{entropy}) \leftarrow \text{COMPUTE\_PPO\_LOSS}(\text{mb\_batch}, \pi_\tau)$
+					\State $\pi_\tau \leftarrow \text{OPTIMIZER\_STEP}(\pi_\tau, \mathcal{L}_\text{total}, \alpha_\text{tune})$
 				\EndFor
-
 			\EndFor
 
 		\EndFor
 
-		\State \textbf{// Step 3: Evaluate and checkpoint}
-		\If{iter $\mod \text{fcfg.eval\_interval} = 0$}
-
-			\State $\text{eval\_stats} \leftarrow \text{fine\_evaluator.evaluate}(\tau)$
-			\State $\text{mean\_obj} \leftarrow \text{eval\_stats.mean\_objective}$
-
-			\If{$\text{mean\_obj} > \text{task\_best} + \text{fcfg.min\_delta}$}
-				\State $\text{task\_best} \leftarrow \text{mean\_obj}$
-				\State $\text{patience} \leftarrow 0$
-				\State Save checkpoint: \texttt{tune\_best\_}\tau
+		\State \textbf{// Evaluate and checkpoint}
+		\If{$i \mod \mathcal{C}_{\text{tune}}.\text{eval\_interval} = 0$}
+			\State $\text{eval\_obj} \leftarrow \text{EVALUATE}(\pi_\tau, \tau)$
+			\If{$\text{eval\_obj} > \text{task\_best} + \mathcal{C}_{\text{tune}}.\text{min\_delta}$}
+				\State $\text{task\_best} \leftarrow \text{eval\_obj}$, $\text{patience} \leftarrow 0$
+				\State \textbf{Save:} tune\_best\_$\tau$
 			\Else
 				\State $\text{patience} \leftarrow \text{patience} + 1$
+				\If{$\text{patience} \geq \mathcal{C}_{\text{tune}}.\text{patience}$}
+					\State \textbf{break}
+				\EndIf
 			\EndIf
-
-			\If{$\text{patience} \geq \text{fcfg.patience}$}
-				\State \textbf{Break} (early stopping for this task)
-			\EndIf
-
 		\EndIf
 
-		\If{iter $\mod \text{fcfg.checkpoint\_interval} = 0$}
-			\State Save checkpoint: \texttt{tune\_}\tau\texttt{\_iter\_}iter
+		\If{$i \mod \mathcal{C}_{\text{tune}}.\text{checkpoint\_interval} = 0$}
+			\State \textbf{Save:} tune\_$\tau$\_iter\_$i$
 		\EndIf
 
 	\EndFor
 
-	\State $\text{best\_objective} \leftarrow \max(\text{best\_objective}, \text{task\_best})$
-	\State $\text{task\_summaries}[\tau] \leftarrow \{\text{best\_obj}, \text{iterations}\}$
-	\State Save final checkpoint: \texttt{tune\_final\_}\tau
+	\State $\text{task\_policies}[\tau] \leftarrow \pi_\tau$
+	\State $\text{best\_obj} \leftarrow \max(\text{best\_obj}, \text{task\_best})$
 
 \EndFor
 
-\State \textbf{Close} vectorized environment
-\State \textbf{return} Fine-tuning summary with task summaries
+\State $\text{vec\_env.close}()$
+\State \textbf{return} $(\text{task\_policies}, \{\text{num\_tasks}, \text{best\_obj}\})$
 
 \end{algorithmic}
 \end{algorithm}
@@ -380,154 +364,51 @@ This section presents the complete pseudocode for MetaTrainer, which implements 
 \clearpage
 
 % ============================================================================
-% ALGORITHM 5: COLLECT SINGLE EPISODE (META-TRAINING)
+% VECTORIZED COLLECTION
 % ============================================================================
 
 \begin{algorithm}[h]
-\caption{CollectEpisode: Single Complete Episode with GAE}
-\label{alg:collect_episode}
+\caption{COLLECT\_ROLLOUTS: Parallel Rollout with Per-Environment Advantages}
+\label{alg:collect_vec}
 \begin{algorithmic}[1]
 
 \Require{
 \begin{itemize}
-	\item Agent: $\pi_\theta$ (policy with value function)
-	\item Environment: single instance (serial collection)
-	\item Hyperparameters: $\gamma$, $\lambda$ (GAE)
+	\item Policy $\pi_\theta$, Vectorized env with $N$ workers
+	\item Rollout length $T$, GAE params $\gamma, \lambda$
 \end{itemize}
 }
 
 \Ensure{
 \begin{itemize}
-	\item Batch: observations, masks, actions, log\_probs, advantages, returns, entropies
+	\item Batch with $N \times T$ timesteps, per-env advantages and returns
 \end{itemize}
 }
 
-\State \textbf{Initialize:} Empty buffers for trajectory data
+\State \textbf{Initialize:} Buffers, $(s_\text{list}, \text{info\_list}) \leftarrow \text{vec\_env.reset}()$
 
-\State $(obs, info) \leftarrow \text{env.reset}()$
-\State $\text{action\_mask} \leftarrow \text{info.action\_mask}$
-
-\State \textbf{// Collect trajectory until episode end}
-\While{\texttt{True}}
-
-	\State Convert observation to tensor: $obs_t \leftarrow \text{obs\_to\_tensor}(obs)$
-	\State $mask_t \leftarrow \text{torch.tensor}(\text{action\_mask})$
-
-	\State \textbf{// Get action, log prob, value, entropy}
-	\State $(a, \log p, v, h) \leftarrow \pi_\theta.{\text{act}}(obs_t, mask_t, \text{deterministic}=\texttt{False})$
-
-	\State \textbf{// Step environment}
-	\State $(next\_obs, reward, terminated, truncated, info) \leftarrow \text{env.step}(a)$
-
-	\State \textbf{// Buffer trajectory data}
-	\State Append $(obs_t, mask_t, a, \log p, v, h, reward, \text{done})$ to buffers
-	\State \Comment{done = terminated or truncated}
-
-	\State $obs \leftarrow next\_obs$, $action\_mask \leftarrow info.action\_mask$
-
-	\If{terminated or truncated or not $action\_mask$.any()}
-		\State $is\_truncated \leftarrow truncated$
-		\State \textbf{break}
-	\EndIf
-
-\EndWhile
-
-\State \textbf{// Bootstrap value at episode end}
-\If{$is\_truncated$ and $action\_mask$.any()}
-	\State $obs_{end} \leftarrow \text{obs\_to\_tensor}(obs)$
-	\State $mask_{end} \leftarrow \text{torch.tensor}(action\_mask)$
-	\State $(\_,\_,bootstrap\_v,\_) \leftarrow \pi_\theta.{\text{act}}(obs_{end}, mask_{end})$
-\Else
-	\State $bootstrap\_v \leftarrow 0$
-\EndIf
-
-\State \textbf{// Compute GAE advantages and returns}
-\State $(advantages, returns) \leftarrow \text{ComputeGAE}(\text{rewards}, \text{values}, \text{dones}, bootstrap_v, \gamma, \lambda)$
-
-\State \textbf{// Normalize advantages}
-\State $advantages \leftarrow \frac{advantages - \text{mean}(advantages)}{\text{std}(advantages) + \epsilon}$
-
-\State \textbf{return} $\{\text{observations, masks, actions, log\_probs, advantages, returns, entropies}\}$
-
-\end{algorithmic}
-\end{algorithm}
-
-\clearpage
-
-% ============================================================================
-% ALGORITHM 6: COLLECT PARALLEL ROLLOUTS (FINE-TUNING)
-% ============================================================================
-
-\begin{algorithm}[h]
-\caption{Collect: Parallel Rollout with Per-Environment GAE}
-\label{alg:collect}
-\begin{algorithmic}[1]
-
-\Require{
-\begin{itemize}
-	\item Agent: $\pi_\theta$
-	\item Vectorized environment: SubprocVecEnv with $n\_\text{envs}$ workers
-	\item Rollout length: $T$ (timesteps to collect per environment)
-	\item GAE parameters: $\gamma$, $\lambda$
-\end{itemize}
-}
-
-\Ensure{
-\begin{itemize}
-	\item Batch of $n\_\text{envs} \times T$ timesteps with per-environment advantages
-\end{itemize}
-}
-
-\State \textbf{Initialize:} Buffers for observations, actions, rewards, values, etc.
-\State $(obs\_\text{list}, info\_\text{list}) \leftarrow \text{vec\_env.reset}()$
-\State $action\_masks \leftarrow \text{stack}(\{info.action\_mask\})$, shape: $(n\_\text{envs}, n\_\text{actions})$
-
-\State \textbf{// Collect T timesteps from all environments in parallel}
+\State \textbf{// Collect T timesteps from all N environments}
 \For{$t = 1$ to $T$}
-
-	\State \textbf{// Batch observations from all environments}
-	\State $stacked\_obs \leftarrow \text{stack\_obs}(obs\_\text{list})$
-	\State $obs_t \leftarrow \text{batch\_obs\_to\_tensor}(stacked\_obs)$
-	\State $mask_t \leftarrow \text{torch.tensor}(action\_masks)$
-
-	\State \textbf{// Get actions and values for all environments}
-	\State $(actions_t, \log\_probs_t, values_t, entropies_t) \leftarrow \pi_\theta.{\text{act}}(obs_t, mask_t)$
-
-	\State \textbf{// Step all environments}
-	\State $(obs\_\text{list}, rewards, terminateds, truncateds, info\_\text{list}) \leftarrow \text{vec\_env.step}(actions_t)$
-	\State $action\_masks \leftarrow \text{stack}(\{info.action\_mask\})$
-
-	\State \textbf{// Buffer trajectory data}
-	\State Append $(stacked\_obs, mask_t, actions_t, \log\_probs_t, values_t, entropies_t)$ to buffers
-	\State Append $(rewards, \text{dones}=\text{terminateds} \lor \text{truncateds})$ to buffers
-
+	\State $s_t \leftarrow \text{to\_tensor}(s_\text{list})$, $\text{mask}_t \leftarrow \text{to\_tensor}(\text{info\_list})$
+	\State $(a_t, \log p_t, v_t, h_t) \leftarrow \pi_\theta.\text{act\_batch}(s_t, \text{mask}_t)$
+	\State $(s_\text{list}, r_t, \text{done}, \text{trunc}, \text{info\_list}) \leftarrow \text{vec\_env.step}(a_t)$
+	\State \textbf{Buffer timestep across all envs}
 \EndFor
 
-\State \textbf{// Bootstrap values at rollout end}
-\State $stacked\_final \leftarrow \text{stack\_obs}(obs\_\text{list})$
-\State $obs\_final \leftarrow \text{batch\_obs\_to\_tensor}(stacked\_final)$
-\State $mask\_final \leftarrow \text{torch.tensor}(action\_masks)$
-\State $(\_,\_,bootstrap\_vals,\_) \leftarrow \pi_\theta.{\text{act}}(obs\_final, mask\_final)$
-\State \textbf{// Mask bootstrap for terminated episodes}
-\State $done\_mask \leftarrow \text{terminateds} \lor \text{truncateds}$
-\State $bootstrap\_vals \leftarrow bootstrap\_vals \cdot \neg done\_mask$
+\State \textbf{// Bootstrap values for all envs}
+\State $(\_,\_,v_\text{boot},\_) \leftarrow \pi_\theta.\text{act\_batch}(\text{to\_tensor}(s_\text{list}), \cdots)$
+\State Mask out $v_\text{boot}$ for terminated episodes
 
-\State \textbf{// Compute per-environment advantages and returns}
-\For{env\_idx $= 1$ to $n\_\text{envs}$}
-
-	\State Extract trajectory for env: $rewards_e, values_e, dones_e$
-	\State $v\_\text{with\_bootstrap} \leftarrow \text{concat}(values_e, bootstrap\_vals[e])$
-	\State $(adv_e, ret_e) \leftarrow \text{ComputeGAE}(rewards_e, v\_\text{with\_bootstrap}, dones_e, \gamma, \lambda)$
-	\State Buffer per-environment advantages/returns
-
+\State \textbf{// Compute per-environment GAE}
+\For{each environment $e$}
+	\State $(A_e, G_e) \leftarrow \text{COMPUTE\_GAE}(r_e, v_e, d_e, v_\text{boot}[e], \gamma, \lambda)$
+	\State Buffer $A_e, G_e$
 \EndFor
 
-\State \textbf{// Flatten and normalize across all environments}
-\State $advantages \leftarrow \text{flatten}(\text{advantages\_list})$
-\State $advantages \leftarrow \frac{advantages - \text{mean}(advantages)}{\text{std}(advantages) + \epsilon}$
-\State $returns \leftarrow \text{flatten}(\text{returns\_list})$
+\State \textbf{// Flatten and normalize across all envs}
+\State $(A, G) \leftarrow \text{flatten\_and\_normalize}(\text{all per-env advantages/returns})$
 
-\State \textbf{return} $\{\text{observations, masks, actions, log\_probs, advantages, returns, entropies}\}$
+\State \textbf{return} $\{\text{states}, \text{actions}, \text{logprobs}, A, G, \text{entropies}\}$
 
 \end{algorithmic}
 \end{algorithm}
@@ -535,105 +416,48 @@ This section presents the complete pseudocode for MetaTrainer, which implements 
 \clearpage
 
 % ============================================================================
-% ALGORITHM 7: COMPUTE PPO LOSS
+% PPO LOSS COMPUTATION
 % ============================================================================
 
 \begin{algorithm}[h]
-\caption{ComputePPOLoss: PPO Clipped Objective + Value + Entropy}
+\caption{COMPUTE\_PPO\_LOSS: Policy Clipping + Value + Entropy}
 \label{alg:ppo_loss}
 \begin{algorithmic}[1]
 
 \Require{
 \begin{itemize}
-	\item Batch: observations, actions, old\_log\_probs, advantages, returns, masks
-	\item Agent hyperparameters: clip\_eps, value\_coef, entropy\_coef
+	\item Batch: observations, actions, old\_logprobs, advantages, returns, masks
+	\item Hyperparameters: $\epsilon$ (clip), $c_v$ (value coef), $c_e$ (entropy coef)
 \end{itemize}
 }
 
 \Ensure{
 \begin{itemize}
-	\item Total loss for backprop
-	\item Component losses: policy, value, entropy
+	\item Scalar total loss, component losses (for logging)
 \end{itemize}
 }
 
-\State \textbf{// Forward pass: get current policy and value estimates}
-\State $(logits, values, \_) \leftarrow \pi_\theta.{\text{network.evaluate}}(\text{observations}, \text{masks}, \text{actions}=\texttt{None})$
+\State \textbf{// Forward pass}
+\State $(\text{logits}, \text{values}) \leftarrow \pi_\theta(\text{observations}, \text{masks})$
+\State $\log p_\text{new} \leftarrow \log\_\text{softmax}(\text{logits})[\text{actions}]$
 
-\State \textbf{// Gather log probabilities for taken actions}
-\State $\log\_probs\_curr \leftarrow \log\_\text{softmax}(logits).gather(\text{actions})$
+\State \textbf{// PPO policy loss: clipped surrogate objective}
+\State $r_t \leftarrow \exp(\log p_\text{new} - \text{old\_logprobs})$ \Comment{probability ratio}
+\State $\text{surr1} \leftarrow r_t \times A_t$
+\State $\text{surr2} \leftarrow \text{clip}(r_t, 1-\epsilon, 1+\epsilon) \times A_t$
+\State $\mathcal{L}_\text{policy} \leftarrow -\text{mean}(\min(\text{surr1}, \text{surr2}))$
 
-\State \textbf{// PPO policy loss (clipped objective)}
-\State $ratio \leftarrow \exp(\log\_probs\_curr - old\_log\_probs)$
-\State $surr1 \leftarrow ratio \times advantages$
-\State $surr2 \leftarrow \text{clamp}(ratio, 1-\text{clip\_eps}, 1+\text{clip\_eps}) \times advantages$
-\State $policy\_loss \leftarrow -\text{mean}(\min(surr1, surr2))$
+\State \textbf{// Value loss: MSE}
+\State $\mathcal{L}_\text{value} \leftarrow \text{MSE}(\text{values}, \text{returns})$
 
-\State \textbf{// Value loss (MSE)}
-\State $value\_loss \leftarrow \text{MSE}(values, returns)$
-
-\State \textbf{// Entropy bonus}
-\State $entropy \leftarrow -\sum_a \pi(a) \log \pi(a)$ \Comment{From softmax over actions}
-\State $entropy\_loss \leftarrow -\text{mean}(entropy)$ \Comment{Negative to encourage exploration}
+\State \textbf{// Entropy loss: regularization for exploration}
+\State $H \leftarrow -\sum_a \pi(a) \log \pi(a)$ \Comment{policy entropy}
+\State $\mathcal{L}_\text{entropy} \leftarrow -\text{mean}(H)$ \Comment{negative to maximize entropy}
 
 \State \textbf{// Combined loss}
-\State $total\_loss \leftarrow policy\_loss + \text{value\_coef} \times value\_loss + \text{entropy\_coef} \times entropy\_loss$
+\State $\mathcal{L}_\text{total} \leftarrow \mathcal{L}_\text{policy} + c_v \mathcal{L}_\text{value} + c_e \mathcal{L}_\text{entropy}$
 
-\State \textbf{return} $\{$policy\_loss, value\_loss, entropy\_loss, total\_loss$\}$
-
-\end{algorithmic}
-\end{algorithm}
-
-\clearpage
-
-% ============================================================================
-% ALGORITHM 8: BIDIRECTIONAL ACTION SELECTION
-% ============================================================================
-
-\begin{algorithm}[h]
-\caption{Bidirectional Action Selection with Hierarchical Decoder}
-\label{alg:bidirectional_action}
-\begin{algorithmic}[1]
-
-\Require{
-\begin{itemize}
-	\item Current state: $s = (v_{\text{node}}, G_p)$ \Comment{VNR node and physical graph}
-	\item Policy network: $\pi_\theta$
-	\item Temperature parameter: $\tau$ (for softmax)
-\end{itemize}
-}
-
-\Ensure{
-\begin{itemize}
-	\item Selected action: $a = (v_n, p_n)$ \Comment{(virtual node, physical node) pair}
-\end{itemize}
-}
-
-\State \textbf{// Hierarchical Decoder: Stage 1}
-\State Encode VNR and physical network: $h_v, h_p \leftarrow \text{Encoder}(v_{\text{node}}, G_p)$
-\State Compute action logits: $\mathbf{z} \leftarrow \text{DecoderLayer1}(h_v, h_p)$
-
-\State \textbf{// Physical Node Selection}
-\State Compute probability distribution: $\mathbf{p}_p = \text{softmax}(\mathbf{z} / \tau)$
-\State Mask infeasible nodes: $\mathbf{p}_p[j] \leftarrow 0$ for $j \notin \text{FeasibleNodes}(v_{\text{node}}, G_p)$
-\State Normalize: $\mathbf{p}_p \leftarrow \mathbf{p}_p / \sum_j \mathbf{p}_p[j]$
-\State Sample physical node: $p_n \sim \text{Categorical}(\mathbf{p}_p)$
-
-\State \textbf{// Hierarchical Decoder: Stage 2}
-\State Update state with selected physical node: $s' \leftarrow (v_{\text{node}}, G_p, p_n)$
-\State Encode updated state: $h_s \leftarrow \text{Encoder}(s')$
-\State Compute virtual action logits: $\mathbf{z}' \leftarrow \text{DecoderLayer2}(h_s)$
-
-\State \textbf{// Virtual Node Selection}
-\State Compute probability distribution: $\mathbf{p}_v = \text{softmax}(\mathbf{z}' / \tau)$
-\State Mask infeasible neighbors: $\mathbf{p}_v[i] \leftarrow 0$ for $i \notin \text{NextVNRNodes}(v_{\text{node}})$
-\State Normalize: $\mathbf{p}_v \leftarrow \mathbf{p}_v / \sum_i \mathbf{p}_v[i]$
-\State Sample virtual node: $v_n \sim \text{Categorical}(\mathbf{p}_v)$
-
-\State \textbf{// Composite Action}
-\State $a \leftarrow (v_n, p_n)$ \Comment{Bidirectional action pair}
-
-\State \textbf{return} $a$, $\{\mathbf{p}_p, \mathbf{p}_v\}$ \Comment{Action and probability distributions}
+\State \textbf{return} $(\mathcal{L}_\text{total}, \mathcal{L}_\text{policy}, \mathcal{L}_\text{value}, \mathcal{L}_\text{entropy})$
 
 \end{algorithmic}
 \end{algorithm}
@@ -641,285 +465,156 @@ This section presents the complete pseudocode for MetaTrainer, which implements 
 \clearpage
 
 % ============================================================================
-% ALGORITHM 5: INFERENCE WITH META-TRAINED POLICY
+% MATHEMATICAL BACKGROUND
 % ============================================================================
 
-\begin{algorithm}[h]
-\caption{Inference: Adapting Meta-Policy to New VNR Size}
-\label{alg:inference}
-\begin{algorithmic}[1]
-
-\Require{
-\begin{itemize}
-	\item Meta-trained policy: $\pi_\theta$
-	\item New VNR size: $N_{\text{new}}$
-	\item Adaptation dataset: $D_{\text{new}}$ (few VNRs of size $N_{\text{new}}$)
-	\item Number of adaptation steps: $K_{\text{adapt}}$
-	\item Adaptation learning rate: $\alpha_{\text{adapt}}$
-\end{itemize}
-}
-
-\Ensure{
-\begin{itemize}
-	\item Adapted policy for new size: $\pi_{\theta_{\text{new}}}$
-\end{itemize}
-}
-
-\State \textbf{Initialize:} $\theta_{\text{new}} \leftarrow \theta$ \Comment{Start from meta-policy}
-
-\State \textbf{// Rapid adaptation phase}
-\For{$k = 1$ to $K_{\text{adapt}}$}
-
-	\State Sample mini-batch: $B \sim D_{\text{new}}$
-	\State Collect experiences: $\mathcal{E} \leftarrow \{(s, a, r) : \text{execute } \pi_{\theta_{\text{new}}} \text{ on } B\}$
-	\State Compute adaptation loss: $\mathcal{L}_{\text{adapt}} \leftarrow \text{RL\_Loss}(\mathcal{E})$
-	\State Update parameters: $\theta_{\text{new}} \leftarrow \theta_{\text{new}} - \alpha_{\text{adapt}} \nabla_{\theta} \mathcal{L}_{\text{adapt}}$
-
-\EndFor
-
-\State \textbf{// Final inference}
-\For{each VNR request $v_{\text{query}}$ in test set}
-
-	\State Initialize VNR embedding: $s_0 \leftarrow (v_{\text{root}}, G_p)$
-	\State $i \leftarrow 0$
-
-	\While{not all VNR nodes mapped}
-
-		\State Execute bidirectional action: $a_i \leftarrow \text{BidirectionalActionSelection}(s_i, \pi_{\theta_{\text{new}}})$
-		\State Apply action: Map virtual node to physical node
-		\State Update state: $s_{i+1} \leftarrow \text{UpdateState}(s_i, a_i)$
-		\State $i \leftarrow i + 1$
-
-		\If{mapping fails (infeasible)}
-			\State \Return Reject VNR request
-		\EndIf
-
-	\EndWhile
-
-	\State \Return Accepted VNR request with mapping
-
-\EndFor
-
-\end{algorithmic}
-\end{algorithm}
-
-\clearpage
-
-\section{Key Components Description}
-
-\subsection{Entropy-Based Curriculum Expansion}
-
-MetaTrainer implements dynamic curriculum learning through entropy-based task scheduling. Starting with a single (easiest) task, the algorithm monitors policy entropy during training. When entropy falls below a configured threshold (indicating convergence), the next task is added to the active task set:
-
-\[
-\text{active\_tasks} \leftarrow \text{active\_tasks} \cup \{\text{next\_task}\} \quad \text{if} \quad H(\pi) < \text{entropy\_threshold}
-\]
-
-This gradual task expansion prevents training collapse on trivial problems and aligns with the principle of \textit{learning from easy to hard}.
-
-\subsection{First-Order MAML (FOMAML)}
-
-MetaTrainer uses FOMAML rather than full second-order MAML for computational efficiency. The key insight is:
-\begin{enumerate}
-	\item \textbf{Inner loop (support set):} Compute gradients $\nabla_\theta \mathcal{L}_\tau^{\text{supp}}$ without stepping
-	\item \textbf{Parameter adaptation:} Compute adapted parameters as $\theta_\tau^{\text{adapted}} = \theta - \alpha_{\text{inner}} \nabla_\theta \mathcal{L}_\tau^{\text{supp}}$
-	\item \textbf{Outer loop (query set):} Evaluate loss with adapted parameters via functional\_call to maintain gradient flow
-	\item \textbf{Meta-gradient:} Backpropagate through adapted parameters for outer-loop update
-\end{enumerate}
-
-The functional\_call mechanism enables efficient gradient computation without materializing intermediate states:
-\[
-\mathcal{L}_\tau^{\text{query}} = \text{functional\_call}(\pi_\theta, \theta_\tau^{\text{adapted}}, \mathcal{D}_\tau^{\text{query}})
-\]
-
-\subsection{PPO-Based Policy Optimization}
-
-Both meta-training and fine-tuning phases use Proximal Policy Optimization (PPO) with three loss components:
-
-\begin{equation}
-\mathcal{L}_{\text{PPO}} = \mathcal{L}_{\text{policy}} + c_v \mathcal{L}_{\text{value}} + c_e \mathcal{L}_{\text{entropy}}
-\end{equation}
-
-where:
-\begin{itemize}
-	\item $\mathcal{L}_{\text{policy}} = -\mathbb{E}[\min(r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t)]$ (clipped surrogate)
-	\item $\mathcal{L}_{\text{value}} = \frac{1}{2} (V_\theta(s) - \hat{G}_t)^2$ (mean squared error)
-	\item $\mathcal{L}_{\text{entropy}} = -\mathbb{E}[H(\pi_\theta(s))]$ (entropy regularization)
-\end{itemize}
-
-This unified loss across phases ensures consistency in optimization objectives.
-
-\subsection{Vectorized Environment Support}
-
-Fine-tuning leverages parallel environment workers (SubprocVecEnv) to accelerate data collection. Per-environment advantages are computed independently via GAE, then aggregated:
-
-\[
-A_t^{(i)} = \sum_{l=0}^{T-t-1} (\gamma \lambda)^l \delta_t^{(i)}, \quad \text{where} \quad \delta_t^{(i)} = r_t^{(i)} + \gamma V(s_{t+1}^{(i)}) - V(s_t^{(i)})
-\]
-
-This enables sample-efficient training on multi-task environments.
-
-\subsection{Three-Agent Architecture}
-
-MetaTrainer employs three separate agents to decouple responsibilities:
-\begin{itemize}
-	\item \textbf{meta\_agent}: Maintains the meta-policy parameters $\theta$; updated via meta-gradients
-	\item \textbf{sub\_agent}: Cloned per task during meta-training; used for inner-loop adaptation
-	\item \textbf{tune\_agent}: Fine-tuned independently per task; may be initialized from meta\_agent or trained from scratch
-\end{itemize}
-
-This design allows clean separation between meta-learning and task-specific optimization.
-
-\clearpage
-
-\section{Loss Functions and Optimization}
-
-\subsection{PPO Policy Loss (Clipped Surrogate)}
-
-\begin{equation}
-\mathcal{L}_{\text{policy}} = -\mathbb{E}_t \left[\min\left(r_t(\theta) \hat{A}_t, \text{clip}\left(r_t(\theta), 1-\epsilon_{\text{clip}}, 1+\epsilon_{\text{clip}}\right) \hat{A}_t\right)\right]
-\end{equation}
-
-where:
-\begin{itemize}
-	\item $r_t(\theta) = \frac{\pi_\theta(a_t | s_t)}{\pi_{\text{old}}(a_t | s_t)}$ is the probability ratio
-	\item $\hat{A}_t$ is the generalized advantage estimate (GAE)
-	\item $\epsilon_{\text{clip}} = 0.2$ (default clipping range)
-\end{itemize}
-
-The clipping ensures conservative policy updates and prevents excessively large gradient steps.
-
-\subsection{Value Function Loss}
-
-\begin{equation}
-\mathcal{L}_{\text{value}} = \frac{1}{2} \mathbb{E}_t \left[(V_\theta(s_t) - \hat{G}_t)^2\right]
-\end{equation}
-
-where $\hat{G}_t = r_t + \gamma r_{t+1} + \cdots + \gamma^{T-t-1} r_{T-1} + \gamma^{T-t} V_\theta(s_T)$ is the TD($\lambda$) return estimate.
-
-\subsection{Entropy Regularization}
-
-\begin{equation}
-\mathcal{L}_{\text{entropy}} = -\mathbb{E}_t [H(\pi_\theta(\cdot | s_t))] = \mathbb{E}_t \left[\sum_a \pi_\theta(a | s_t) \log \pi_\theta(a | s_t)\right]
-\end{equation}
-
-Negative entropy encourages exploration during training; scaled by coefficient $c_e$ (default 0.01).
+\section{Mathematical Formulation}
 
 \subsection{Generalized Advantage Estimation (GAE)}
+
+GAE computes a bias-variance tradeoff between temporal difference and Monte Carlo returns:
 
 \begin{equation}
 \hat{A}_t = \sum_{l=0}^{T-t-1} (\gamma \lambda)^l \delta_{t+l}, \quad \text{where} \quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)
 \end{equation}
 
-GAE provides a trade-off between bias and variance via $\lambda \in [0, 1]$ (default 0.95).
+\noindent
+The TD residual $\delta_t$ is discounted and accumulated. Parameter $\lambda \in [0,1]$ controls bias-variance: $\lambda=0$ is pure TD, $\lambda=1$ is Monte Carlo.
 
-\subsection{Meta-Loss (FOMAML)}
+\subsection{FOMAML Formulation}
 
+\subsubsection{Inner Loop (Support Set)}
+Compute task-specific gradient without stepping:
 \begin{equation}
-\mathcal{L}_{\text{meta}} = \frac{1}{|\mathcal{T}|} \sum_{\tau \in \text{active\_tasks}} \mathcal{L}_\tau^{\text{query}}(\theta_\tau^{\text{adapted}})
+\mathcal{L}_\tau^{\text{supp}} = \text{PPO\_Loss}(\text{batch\_support}, \pi_\theta)
 \end{equation}
 
-where:
-\begin{itemize}
-	\item $\mathcal{L}_\tau^{\text{query}}$ is the PPO loss evaluated on the query set with adapted parameters
-	\item $\theta_\tau^{\text{adapted}} = \theta - \alpha_{\text{inner}} \nabla_\theta \mathcal{L}_\tau^{\text{supp}}$ are the adapted parameters
-	\item The gradient is computed via functional\_call to enable backprop through the adaptation
-\end{itemize}
+\subsubsection{Adapted Parameters}
+First-order approximation to task-optimal parameters:
+\begin{equation}
+\theta_\tau^{\text{adapted}} = \theta - \alpha_{\text{inner}} \nabla_\theta \mathcal{L}_\tau^{\text{supp}}
+\end{equation}
 
-\section{Hyperparameters}
+\subsubsection{Outer Loop (Query Set)}
+Evaluate loss with adapted parameters, backprop through adaptation:
+\begin{equation}
+\mathcal{L}_\tau^{\text{query}} = \text{PPO\_Loss}(\text{batch\_query}, \pi, \theta_\tau^{\text{adapted}})
+\end{equation}
 
-Key hyperparameters for the MetaTrainer framework:
+\subsubsection{Meta-Gradient}
+Aggregate query losses across tasks:
+\begin{equation}
+\mathcal{L}_{\text{meta}} = \frac{1}{|\mathcal{T}|} \sum_{\tau \in \mathcal{T}} \mathcal{L}_\tau^{\text{query}}
+\end{equation}
 
-\begin{center}
-\begin{tabular}{|l|l|l|}
-\hline
-\multicolumn{3}{|c|}{\textbf{Meta-Learning Phase Configuration}} \\
-\hline
-\textbf{Parameter} & \textbf{Key} & \textbf{Typical Value} \\
-\hline
-Meta-learning epochs & epochs & 200 \\
-Batches per epoch & batches\_per\_epoch & 50 \\
-Meta-learning rate & (agent.learning\_rate) & $1e-3$ \\
-Inner-loop learning rate & (inferred from optimizer) & $1e-3$ \\
-Entropy threshold & entropy\_threshold & 0.5 \\
-Curriculum check interval & check\_interval & 1 \\
-Evaluation interval & eval\_interval & 1 \\
-Early stopping patience & patience & 20 \\
-Min improvement delta & min\_delta & $1e-4$ \\
-\hline
-\multicolumn{3}{|c|}{\textbf{Fine-Tuning Phase Configuration}} \\
-\hline
-\textbf{Parameter} & \textbf{Key} & \textbf{Typical Value} \\
-\hline
-Fine-tuning iterations/task & n\_iteration & 100 \\
-Rollout length & rollout\_length & 256 \\
-Batch size (parallel envs) & batch\_size & 1 \\
-PPO epochs per rollout & ppo\_epochs & 1 \\
-Mini-batch size & minibatch\_size & 32 \\
-Fine-tune learning rate & (agent.learning\_rate) & $1e-3$ \\
-GAE $\gamma$ (discount) & gamma & 0.99 \\
-GAE $\lambda$ & gae\_lambda & 0.95 \\
-Entropy coefficient & entropy\_coef & 0.01 \\
-Value loss coefficient & value\_coef & 0.5 \\
-Clip epsilon (PPO) & clip\_eps & 0.2 \\
-Max gradient norm & max\_grad\_norm & 0.5 \\
-Early stopping patience & patience & 10 \\
-\hline
-\end{tabular}
-\end{center}
+\subsection{PPO Loss}
+
+Combined objective balancing policy improvement, value estimation, and exploration:
+
+\begin{equation}
+\mathcal{L}_{\text{PPO}} = \underbrace{-\mathbb{E}\left[\min\left(r_t \hat{A}_t, \text{clip}(r_t, 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]}_{\text{Policy}} + c_v \underbrace{\text{MSE}(V(s), G_t)}_{\text{Value}} + c_e \underbrace{(-H(\pi))}_{\text{Entropy}}
+\end{equation}
+
+\noindent
+where $r_t = \pi_\theta(a_t|s_t) / \pi_\text{old}(a_t|s_t)$ is the probability ratio.
+
+\subsection{Entropy-Based Curriculum}
+
+Tasks are scheduled dynamically. When policy entropy falls below threshold on current tasks, next task is activated:
+
+\begin{equation}
+\text{Activate}(t_{k+1}) \quad \Leftarrow \quad H(\pi_\theta(\cdot|s)) < H_{\text{threshold}}
+\end{equation}
+
+This prevents premature convergence on simple tasks and structures learning from easier to harder problems.
 
 \clearpage
 
-\section{Complexity Analysis}
+\section{Algorithm Complexity}
 
 \subsection{Time Complexity}
 
-\textbf{Meta-Training Phase:}
+\textbf{Meta-Learning Phase:}
 \begin{equation}
-O(E_{\text{meta}} \cdot B_{\text{epoch}} \cdot |\mathcal{T}|_{\text{active}} \cdot (T_{\text{ep}} + n_{\text{fwd}} + n_{\text{bwd}}))
+O(E_{\text{meta}} \cdot B_{\text{epoch}} \cdot |\mathcal{T}|_{\text{active}} \cdot (2 T_{\text{ep}} + n_{\text{forward}} + 2 n_{\text{backward}}))
 \end{equation}
 
-where:
 \begin{itemize}
-	\item $E_{\text{meta}}$ = number of meta-training epochs
-	\item $B_{\text{epoch}}$ = batches per epoch
-	\item $|\mathcal{T}|_{\text{active}}$ = number of active tasks (grows gradually)
-	\item $T_{\text{ep}}$ = timesteps per episode (variable)
-	\item $n_{\text{fwd}}, n_{\text{bwd}}$ = forward/backward pass time (model-dependent)
+	\item $E_{\text{meta}}$ epochs of outer-loop iterations
+	\item $B_{\text{epoch}}$ batches per epoch (FOMAML steps per epoch)
+	\item $|\mathcal{T}|_{\text{active}}$ active tasks (grows gradually via curriculum)
+	\item $2 T_{\text{ep}}$ for support + query episodes (serial collection)
+	\item $n_{\text{forward}}, n_{\text{backward}}$ for network forward/backward passes
 \end{itemize}
 
 \textbf{Fine-Tuning Phase:}
 \begin{equation}
-O(|\mathcal{T}| \cdot n_{\text{iter}} \cdot B_{\text{size}} \cdot T_{\text{roll}} \cdot n_{\text{ppo}} \cdot \lceil \frac{B_{\text{size}} \cdot T_{\text{roll}}}{M_{\text{batch}}} \rceil \cdot n_{\text{fwd/bwd}})
+O(|\mathcal{T}| \cdot I_{\text{tune}} \cdot B_{\text{size}} \cdot T_{\text{roll}} \cdot E_{\text{ppo}} \cdot \lceil \frac{B_{\text{size}} \cdot T_{\text{roll}}}{M} \rceil)
 \end{equation}
 
-where:
 \begin{itemize}
-	\item $|\mathcal{T}|$ = total number of tasks
-	\item $n_{\text{iter}}$ = fine-tuning iterations
-	\item $B_{\text{size}}$ = number of parallel environments
-	\item $T_{\text{roll}}$ = rollout length per iteration
-	\item $n_{\text{ppo}}$ = PPO epochs per rollout
-	\item $M_{\text{batch}}$ = mini-batch size
+	\item $|\mathcal{T}|$ total tasks (sequential per-task training)
+	\item $I_{\text{tune}}$ iterations per task
+	\item $B_{\text{size}}$ parallel environments (vectorized)
+	\item $T_{\text{roll}}$ rollout length per iteration
+	\item $E_{\text{ppo}}$ PPO epochs per rollout
+	\item $M$ mini-batch size
 \end{itemize}
 
 \subsection{Space Complexity}
 
 \begin{itemize}
-	\item \textbf{Model parameters:} $O(n_{\text{params}})$ (typically $10^6$--$10^7$ for graph networks)
-	\item \textbf{Meta-phase buffers:} $O(|\mathcal{T}|_{\text{active}} \cdot (T_{\text{ep}} + T_{\text{ep}}))$ (support + query sets per task)
-	\item \textbf{Fine-tune buffers:} $O(B_{\text{size}} \cdot T_{\text{roll}})$ (rollout buffer, cleared per iteration)
-	\item \textbf{Vectorized environments:} $O(B_{\text{size}} \cdot \text{env\_state\_size})$ (parallel worker states)
+	\item \textbf{Model parameters:} $O(n_{\text{params}})$ (typically $10^6$--$10^7$)
+	\item \textbf{Meta-phase buffers:} $O(|\mathcal{T}|_{\text{active}} \cdot 2T_{\text{ep}})$ (support + query per task)
+	\item \textbf{Fine-tune buffers:} $O(B_{\text{size}} \cdot T_{\text{roll}})$ (cleared per iteration)
+	\item \textbf{Vectorized env states:} $O(B_{\text{size}} \cdot |\text{state}|)$ (worker states)
 \end{itemize}
 
 \subsection{Computational Advantages}
 
 \begin{enumerate}
-	\item \textbf{Curriculum expansion:} Active task set grows gradually, reducing early-phase computational cost
-	\item \textbf{FOMAML:} Avoids second-order Hessian computation; only first-order gradients needed
-	\item \textbf{functional\_call:} Efficient adapted parameter evaluation without cloning entire modules
-	\item \textbf{Vectorized fine-tuning:} Parallelization via SubprocVecEnv reduces wall-clock training time
-	\item \textbf{Per-environment GAE:} Avoids materializing global advantage buffer; computes per-env on-the-fly
+	\item \textbf{Curriculum expansion:} Active task set grows gradually, reducing early computational cost
+	\item \textbf{FOMAML:} First-order gradients only (no Hessian); single backward pass per task
+	\item \textbf{Vectorized collection:} Parallel worker speedup in fine-tuning phase (wall-clock time)
+	\item \textbf{Per-environment GAE:} On-the-fly computation avoids materializing global buffers
+	\item \textbf{functional\_call:} Efficient adapted parameter evaluation without module cloning
 \end{enumerate}
+
+\section{Hyperparameters}
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\multicolumn{3}{|c|}{\textbf{Meta-Learning Phase}} \\
+\hline
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Default} \\
+\hline
+Number of epochs & $E_{\text{meta}}$ & 200 \\
+Batches per epoch & $B_{\text{epoch}}$ & 50 \\
+Meta learning rate & $\alpha_m$ & $1e-3$ \\
+Inner loop learning rate & $\alpha_{\text{in}}$ & $1e-3$ \\
+Entropy threshold & $H_{\text{threshold}}$ & 0.5 \\
+Curriculum check interval & - & 1 \\
+Evaluation interval & - & 1 \\
+Early stopping patience & - & 20 \\
+\hline
+\multicolumn{3}{|c|}{\textbf{Fine-Tuning Phase}} \\
+\hline
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Default} \\
+\hline
+Iterations per task & $I_{\text{tune}}$ & 100 \\
+Parallel environments & $B_{\text{size}}$ & 4 \\
+Rollout length & $T_{\text{roll}}$ & 256 \\
+PPO epochs per rollout & $E_{\text{ppo}}$ & 3 \\
+Mini-batch size & $M$ & 32 \\
+Fine-tune learning rate & $\alpha_t$ & $1e-3$ \\
+Discount factor & $\gamma$ & 0.99 \\
+GAE $\lambda$ & $\lambda$ & 0.95 \\
+PPO clipping epsilon & $\epsilon$ & 0.2 \\
+Value loss coefficient & $c_v$ & 0.5 \\
+Entropy coefficient & $c_e$ & 0.01 \\
+\hline
+\end{tabular}
+\end{center}
 
 \end{document}
