@@ -237,14 +237,13 @@ class _MRGNNLayer(nn.Module):
 
 
 class GraphEncoder(nn.Module):
-    def __init__(
-        self,
-        D: int,
-        n_layers: int = 3,
-        dropout: float = 0.0,
-        use_instance_norm: bool = False,
-    ):
+    def __init__(self, cfg: Dict):
         super().__init__()
+        D = cfg.get("embedding_dim", 128)
+        n_layers = cfg.get("n_layers", 3)
+        dropout = cfg.get("dropout", 0.1)
+        use_instance_norm = cfg.get("use_instance_norm", False)
+
         self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
         self.layers = nn.ModuleList(
             [_MRGNNLayer(D, GRAPH_EDGE_DIM, dropout) for _ in range(n_layers)]
@@ -465,6 +464,377 @@ class EGAEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# MEGAGraphEncoder Variants - Multi-Edge Graph Aggregation (for ablation studies)
+# ---------------------------------------------------------------------------
+# Three implementations: MLP (simplest), GCN (normalized), GAT (attention-based)
+
+
+class MLP_MEGAGraphEncoder(nn.Module):
+    """MLP-based MEGA encoder: two-stage aggregation with MLP message passing.
+
+    Stage 1: Project edge attributes [cost, time] → D-dim embeddings
+    Stage 2: MLP([h_src || e_proj]) → mean aggregation
+
+    Simplest variant, fastest, good for sparse graphs.
+    """
+
+    def __init__(self, cfg: Dict):
+        super().__init__()
+        D = cfg.get("embedding_dim", 128)
+        n_layers = cfg.get("n_layers", 3)
+        dropout = cfg.get("dropout", 0.1)
+        use_instance_norm = cfg.get("use_instance_norm", False)
+
+        self.D = D
+        self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
+        self.edge_truck_proj = nn.Linear(GRAPH_EDGE_DIM, D)
+        self.edge_drone_proj = nn.Linear(GRAPH_EDGE_DIM, D)
+        self.layers = nn.ModuleList(
+            [_MLPMEGAMRGNNLayer(D, dropout) for _ in range(n_layers)]
+        )
+        self.out_norm = _make_norm(use_instance_norm, D)
+        self.pool = nn.Linear(D, 1)
+
+    def forward(
+        self,
+        node_feat: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.input_proj(node_feat)
+        t_ea_proj = self.edge_truck_proj(t_ea)
+        d_ea_proj = self.edge_drone_proj(d_ea)
+        for layer in self.layers:
+            h = layer(h, t_ei, t_ea_proj, d_ei, d_ea_proj)
+        h = self.out_norm(h)
+        w = torch.softmax(self.pool(h), dim=1)
+        return h, (w * h).sum(dim=1)
+
+
+class _MLPMEGAMRGNNLayer(nn.Module):
+    """MLP message passing with mean aggregation."""
+
+    def __init__(self, D: int, dropout: float = 0.0):
+        super().__init__()
+        self.msg_truck = _mlp(D + D, D * 2, D, dropout)
+        self.msg_drone = _mlp(D + D, D * 2, D, dropout)
+        self.update = nn.Linear(D * 2, D)
+        self.norm = nn.LayerNorm(D)
+        self.drop = nn.Dropout(dropout)
+
+    def _pass(
+        self,
+        h: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr_proj: torch.Tensor,
+        mlp: nn.Module,
+    ) -> torch.Tensor:
+        B, N, D = h.shape
+        src, dst = edge_index[0], edge_index[1]
+        E = src.shape[0]
+
+        h_src = h[:, src, :]
+        if edge_attr_proj.dim() == 2:
+            ea_proj = edge_attr_proj.unsqueeze(0).expand(B, -1, -1)
+        else:
+            ea_proj = edge_attr_proj
+
+        msg = mlp(torch.cat([h_src, ea_proj], dim=-1))
+
+        agg = torch.zeros(B, N, D, device=h.device, dtype=h.dtype)
+        count = torch.zeros(N, device=h.device, dtype=h.dtype)
+        dst_expanded = dst.unsqueeze(0).unsqueeze(-1).expand(B, E, D)
+        agg.scatter_add_(1, dst_expanded, msg)
+        count.scatter_add_(0, dst, torch.ones(E, device=h.device))
+        count = count.clamp(min=1.0).view(1, N, 1)
+        return agg / count
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea_proj: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea_proj: torch.Tensor,
+    ) -> torch.Tensor:
+        agg_t = self._pass(h, t_ei, t_ea_proj, self.msg_truck)
+        agg_d = self._pass(h, d_ei, d_ea_proj, self.msg_drone)
+        upd = self.drop(self.update(torch.cat([agg_t, agg_d], dim=-1)))
+        return self.norm(h + upd)
+
+
+class GCN_MEGAGraphEncoder(nn.Module):
+    """GCN-based MEGA encoder: symmetric degree normalization D^(-1/2) A D^(-1/2).
+
+    Stage 1: Project edge attributes [cost, time] → D-dim embeddings
+    Stage 2: MLP([h_src || e_proj]) → degree-normalized aggregation
+
+    Better for graphs with skewed degree distribution.
+    """
+
+    def __init__(self, cfg: Dict):
+        super().__init__()
+        D = cfg.get("embedding_dim", 128)
+        n_layers = cfg.get("n_layers", 3)
+        dropout = cfg.get("dropout", 0.1)
+        use_instance_norm = cfg.get("use_instance_norm", False)
+
+        self.D = D
+        self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
+        self.edge_truck_proj = nn.Linear(GRAPH_EDGE_DIM, D)
+        self.edge_drone_proj = nn.Linear(GRAPH_EDGE_DIM, D)
+        self.layers = nn.ModuleList(
+            [_GCNMEGAMRGNNLayer(D, dropout) for _ in range(n_layers)]
+        )
+        self.out_norm = _make_norm(use_instance_norm, D)
+        self.pool = nn.Linear(D, 1)
+
+    def forward(
+        self,
+        node_feat: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.input_proj(node_feat)
+        t_ea_proj = self.edge_truck_proj(t_ea)
+        d_ea_proj = self.edge_drone_proj(d_ea)
+        for layer in self.layers:
+            h = layer(h, t_ei, t_ea_proj, d_ei, d_ea_proj)
+        h = self.out_norm(h)
+        w = torch.softmax(self.pool(h), dim=1)
+        return h, (w * h).sum(dim=1)
+
+
+class _GCNMEGAMRGNNLayer(nn.Module):
+    """GCN-style message passing with symmetric degree normalization."""
+
+    def __init__(self, D: int, dropout: float = 0.0):
+        super().__init__()
+        self.msg_truck = _mlp(D + D, D * 2, D, dropout)
+        self.msg_drone = _mlp(D + D, D * 2, D, dropout)
+        self.update = nn.Linear(D * 2, D)
+        self.norm = nn.LayerNorm(D)
+        self.drop = nn.Dropout(dropout)
+
+    def _pass(
+        self,
+        h: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr_proj: torch.Tensor,
+        mlp: nn.Module,
+    ) -> torch.Tensor:
+        """GCN aggregation: D^(-1/2) A D^(-1/2) style normalization."""
+        B, N, D = h.shape
+        src, dst = edge_index[0], edge_index[1]
+        E = src.shape[0]
+
+        h_src = h[:, src, :]
+        if edge_attr_proj.dim() == 2:
+            ea_proj = edge_attr_proj.unsqueeze(0).expand(B, -1, -1)
+        else:
+            ea_proj = edge_attr_proj
+
+        msg = mlp(torch.cat([h_src, ea_proj], dim=-1))
+
+        # Compute in-degree and out-degree for normalization
+        in_degree = torch.zeros(N, device=h.device, dtype=h.dtype)
+        out_degree = torch.zeros(N, device=h.device, dtype=h.dtype)
+        in_degree.scatter_add_(0, dst, torch.ones(E, device=h.device, dtype=h.dtype))
+        out_degree.scatter_add_(0, src, torch.ones(E, device=h.device, dtype=h.dtype))
+
+        # Compute D^(-1/2)
+        d_inv_sqrt = torch.ones(N, device=h.device, dtype=h.dtype)
+        d_inv_sqrt[in_degree > 0] = 1.0 / torch.sqrt(in_degree[in_degree > 0])
+        d_inv_sqrt_out = torch.ones(N, device=h.device, dtype=h.dtype)
+        d_inv_sqrt_out[out_degree > 0] = 1.0 / torch.sqrt(out_degree[out_degree > 0])
+
+        # Apply symmetric normalization: D^(-1/2) A D^(-1/2)
+        norm_coeff = d_inv_sqrt_out[src] * d_inv_sqrt[dst]  # (E,)
+        msg = msg * norm_coeff.view(1, E, 1)  # (B, E, D)
+
+        # Scatter-add (already normalized)
+        agg = torch.zeros(B, N, D, device=h.device, dtype=h.dtype)
+        dst_expanded = dst.unsqueeze(0).unsqueeze(-1).expand(B, E, D)
+        agg.scatter_add_(1, dst_expanded, msg)
+
+        return agg
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea_proj: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea_proj: torch.Tensor,
+    ) -> torch.Tensor:
+        agg_t = self._pass(h, t_ei, t_ea_proj, self.msg_truck)
+        agg_d = self._pass(h, d_ei, d_ea_proj, self.msg_drone)
+        upd = self.drop(self.update(torch.cat([agg_t, agg_d], dim=-1)))
+        return self.norm(h + upd)
+
+
+class GAT_MEGAGraphEncoder(nn.Module):
+    """GAT-based MEGA encoder: multi-head attention over edge messages.
+
+    Stage 1: Project edge attributes [cost, time] → D-dim embeddings
+    Stage 2: Multi-head attention([h_src || e_proj]) → attention-weighted aggregation
+
+    Best for learning which edges matter most. Most expressive but slower.
+    """
+
+    def __init__(self, cfg: Dict):
+        super().__init__()
+        D = cfg.get("embedding_dim", 128)
+        n_layers = cfg.get("n_layers", 3)
+        dropout = cfg.get("dropout", 0.1)
+        use_instance_norm = cfg.get("use_instance_norm", False)
+        n_heads = cfg.get("n_heads", 4)
+
+        self.D = D
+        self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
+        self.edge_truck_proj = nn.Linear(GRAPH_EDGE_DIM, D)
+        self.edge_drone_proj = nn.Linear(GRAPH_EDGE_DIM, D)
+        self.layers = nn.ModuleList(
+            [_GATMEGAMRGNNLayer(D, dropout, n_heads) for _ in range(n_layers)]
+        )
+        self.out_norm = _make_norm(use_instance_norm, D)
+        self.pool = nn.Linear(D, 1)
+
+    def forward(
+        self,
+        node_feat: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.input_proj(node_feat)
+        t_ea_proj = self.edge_truck_proj(t_ea)
+        d_ea_proj = self.edge_drone_proj(d_ea)
+        for layer in self.layers:
+            h = layer(h, t_ei, t_ea_proj, d_ei, d_ea_proj)
+        h = self.out_norm(h)
+        w = torch.softmax(self.pool(h), dim=1)
+        return h, (w * h).sum(dim=1)
+
+
+class _GATMEGAMRGNNLayer(nn.Module):
+    """GAT-style message passing with learned attention weights."""
+
+    def __init__(self, D: int, dropout: float = 0.0, n_heads: int = 4):
+        super().__init__()
+        assert D % n_heads == 0, f"D ({D}) must be divisible by n_heads ({n_heads})"
+        self.D = D
+        self.n_heads = n_heads
+        self.d_k = D // n_heads
+
+        # Truck attention
+        self.q_truck = nn.Linear(D, D, bias=False)
+        self.k_truck = nn.Linear(D, D, bias=False)
+        self.v_truck = nn.Linear(D, D, bias=False)
+        self.edge_attn_truck = nn.Linear(D, n_heads)
+        self.out_truck = nn.Linear(D, D)
+
+        # Drone attention
+        self.q_drone = nn.Linear(D, D, bias=False)
+        self.k_drone = nn.Linear(D, D, bias=False)
+        self.v_drone = nn.Linear(D, D, bias=False)
+        self.edge_attn_drone = nn.Linear(D, n_heads)
+        self.out_drone = nn.Linear(D, D)
+
+        # Update
+        self.update = nn.Linear(D * 2, D)
+        self.norm = nn.LayerNorm(D)
+        self.drop = nn.Dropout(dropout)
+        self.attn_drop = nn.Dropout(dropout)
+
+    def _pass_attention(
+        self,
+        h: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr_proj: torch.Tensor,
+        q_proj: nn.Module,
+        k_proj: nn.Module,
+        v_proj: nn.Module,
+        edge_attn: nn.Module,
+        out_proj: nn.Module,
+    ) -> torch.Tensor:
+        """Multi-head attention aggregation with edge attribute modulation."""
+        B, N, D = h.shape
+        src, dst = edge_index[0], edge_index[1]
+        E = src.shape[0]
+
+        if edge_attr_proj.dim() == 2:
+            ea_proj = edge_attr_proj.unsqueeze(0).expand(B, -1, -1)
+        else:
+            ea_proj = edge_attr_proj
+
+        # Project to Q, K, V and reshape for multi-head
+        q = q_proj(h).view(B, N, self.n_heads, self.d_k)  # (B, N, heads, d_k)
+        k = k_proj(h).view(B, N, self.n_heads, self.d_k)
+        v = v_proj(h).view(B, N, self.n_heads, self.d_k)
+
+        # Extract Q, K, V for edges
+        q_src = q[:, src, :, :]  # (B, E, heads, d_k)
+        k_dst = k[:, dst, :, :]
+        v_src = v[:, src, :, :]
+
+        # Scaled dot-product attention
+        scores = torch.matmul(q_src, k_dst.transpose(-2, -1))  # (B, E, heads, d_k, d_k)
+        scores = scores / math.sqrt(self.d_k)
+        scores = scores.squeeze(-1)  # (B, E, heads, d_k)
+
+        # Modulate attention by edge attributes
+        edge_bias = edge_attn(ea_proj)  # (B, E, heads)
+        scores = scores.mean(dim=-1) + edge_bias  # (B, E, heads)
+
+        # Softmax per destination node (only over its incoming edges)
+        # Build mask: which edges go to which destination
+        attn_weights = torch.zeros(B, N, E, self.n_heads, device=h.device)
+        for i in range(E):
+            attn_weights[:, dst[i], i, :] = scores[:, i, :]
+
+        # Softmax over source edges per destination
+        attn_weights = torch.softmax(attn_weights, dim=2)  # (B, N, E, heads)
+        attn_weights = self.attn_drop(attn_weights)
+
+        # Apply attention to values and aggregate
+        # For each destination, sum weighted source values
+        v_expanded = v_src.unsqueeze(1)  # (B, 1, E, heads, d_k)
+        weighted_v = attn_weights.unsqueeze(-1) * v_expanded  # (B, N, E, heads, d_k)
+        agg = weighted_v.sum(dim=2)  # (B, N, heads, d_k)
+
+        # Reshape back to (B, N, D)
+        agg = agg.reshape(B, N, D)
+        agg = out_proj(agg)
+
+        return agg
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea_proj: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea_proj: torch.Tensor,
+    ) -> torch.Tensor:
+        agg_t = self._pass_attention(
+            h, t_ei, t_ea_proj, self.q_truck, self.k_truck, self.v_truck,
+            self.edge_attn_truck, self.out_truck,
+        )
+        agg_d = self._pass_attention(
+            h, d_ei, d_ea_proj, self.q_drone, self.k_drone, self.v_drone,
+            self.edge_attn_drone, self.out_drone,
+        )
+        upd = self.drop(self.update(torch.cat([agg_t, agg_d], dim=-1)))
+        return self.norm(h + upd)
+
+
+# ---------------------------------------------------------------------------
 # ValueHead - Multi-layer value function approximator
 # ---------------------------------------------------------------------------
 
@@ -627,10 +997,6 @@ class GEMANActorCritic(ActorCritic):
         # Encoder layers: read per-encoder n_layers
         n_node_layers: int = int(node_enc_cfg.get("n_layers", 3))
         n_veh_layers: int = int(veh_enc_cfg.get("n_layers", 3))
-        n_graph_layers: int = int(graph_enc_cfg.get("n_layers", 3))
-
-        # Graph encoder instance norm (new config option)
-        graph_use_in: bool = bool(graph_enc_cfg.get("use_instance_norm", False))
 
         # Decoder context projection parameters (new config options)
         node_ctx_hidden = int(node_dec_cfg.get("context_hidden_dim", 128))
@@ -640,7 +1006,10 @@ class GEMANActorCritic(ActorCritic):
 
         self.node_encoder = NodeEncoder(D, H, n_node_layers, drop, use_in)
         self.vehicle_encoder = VehicleEncoder(D, H, n_veh_layers, drop, use_in)
-        self.graph_encoder = GraphEncoder(D, n_graph_layers, drop, graph_use_in)
+
+        # Build graph encoder with merged config (name + hyperparams from registry)
+        graph_encoder_cls = graph_enc_cfg.get("name")
+        self.graph_encoder = graph_encoder_cls(graph_enc_cfg)
         self.node_decoder = NodeDecoder(
             D, clip, context_hidden_dim=node_ctx_hidden, context_dropout=node_ctx_dropout
         )

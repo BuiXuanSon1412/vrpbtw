@@ -15,6 +15,8 @@ Rules
 
 from __future__ import annotations
 
+
+import copy
 from pathlib import Path
 from typing import Any, Dict
 import torch.optim as optim
@@ -26,7 +28,13 @@ from impl.vrpbtw import VRPBTWEnv
 from impl.mvrpbtw import MVRPBTWEnv
 
 # Networks
-from impl.geman import GEMANActorCritic
+from impl.geman import (
+    GEMANActorCritic,
+    MLP_MEGAGraphEncoder,
+    GCN_MEGAGraphEncoder,
+    GAT_MEGAGraphEncoder,
+    GraphEncoder,
+)
 
 # Core
 from core.agent import BaseAgent, PPOAgent, ReinforceAgent, POMOAgent, MetaAgent
@@ -77,6 +85,13 @@ _COLLECTOR_REGISTRY: Dict[str, type] = {
     "gae": GAECollector,
     "mc": MCCollector,
     "pomo": POMOSampler,
+}
+
+_GRAPH_ENCODER_REGISTRY: Dict[str, type] = {
+    "mlp_mega": MLP_MEGAGraphEncoder,
+    "gcn_mega": GCN_MEGAGraphEncoder,
+    "gat_mega": GAT_MEGAGraphEncoder,
+    "graph": GraphEncoder,
 }
 
 
@@ -214,6 +229,11 @@ def build_trainer(
 
 
 # ---------------------------------------------------------------------------
+# Graph Encoder
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Network / Policy
 # ---------------------------------------------------------------------------
 
@@ -221,7 +241,8 @@ def build_trainer(
 def build_network(cfg: Dict[str, Any]) -> ActorCritic:
     """Build network from config.
 
-    Dispatches to registry based on network name, then calls from_config.
+    Dispatches to registry based on network name. Maps graph encoder name string
+    to the actual class object in _GRAPH_ENCODER_REGISTRY.
     Moves network to globals.DEVICE automatically.
     """
     import torch
@@ -234,6 +255,31 @@ def build_network(cfg: Dict[str, Any]) -> ActorCritic:
             f"Unknown network type {net_type!r}. "
             f"Register it in registry.py. Known: {list(_NETWORK_REGISTRY.keys())}"
         )
+
+    # Lookup graph encoder and merge with its config (don't modify cfg in-place)
+    layers_cfg = network_cfg.get("layers", {})
+    encoder_cfg = layers_cfg.get("encoder", {})
+    encoder_name = encoder_cfg.get("graph_encoder", "mlp_mega")
+
+    if encoder_name not in _GRAPH_ENCODER_REGISTRY:
+        raise ValueError(
+            f"Unknown graph encoder {encoder_name!r}. "
+            f"Register it in registry.py. Known: {list(_GRAPH_ENCODER_REGISTRY.keys())}"
+        )
+
+    # Create config dict with encoder class and hyperparameters
+    network_cfg = copy.deepcopy(network_cfg)
+    encoder_cls = _GRAPH_ENCODER_REGISTRY[encoder_name]
+
+    # Merge encoder class and config from graph_encoders section
+    graph_encoders_cfg = network_cfg.get("graph_encoders", {})
+    encoder_config = graph_encoders_cfg.get(encoder_name, {})
+
+    # Build final graph_encoder config: class + hyperparams
+    network_cfg["layers"]["encoder"]["graph_encoder"] = {
+        "name": encoder_cls,
+        **encoder_config
+    }
 
     cls = _NETWORK_REGISTRY[net_type]
     network = cls.from_config(network_cfg)

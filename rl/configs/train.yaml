@@ -13,7 +13,7 @@ reproducibility:
     torch_seed: 42
 
 experiment:
-  name: "son_PPO_10_RC"
+  name: "son_PPO_10_R"
   description: mvrpbtw experiment
 
 logger:
