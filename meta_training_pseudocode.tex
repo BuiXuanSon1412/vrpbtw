@@ -1,0 +1,471 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf-8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+% Algorithm style configuration
+\algrenewcommand\alglinenumber[1]{{\small\sf\color{darkgray}#1}}
+\algrenewcommand{\algorithmicrequire}{\textbf{Input:}}
+\algrenewcommand{\algorithmicensure}{\textbf{Output:}}
+
+\title{Meta-Training Framework with Curriculum Learning for Virtual Network Embedding}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Meta-Training Framework}
+
+This section presents the pseudocode for the meta-training framework with curriculum learning strategy.
+
+% ============================================================================
+% ALGORITHM 1: META-TRAINING FRAMEWORK
+% ============================================================================
+
+\begin{algorithm}[h]
+\caption{Meta-Training Framework with Curriculum Learning}
+\label{alg:meta_training}
+\begin{algorithmic}[1]
+
+\Require{
+\begin{itemize}
+	\item Virtual network request (VNR) dataset: $\mathcal{D} = \{D_1, D_2, \ldots, D_K\}$ grouped by size
+	\item Physical network: $G_p = (N_p, E_p)$
+	\item Number of meta-training epochs: $E_{\text{meta}}$
+	\item Curriculum schedule: $\mathcal{S} = \{s_1, s_2, \ldots, s_T\}$
+	\item Meta-learning rate: $\alpha_m$, Task-learning rate: $\alpha_t$
+	\item Policy network parameters: $\theta$
+\end{itemize}
+}
+
+\Ensure{
+\begin{itemize}
+	\item Trained meta-policy: $\pi_{\theta^*}$
+	\item Size-specific task policies: $\{\pi_1, \pi_2, \ldots, \pi_K\}$
+\end{itemize}
+}
+
+\State \textbf{Initialize:} Policy network $\pi_\theta$ with parameters $\theta$
+\State \textbf{Initialize:} Meta-buffer $\mathcal{B}_{\text{meta}} \leftarrow \emptyset$
+\State \textbf{Initialize:} Curriculum stage $t \leftarrow 1$, Task index set $\mathcal{T} \leftarrow \emptyset$
+
+\For{$e = 1$ to $E_{\text{meta}}$}
+
+	\State \textbf{// Curriculum stage update}
+	\If{$e \mod \text{stage\_update\_frequency} = 0$ and $t < T$}
+		\State $t \leftarrow t + 1$
+		\State Update task set: $\mathcal{T} \leftarrow \mathcal{S}_t$ \Comment{Include VNRs up to stage $t$}
+		\State Reset meta-buffer: $\mathcal{B}_{\text{meta}} \leftarrow \emptyset$
+	\EndIf
+
+	\State \textbf{// Meta-training iteration}
+	\State $\theta_{\text{old}} \leftarrow \theta$
+	\State $\nabla_{\theta} \mathcal{L}_{\text{meta}} \leftarrow 0$
+
+	\For{each task $\tau \in \mathcal{T}$} \Comment{Inner loop: Task-specific training}
+
+		\State \textbf{// Task adaptation}
+		\State $\theta_{\tau} \leftarrow \theta$ \Comment{Initialize task-specific parameters}
+
+		\For{$i = 1$ to $N_{\text{adapt}}$} \Comment{Adaptation steps}
+
+			\State Sample mini-batch from task $\tau$: $B_\tau \sim D_\tau$
+			\State Compute task loss: $\mathcal{L}_\tau(\theta_{\tau}) \leftarrow \text{ComputeLoss}(B_\tau, \pi_{\theta_\tau})$
+			\State \Comment{Policy gradient or DQN-based loss}
+
+			\State \textbf{// Gradient-based task adaptation}
+			\State $\theta_{\tau} \leftarrow \theta_{\tau} - \alpha_t \nabla_{\theta} \mathcal{L}_\tau(\theta_{\tau})$
+
+		\EndFor
+
+		\State \textbf{// Compute meta-gradient for this task}
+		\State Sample validation mini-batch: $B_{\tau}^{\text{val}} \sim D_\tau$
+		\State Compute validation loss: $\mathcal{L}_\tau^{\text{val}}(\theta_{\tau}) \leftarrow \text{ComputeLoss}(B_{\tau}^{\text{val}}, \pi_{\theta_\tau})$
+		\State $\nabla_{\theta} \mathcal{L}_{\text{meta}} \leftarrow \nabla_{\theta} \mathcal{L}_{\text{meta}} + \nabla_{\theta} \mathcal{L}_\tau^{\text{val}}(\theta_{\tau})$
+
+		\State \textbf{// Store experience in meta-buffer}
+		\State $\mathcal{B}_{\text{meta}} \leftarrow \mathcal{B}_{\text{meta}} \cup \{B_\tau, B_{\tau}^{\text{val}}\}$
+
+	\EndFor
+
+	\State \textbf{// Meta-update}
+	\State $\nabla_{\theta} \mathcal{L}_{\text{meta}} \leftarrow \frac{1}{|\mathcal{T}|} \nabla_{\theta} \mathcal{L}_{\text{meta}}$ \Comment{Average over tasks}
+	\State $\theta \leftarrow \theta - \alpha_m \nabla_{\theta} \mathcal{L}_{\text{meta}}$ \Comment{Meta-gradient step}
+
+	\State \textbf{// Logging and evaluation}
+	\If{$e \mod \text{eval\_frequency} = 0$}
+		\State $\text{meta\_loss} \leftarrow \text{EvaluateMeta}(\theta, \mathcal{T})$
+		\State Log: Epoch $e$, Loss $\text{meta\_loss}$, Curriculum stage $t$
+	\EndIf
+
+\EndFor
+
+\State \textbf{return} $\pi_\theta$ as trained meta-policy
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+
+% ============================================================================
+% ALGORITHM 2: CURRICULUM LEARNING SCHEDULE
+% ============================================================================
+
+\begin{algorithm}[h]
+\caption{Curriculum Learning Schedule Builder}
+\label{alg:curriculum_schedule}
+\begin{algorithmic}[1]
+
+\Require{
+\begin{itemize}
+	\item VNR size range: $[N_{\min}, N_{\max}]$
+	\item Number of curriculum stages: $T$
+	\item Growth strategy: \texttt{linear} or \texttt{exponential}
+\end{itemize}
+}
+
+\Ensure{
+\begin{itemize}
+	\item Curriculum schedule: $\mathcal{S} = \{s_1, s_2, \ldots, s_T\}$
+	\item Each $s_t$ is a set of VNR sizes to train on at stage $t$
+\end{itemize}
+}
+
+\State \textbf{Initialize:} $\mathcal{S} \leftarrow \emptyset$
+\State Compute size increment: $\Delta N \leftarrow \frac{N_{\max} - N_{\min}}{T}$
+
+\For{$t = 1$ to $T$}
+	\State \textbf{// Compute maximum size at stage $t$}
+	\If{\texttt{growth\_strategy} == \texttt{linear}}
+		\State $N_t^{\max} \leftarrow N_{\min} + t \cdot \Delta N$
+	\ElsIf{\texttt{growth\_strategy} == \texttt{exponential}}
+		\State $N_t^{\max} \leftarrow N_{\min} + N_{\min} \cdot (e^{t/T} - 1)$
+	\EndIf
+
+	\State \textbf{// Build stage set}
+	\State $s_t \leftarrow \{N : N_{\min} \le N \le N_t^{\max}\}$ \Comment{All sizes up to $N_t^{\max}$}
+	\State $\mathcal{S} \leftarrow \mathcal{S} \cup \{s_t\}$
+
+\EndFor
+
+\State \textbf{return} $\mathcal{S}$
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+
+% ============================================================================
+% ALGORITHM 3: TASK-SPECIFIC POLICY TRAINING
+% ============================================================================
+
+\begin{algorithm}[h]
+\caption{Task-Specific Policy Training}
+\label{alg:task_training}
+\begin{algorithmic}[1]
+
+\Require{
+\begin{itemize}
+	\item Task dataset: $D_\tau$ (VNRs of specific size)
+	\item Meta-initialized policy: $\pi_{\theta_{\text{init}}}$
+	\item Number of fine-tuning epochs: $E_{\text{task}}$
+	\item Task-specific learning rate: $\alpha_t$
+	\item Batch size: $B$
+\end{itemize}
+}
+
+\Ensure{
+\begin{itemize}
+	\item Fine-tuned task-specific policy: $\pi_{\theta_\tau^*}$
+\end{itemize}
+}
+
+\State \textbf{Initialize:} $\theta_\tau \leftarrow \theta_{\text{init}}$ \Comment{Initialize from meta-policy}
+\State \textbf{Initialize:} Experience buffer: $\mathcal{B}_\tau \leftarrow \emptyset$
+
+\For{$e = 1$ to $E_{\text{task}}$}
+
+	\State \textbf{// Data collection}
+	\For{$b = 1$ to $\lceil |D_\tau| / B \rceil$}
+
+		\State Sample batch $B_e \sim D_\tau$ of size $B$
+
+		\For{each VNR request $v \in B_e$}
+			\State Execute policy: $a \sim \pi_{\theta_\tau}(s | v)$ \Comment{Bidirectional action}
+			\State Obtain reward: $r \leftarrow \text{EvaluateAction}(a, v, G_p)$
+			\State Store experience: $(s, a, r) \rightarrow \mathcal{B}_\tau$
+		\EndFor
+
+	\EndFor
+
+	\State \textbf{// Policy update}
+	\State Sample mini-batch from buffer: $\mathcal{M} \sim \mathcal{B}_\tau$
+	\State Compute loss: $\mathcal{L}_\tau(\theta_\tau) \leftarrow \text{RL\_Loss}(\mathcal{M}, \pi_{\theta_\tau})$
+	\State Update parameters: $\theta_\tau \leftarrow \theta_\tau - \alpha_t \nabla_{\theta} \mathcal{L}_\tau(\theta_\tau)$
+
+	\State \textbf{// Evaluation}
+	\If{$e \mod \text{eval\_frequency} = 0$}
+		\State $\text{task\_reward} \leftarrow \text{Evaluate}(\pi_{\theta_\tau}, D_\tau)$
+		\State Log: Epoch $e$, Average Reward $\text{task\_reward}$
+	\EndIf
+
+\EndFor
+
+\State \textbf{return} $\pi_{\theta_\tau}$
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+
+% ============================================================================
+% ALGORITHM 4: BIDIRECTIONAL ACTION SELECTION
+% ============================================================================
+
+\begin{algorithm}[h]
+\caption{Bidirectional Action Selection with Hierarchical Decoder}
+\label{alg:bidirectional_action}
+\begin{algorithmic}[1]
+
+\Require{
+\begin{itemize}
+	\item Current state: $s = (v_{\text{node}}, G_p)$ \Comment{VNR node and physical graph}
+	\item Policy network: $\pi_\theta$
+	\item Temperature parameter: $\tau$ (for softmax)
+\end{itemize}
+}
+
+\Ensure{
+\begin{itemize}
+	\item Selected action: $a = (v_n, p_n)$ \Comment{(virtual node, physical node) pair}
+\end{itemize}
+}
+
+\State \textbf{// Hierarchical Decoder: Stage 1}
+\State Encode VNR and physical network: $h_v, h_p \leftarrow \text{Encoder}(v_{\text{node}}, G_p)$
+\State Compute action logits: $\mathbf{z} \leftarrow \text{DecoderLayer1}(h_v, h_p)$
+
+\State \textbf{// Physical Node Selection}
+\State Compute probability distribution: $\mathbf{p}_p = \text{softmax}(\mathbf{z} / \tau)$
+\State Mask infeasible nodes: $\mathbf{p}_p[j] \leftarrow 0$ for $j \notin \text{FeasibleNodes}(v_{\text{node}}, G_p)$
+\State Normalize: $\mathbf{p}_p \leftarrow \mathbf{p}_p / \sum_j \mathbf{p}_p[j]$
+\State Sample physical node: $p_n \sim \text{Categorical}(\mathbf{p}_p)$
+
+\State \textbf{// Hierarchical Decoder: Stage 2}
+\State Update state with selected physical node: $s' \leftarrow (v_{\text{node}}, G_p, p_n)$
+\State Encode updated state: $h_s \leftarrow \text{Encoder}(s')$
+\State Compute virtual action logits: $\mathbf{z}' \leftarrow \text{DecoderLayer2}(h_s)$
+
+\State \textbf{// Virtual Node Selection}
+\State Compute probability distribution: $\mathbf{p}_v = \text{softmax}(\mathbf{z}' / \tau)$
+\State Mask infeasible neighbors: $\mathbf{p}_v[i] \leftarrow 0$ for $i \notin \text{NextVNRNodes}(v_{\text{node}})$
+\State Normalize: $\mathbf{p}_v \leftarrow \mathbf{p}_v / \sum_i \mathbf{p}_v[i]$
+\State Sample virtual node: $v_n \sim \text{Categorical}(\mathbf{p}_v)$
+
+\State \textbf{// Composite Action}
+\State $a \leftarrow (v_n, p_n)$ \Comment{Bidirectional action pair}
+
+\State \textbf{return} $a$, $\{\mathbf{p}_p, \mathbf{p}_v\}$ \Comment{Action and probability distributions}
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+
+% ============================================================================
+% ALGORITHM 5: INFERENCE WITH META-TRAINED POLICY
+% ============================================================================
+
+\begin{algorithm}[h]
+\caption{Inference: Adapting Meta-Policy to New VNR Size}
+\label{alg:inference}
+\begin{algorithmic}[1]
+
+\Require{
+\begin{itemize}
+	\item Meta-trained policy: $\pi_\theta$
+	\item New VNR size: $N_{\text{new}}$
+	\item Adaptation dataset: $D_{\text{new}}$ (few VNRs of size $N_{\text{new}}$)
+	\item Number of adaptation steps: $K_{\text{adapt}}$
+	\item Adaptation learning rate: $\alpha_{\text{adapt}}$
+\end{itemize}
+}
+
+\Ensure{
+\begin{itemize}
+	\item Adapted policy for new size: $\pi_{\theta_{\text{new}}}$
+\end{itemize}
+}
+
+\State \textbf{Initialize:} $\theta_{\text{new}} \leftarrow \theta$ \Comment{Start from meta-policy}
+
+\State \textbf{// Rapid adaptation phase}
+\For{$k = 1$ to $K_{\text{adapt}}$}
+
+	\State Sample mini-batch: $B \sim D_{\text{new}}$
+	\State Collect experiences: $\mathcal{E} \leftarrow \{(s, a, r) : \text{execute } \pi_{\theta_{\text{new}}} \text{ on } B\}$
+	\State Compute adaptation loss: $\mathcal{L}_{\text{adapt}} \leftarrow \text{RL\_Loss}(\mathcal{E})$
+	\State Update parameters: $\theta_{\text{new}} \leftarrow \theta_{\text{new}} - \alpha_{\text{adapt}} \nabla_{\theta} \mathcal{L}_{\text{adapt}}$
+
+\EndFor
+
+\State \textbf{// Final inference}
+\For{each VNR request $v_{\text{query}}$ in test set}
+
+	\State Initialize VNR embedding: $s_0 \leftarrow (v_{\text{root}}, G_p)$
+	\State $i \leftarrow 0$
+
+	\While{not all VNR nodes mapped}
+
+		\State Execute bidirectional action: $a_i \leftarrow \text{BidirectionalActionSelection}(s_i, \pi_{\theta_{\text{new}}})$
+		\State Apply action: Map virtual node to physical node
+		\State Update state: $s_{i+1} \leftarrow \text{UpdateState}(s_i, a_i)$
+		\State $i \leftarrow i + 1$
+
+		\If{mapping fails (infeasible)}
+			\State \Return Reject VNR request
+		\EndIf
+
+	\EndWhile
+
+	\State \Return Accepted VNR request with mapping
+
+\EndFor
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+
+\section{Key Components Description}
+
+\subsection{Curriculum Learning Strategy}
+
+The curriculum learning schedule $\mathcal{S}$ gradually introduces VNRs of increasing sizes. Each stage $t$ includes all VNRs with sizes up to $N_t^{\max}$, preventing the training from focusing only on easy (small) or difficult (large) problems:
+
+\[
+s_t = \{N : N_{\min} \le N \le N_t^{\max}\}, \quad t = 1, 2, \ldots, T
+\]
+
+where:
+\begin{itemize}
+	\item Linear growth: $N_t^{\max} = N_{\min} + \frac{t}{T}(N_{\max} - N_{\min})$
+	\item Exponential growth: $N_t^{\max} = N_{\min} + N_{\min}(e^{t/T} - 1)$
+\end{itemize}
+
+\subsection{Bidirectional Action Design}
+
+Traditional RL-based VNE selects mappings unidirectionally. The bidirectional action design selects both:
+\begin{itemize}
+	\item \textbf{Virtual node}: Which node in the VNR to map next
+	\item \textbf{Physical node}: Which node in the physical network to map to
+\end{itemize}
+
+This increases the action space flexibility and enables more diverse exploration strategies.
+
+\subsection{Hierarchical Decoder}
+
+The hierarchical decoder generates adaptive probability distributions in two stages:
+\begin{enumerate}
+	\item \textbf{Stage 1}: Physical node decoder selects a candidate physical node
+	\item \textbf{Stage 2}: Virtual node decoder selects the corresponding virtual node
+\end{enumerate}
+
+This hierarchical structure constrains the action space and improves training efficiency.
+
+\subsection{Meta-Learning Framework}
+
+The meta-learning framework trains a single policy on multiple tasks (VNR sizes) such that it can quickly adapt to new sizes with minimal additional training:
+
+\[
+\theta^* = \arg\min_{\theta} \sum_{\tau=1}^{|\mathcal{T}|} \mathcal{L}_\tau^{\text{val}}(\theta - \alpha_t \nabla_{\theta} \mathcal{L}_\tau(\theta))
+\]
+
+where $\mathcal{L}_\tau$ is the loss on task $\tau$ and $\mathcal{L}_\tau^{\text{val}}$ is evaluated after adaptation.
+
+\subsection{Experience Replay}
+
+The meta-buffer stores experiences from all training tasks to enable efficient policy updates and prevent catastrophic forgetting:
+
+\[
+\mathcal{B}_{\text{meta}} = \bigcup_{\tau=1}^{|\mathcal{T}|} \mathcal{B}_\tau
+\]
+
+\clearpage
+
+\section{Loss Functions and Optimization}
+
+\subsection{Task-Specific Loss}
+
+For policy gradient methods:
+\begin{equation}
+\mathcal{L}_\tau(\theta) = \mathbb{E}_{(s,a,r) \sim D_\tau} \left[ -\log \pi_\theta(a|s) \cdot Q(s, a) \right]
+\end{equation}
+
+For value-based methods:
+\begin{equation}
+\mathcal{L}_\tau(\theta) = \mathbb{E}_{(s,a,r,s') \sim D_\tau} \left[ (r + \gamma \max_{a'} Q_\theta(s', a') - Q_\theta(s, a))^2 \right]
+\end{equation}
+
+\subsection{Meta-Loss}
+
+\begin{equation}
+\mathcal{L}_{\text{meta}} = \frac{1}{|\mathcal{T}|} \sum_{\tau \in \mathcal{T}} \mathcal{L}_\tau^{\text{val}}(\theta_\tau^{\text{adapted}})
+\end{equation}
+
+where $\theta_\tau^{\text{adapted}}$ is obtained after $N_{\text{adapt}}$ adaptation steps on task $\tau$.
+
+\section{Hyperparameters}
+
+Key hyperparameters for the meta-training framework:
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Typical Value} \\
+\hline
+Meta-learning rate & $\alpha_m$ & $1e-3$ \\
+Task-specific learning rate & $\alpha_t$ & $1e-2$ \\
+Adaptation learning rate & $\alpha_{\text{adapt}}$ & $1e-2$ \\
+Number of adaptation steps & $N_{\text{adapt}}$ & 5-10 \\
+Curriculum stages & $T$ & 5-10 \\
+Meta-training epochs & $E_{\text{meta}}$ & 100-500 \\
+Task-specific epochs & $E_{\text{task}}$ & 50-100 \\
+Inference adaptation steps & $K_{\text{adapt}}$ & 1-5 \\
+Batch size & $B$ & 32-64 \\
+Discount factor & $\gamma$ & 0.99 \\
+Temperature (action sampling) & $\tau$ & 1.0 \\
+\hline
+\end{tabular}
+\end{center}
+
+\clearpage
+
+\section{Complexity Analysis}
+
+\subsection{Time Complexity}
+
+\begin{itemize}
+	\item Meta-training: $O(E_{\text{meta}} \cdot |\mathcal{T}| \cdot N_{\text{adapt}} \cdot B \cdot |G_p|)$
+	\item Per-task training: $O(E_{\text{task}} \cdot B \cdot |G_p|)$
+	\item Inference on single VNR: $O(N_{\text{VNR}} \cdot |G_p|)$
+\end{itemize}
+
+\subsection{Space Complexity}
+
+\begin{itemize}
+	\item Meta-buffer: $O(E_{\text{meta}} \cdot |\mathcal{T}| \cdot B)$ transitions
+	\item Task-specific buffers: $O(E_{\text{task}} \cdot B)$ transitions per task
+	\item Model parameters: $O(|G_p| \cdot h^2)$ where $h$ is hidden dimension
+\end{itemize}
+
+\end{document}
