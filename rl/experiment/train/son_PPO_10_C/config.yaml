@@ -25,7 +25,7 @@ trainer:
       name: ppo
       learning_rate: 0.0001
       optimizer: adam
-      clip_eps: 0.2
+      clip_eps: 0.1
       value_coef: 0.5
       entropy_coef: 0.05
       max_grad_norm: 0.5
@@ -93,19 +93,50 @@ network:
         n_layers: 3
         dropout: 0.1
         use_instance_norm: true
-      graph_encoder:
-        embedding_dim: 128
-        n_layers: 3
-        dropout: 0.1
+      graph_encoder: mlp_mega
     decoder:
       node_decoder:
         embedding_dim: 128
         clip: 10.0
-        activation: relu
+        context_hidden_dim: 128
+        context_dropout: 0.1
       vehicle_decoder:
         embedding_dim: 128
         clip: 10.0
-        activation: relu
+        context_hidden_dim: 128
+        context_dropout: 0.1
+    value_head:
+      hidden_dims:
+      - 128
+      - 128
+      use_dropout: true
+      dropout: 0.1
+graph_encoders:
+  graph:
+    description: Original multi-relational GNN with raw edge attributes
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+  mlp_mega:
+    description: Simple MLP message passing with mean aggregation
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+  gcn_mega:
+    description: GCN-style symmetric degree normalization D^(-1/2) A D^(-1/2)
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+  gat_mega:
+    description: Multi-head attention with learned edge importance weights
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+    n_heads: 4
 environment:
   name: mvrpbtw
   properties:
@@ -121,8 +152,11 @@ environment:
     drone_takeoff_min: 1.0
     drone_landing_min: 1.0
     service_time_min: 5.0
+    demand_min: 1
+    demand_max: 30
+    time_window_scaling_factor: 1.5
     tasks:
-    - 003_N10_F2_C
+    - 002_N10_F2_C
 device: cpu
 reproducibility:
   seed:

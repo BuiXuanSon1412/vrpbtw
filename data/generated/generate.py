@@ -143,6 +143,9 @@ def create_instance(config, n, dist_type, ratio, seed):
                 "DRONE_LANDING_MIN": config["DRONE_LANDING_MIN"],
                 "SERVICE_TIME_MIN": config["SERVICE_TIME_MIN"],
                 "DRONE_DURATION_H": config["DRONE_DURATION_H"],
+                "FLEET_BASIS_COST": config["FLEET_BASIS_COST"],
+                "DRONE_COST_UNIT": config["DRONE_COST_UNIT"],
+                "TRUCK_COST_UNIT": config["TRUCK_COST_UNIT"],
             },
             "Depot": {
                 "id": 0,
@@ -158,7 +161,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Updated default to reflect requested batch range
     parser.add_argument(
-        "--n", type=int, choices=[10, 20, 50, 100, 200, 400, 1000], default=400
+        "--n", type=int, choices=[10, 20, 50, 100, 150, 200, 400, 1000], default=400
     )
     parser.add_argument("--dist", choices=["R", "C", "RC"], default="RC")
     parser.add_argument("--ratio", type=float, default=0.5)
