@@ -1,0 +1,95 @@
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    GEMAN ARCHITECTURE DATA FLOW                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+INPUT
+─────
+    node_features (B, N+1, 5)
+    vehicle_features (B, 2K, 5)
+    truck_edge_index, truck_edge_attr
+    drone_edge_index, drone_edge_attr
+           │
+           │
+           ├─────────┬──────────────┬────────────┐
+           │         │              │            │
+           ▼         ▼              ▼            ▼
+
+    ╔═════════╗  ╔═════════╗  ╔═════════════╗
+    │ Node    │  │Vehicle  │  │ Graph       │
+    │Encoder  │  │Encoder  │  │ Encoder     │
+    │         │  │         │  │ (MRNN)      │
+    │ Linear  │  │ Linear  │  │             │
+    │ 3×Attn  │  │ 3×Attn  │  │ 3×Multi-Rel │
+    │ Pool    │  │ Pool    │  │ Layers      │
+    │         │  │         │  │ Pool        │
+    ╚────┬────╝  ╚────┬────╝  ╚────┬────────╝
+         │            │            │
+    Z_node(B,N,D) Z_veh(B,K,D) Z_graph(B,N,D)
+    g_node(B,D)   g_veh(B,D)   g_graph(B,D)
+         │            │            │
+         └────────┬───┴────────────┘
+                  │
+        Cross-attention via global contexts
+                  │
+         ┌────────┴────────┐
+         │                 │
+         ▼                 ▼
+    ╔═════════════╗   ╔═════════════╗
+    │ Node        │   │ Vehicle     │
+    │ Decoder     │   │ Decoder     │
+    │             │   │             │
+    │ Context:    │   │ Context:    │
+    │ Linear(3D)  │   │ Linear(3D)  │
+    │ Q·K^T/√D    │   │ Q·K^T/√D    │
+    │ Tanh clip   │   │ Tanh clip   │
+    ╚────┬────────╝   ╚────┬────────╝
+         │                 │
+    node_logits(B,N)  veh_logits(B,K)
+         │                 │
+         └────────┬────────┘
+                  │
+              Outer Sum
+              Reshape
+                  │
+                  ▼
+         ╔─────────────────╗
+         │ Joint Action    │
+         │ Logits          │
+         │ (B, N×K)        │
+         │ → Categorical   │
+         │ → π(a|s)        │
+         ╚────────┬────────╝
+                  │
+       ┌──────────┴──────────┐
+       │                     │
+    POLICY                VALUE
+   (Actions)             Head
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+             MLP (3D → hidden → 1)   │
+              │                       │
+              ▼                       ▼
+         Log Probs               V(s) scalar
+         Entropy
+         Action Sample
+
+
+KEY COMPONENTS
+──────────────
+✓ Node Encoder:        Heterogeneous attention for location embeddings
+✓ Vehicle Encoder:     Attention for vehicle embeddings
+✓ Graph Encoder:       Multi-relational GNN for routing structure
+✓ Node Decoder:        Dot-product attention over nodes
+✓ Vehicle Decoder:     Dot-product attention over vehicles
+✓ Joint Logits:        Bilevel combination (outer sum) of two independent heads
+✓ Value Head:          MLP estimator of state value V(s)
+
+CROSS-ATTENTION PATTERN
+───────────────────────
+Node Decoder sees:     g_node, mean(Z_veh), g_graph
+Vehicle Decoder sees:  g_veh, mean(Z_node), g_graph
+
+This implicit cross-attention allows the decoders to be aware of the other
+modality without explicit coupling, enabling independent decision-making.

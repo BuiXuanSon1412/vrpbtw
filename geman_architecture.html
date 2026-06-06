@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GEMAN Network Architecture</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 1.1em;
+            opacity: 0.95;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+        }
+
+        h2 {
+            color: #667eea;
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .architecture-flow {
+            background: #f8f9fa;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            font-family: 'Courier New', monospace;
+            overflow-x: auto;
+            white-space: pre;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+
+        .component {
+            background: white;
+            border-left: 5px solid #667eea;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .component h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.3em;
+        }
+
+        .component-detail {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .detail-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.95em;
+        }
+
+        .detail-item strong {
+            color: #667eea;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        th {
+            background: #667eea;
+            color: white;
+            padding: 12px;
+            text-align: left;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+
+        tr:hover {
+            background: #e8eaf6;
+        }
+
+        .diagram-box {
+            background: #f8f9fa;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .feature-list {
+            list-style: none;
+        }
+
+        .feature-list li {
+            padding: 10px;
+            margin: 5px 0;
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            border-radius: 3px;
+        }
+
+        .feature-list li:before {
+            content: "✓ ";
+            color: #667eea;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .code-block {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            line-height: 1.5;
+        }
+
+        .keyword { color: #66d9ef; }
+        .string { color: #e6db74; }
+        .number { color: #ae81ff; }
+        .comment { color: #75715e; }
+
+        footer {
+            background: #f8f9fa;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            border-top: 1px solid #ddd;
+        }
+
+        .download-section {
+            background: #e8eaf6;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .btn {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            text-decoration: none;
+            margin: 10px 5px;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background: #764ba2;
+        }
+
+        @media (max-width: 768px) {
+            .component-detail {
+                grid-template-columns: 1fr;
+            }
+
+            h1 {
+                font-size: 1.8em;
+            }
+
+            .architecture-flow {
+                font-size: 0.75em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🧠 GEMAN Architecture</h1>
+            <p class="subtitle">Graph-Enhanced Multi-relational Attention Network for VRPBTW</p>
+        </header>
+
+        <div class="content">
+            <!-- Overview Section -->
+            <div class="section">
+                <h2>Overview</h2>
+                <p style="font-size: 1.05em; line-height: 1.8; color: #333;">
+                    GEMAN is an actor-critic neural network designed for the Vehicle Routing Problem with Time Windows and Drones (VRPBTW).
+                    It makes bilevel decisions: <strong>(1) which location to visit</strong> and <strong>(2) which vehicle to use</strong>.
+                </p>
+            </div>
+
+            <!-- Big Picture Section -->
+            <div class="section">
+                <h2>The Big Picture</h2>
+                <div class="architecture-flow">Observation Input
+    ↓
+    ├─ Node Encoder       ──→ (Z_node, g_node)
+    ├─ Vehicle Encoder    ──→ (Z_veh, g_veh)
+    └─ Graph Encoder      ──→ (Z_graph, g_graph)
+         ↓
+    Node Decoder          ──→ node_logits
+    Vehicle Decoder       ──→ vehicle_logits
+         ↓
+    Joint Logits          ──→ flat_logits (policy)
+    Value Head            ──→ value (critic)</div>
+            </div>
+
+            <!-- Components Section -->
+            <div class="section">
+                <h2>Main Components</h2>
+
+                <div class="component">
+                    <h3>1. Node Encoder</h3>
+                    <p>Encodes location information with heterogeneous attention</p>
+                    <div class="component-detail">
+                        <div class="detail-item">
+                            <strong>Input:</strong> node_features (B, N+1, 5)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Output:</strong> Z_node (B, N+1, D), g_node (B, D)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Architecture:</strong> Linear → 3×Attention → Pooling
+                        </div>
+                        <div class="detail-item">
+                            <strong>Parameters:</strong> ~200K
+                        </div>
+                    </div>
+                </div>
+
+                <div class="component">
+                    <h3>2. Vehicle Encoder</h3>
+                    <p>Encodes vehicle information (truck and drone variants)</p>
+                    <div class="component-detail">
+                        <div class="detail-item">
+                            <strong>Input:</strong> vehicle_features (B, 2K, 5)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Output:</strong> Z_veh (B, 2K, D), g_veh (B, D)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Architecture:</strong> Linear → 3×Attention → Pooling
+                        </div>
+                        <div class="detail-item">
+                            <strong>Parameters:</strong> ~200K
+                        </div>
+                    </div>
+                </div>
+
+                <div class="component">
+                    <h3>3. Graph Encoder (Multi-Relational GNN)</h3>
+                    <p>Captures spatial-temporal routing structure via truck and drone relations</p>
+                    <div class="component-detail">
+                        <div class="detail-item">
+                            <strong>Input:</strong> Node coords + truck/drone edges
+                        </div>
+                        <div class="detail-item">
+                            <strong>Output:</strong> Z_graph (B, N+1, D), g_graph (B, D)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Architecture:</strong> 3×Multi-Relational Layers
+                        </div>
+                        <div class="detail-item">
+                            <strong>Parameters:</strong> ~150K
+                        </div>
+                    </div>
+                </div>
+
+                <div class="component">
+                    <h3>4. Node Decoder</h3>
+                    <p>Selects which location to visit using attention</p>
+                    <div class="component-detail">
+                        <div class="detail-item">
+                            <strong>Inputs:</strong> g_node, mean(Z_veh), g_graph, Z_node
+                        </div>
+                        <div class="detail-item">
+                            <strong>Output:</strong> node_logits (B, N+1)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Mechanism:</strong> Context projection → Dot-product attention
+                        </div>
+                        <div class="detail-item">
+                            <strong>Parameters:</strong> ~65K
+                        </div>
+                    </div>
+                </div>
+
+                <div class="component">
+                    <h3>5. Vehicle Decoder</h3>
+                    <p>Selects which vehicle to use using attention</p>
+                    <div class="component-detail">
+                        <div class="detail-item">
+                            <strong>Inputs:</strong> g_veh, mean(Z_node), g_graph, Z_veh
+                        </div>
+                        <div class="detail-item">
+                            <strong>Output:</strong> veh_logits (B, 2K)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Mechanism:</strong> Context projection → Dot-product attention
+                        </div>
+                        <div class="detail-item">
+                            <strong>Parameters:</strong> ~65K
+                        </div>
+                    </div>
+                </div>
+
+                <div class="component">
+                    <h3>6. Value Head</h3>
+                    <p>Estimates state value V(s) for advantage computation</p>
+                    <div class="component-detail">
+                        <div class="detail-item">
+                            <strong>Input:</strong> cat[g_node, g_veh, g_graph] (B, 3D)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Output:</strong> value (B,)
+                        </div>
+                        <div class="detail-item">
+                            <strong>Architecture:</strong> Multi-layer MLP
+                        </div>
+                        <div class="detail-item">
+                            <strong>Parameters:</strong> ~66K
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Key Features -->
+            <div class="section">
+                <h2>Key Features</h2>
+                <ul class="feature-list">
+                    <li>Hierarchical Encoding: Separate encoders for nodes and vehicles</li>
+                    <li>Bilevel Decoding: Independent decoders prevent coupling</li>
+                    <li>Multi-relational GNN: Separate truck/drone graph relations</li>
+                    <li>Cross-Attention Pattern: Each decoder sees other modality's mean</li>
+                    <li>Adaptive Pooling: Learned weights for context aggregation</li>
+                    <li>Action Masking: Feasibility constraints via -∞ masking</li>
+                    <li>Numerical Stability: Tanh clipping and NaN handling</li>
+                </ul>
+            </div>
+
+            <!-- Complexity -->
+            <div class="section">
+                <h2>Computational Complexity</h2>
+                <table>
+                    <tr>
+                        <th>Component</th>
+                        <th>Time Complexity</th>
+                        <th>Space Complexity</th>
+                    </tr>
+                    <tr>
+                        <td>Node Encoder (N² attention)</td>
+                        <td>O(B×N²×D)</td>
+                        <td>O(B×N×D)</td>
+                    </tr>
+                    <tr>
+                        <td>Vehicle Encoder (K² attention)</td>
+                        <td>O(B×K²×D)</td>
+                        <td>O(B×K×D)</td>
+                    </tr>
+                    <tr>
+                        <td>Graph Encoder (E edges)</td>
+                        <td>O(B×E×D)</td>
+                        <td>O(B×E×D)</td>
+                    </tr>
+                    <tr>
+                        <td>Decoders & Value Head</td>
+                        <td>O(B×(N+K)×D)</td>
+                        <td>O(B×D²)</td>
+                    </tr>
+                    <tr style="background: #e8eaf6; font-weight: bold;">
+                        <td>TOTAL</td>
+                        <td>O(B×(N²+E)×D)</td>
+                        <td>O(B×(N+K+E)×D)</td>
+                    </tr>
+                </table>
+                <p style="margin-top: 10px; color: #666;">
+                    <strong>Note:</strong> For typical VRPBTW instances (N~100, K~5), total inference time ~10-50ms per batch on modern GPUs.
+                </p>
+            </div>
+
+            <!-- Download Section -->
+            <div class="download-section">
+                <h2 style="border: none; margin-bottom: 20px;">📥 Download Documentation</h2>
+                <p style="margin-bottom: 20px;">All architecture documentation files are available for download:</p>
+                <a href="geman_architecture_ascii.txt" class="btn" download>📄 ASCII Diagram</a>
+                <a href="geman_architecture_diagram.txt" class="btn" download>📋 Full Diagram</a>
+                <a href="geman_architecture.md" class="btn" download>📚 Detailed Docs</a>
+                <a href="GEMAN_SUMMARY.md" class="btn" download>📖 Summary</a>
+                <a href="geman_architecture.dot" class="btn" download>🎨 Graphviz Source</a>
+                <a href="visualize_geman_architecture.py" class="btn" download>🐍 Python Script</a>
+            </div>
+
+            <!-- Configuration -->
+            <div class="section">
+                <h2>Example Configuration</h2>
+                <div class="code-block">
+{
+  <span class="string">"encoder"</span>: {
+    <span class="string">"node_encoder"</span>: {
+      <span class="string">"embedding_dim"</span>: <span class="number">128</span>,
+      <span class="string">"n_heads"</span>: <span class="number">4</span>,
+      <span class="string">"n_layers"</span>: <span class="number">3</span>,
+      <span class="string">"dropout"</span>: <span class="number">0.1</span>,
+      <span class="string">"use_instance_norm"</span>: <span class="keyword">true</span>
+    },
+    <span class="comment">// ... similar for vehicle_encoder and graph_encoder</span>
+  },
+  <span class="string">"decoder"</span>: {
+    <span class="string">"node_decoder"</span>: {
+      <span class="string">"clip"</span>: <span class="number">10.0</span>,
+      <span class="string">"context_hidden_dim"</span>: <span class="number">128</span>
+    },
+    <span class="comment">// ... similar for vehicle_decoder</span>
+  },
+  <span class="string">"value_head"</span>: {
+    <span class="string">"hidden_dims"</span>: [<span class="number">128</span>, <span class="number">128</span>],
+    <span class="string">"dropout"</span>: <span class="number">0.1</span>
+  }
+}
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>GEMAN Network Architecture | Generated for VRPBTW (Vehicle Routing Problem with Time Windows and Drones)</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">Source: <code>rl/impl/geman.py</code> (1217 lines)</p>
+        </footer>
+    </div>
+</body>
+</html>
