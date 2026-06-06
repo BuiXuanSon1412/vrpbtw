@@ -157,8 +157,8 @@ class MetaTrainer(BaseTrainer):
         # Training state
         self._total_updates = 0
         self._best_objective = float(
-            "-inf"
-        )  # For maximization problems, higher is better
+            "inf"
+        )  # For minimization problems, lower is better
         self._patience_counter = 0
         self._curriculum_check_counter = 0
 
@@ -236,9 +236,9 @@ class MetaTrainer(BaseTrainer):
             "total_updates": self._total_updates,
             "total_epochs": meta_summary.get("total_epochs", 0)
             + fine_tune_summary.get("total_epochs", 0),
-            "best_objective": max(
-                meta_summary.get("best_objective", float("-inf")),
-                fine_tune_summary.get("best_objective", float("-inf")),
+            "best_objective": min(
+                meta_summary.get("best_objective", float("inf")),
+                fine_tune_summary.get("best_objective", float("inf")),
             ),
             "training_time_s": round(time.time() - start_time, 1),
             "meta_learning_enabled": self.enable_meta_learning,
@@ -356,8 +356,8 @@ class MetaTrainer(BaseTrainer):
                         eval_stats = self.meta_evaluator.evaluate(eval_task_id)
                         eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
-                        mean_obj = eval_stats.get("mean_objective", float("-inf"))
-                        if mean_obj > self._best_objective + self.mcfg["min_delta"]:
+                        mean_obj = eval_stats.get("mean_objective", float("inf"))
+                        if mean_obj < self._best_objective - self.mcfg["min_delta"]:
                             self._best_objective = mean_obj
                             self._patience_counter = 0
                             self.logger.save_checkpoint(
@@ -565,7 +565,12 @@ class MetaTrainer(BaseTrainer):
             rollout_length: Target timesteps to collect per environment
 
         Returns:
-            dict with observations, actions, log_probs, advantages, returns, entropies
+            dict with:
+              - observations: list of rollout_length dicts (NOT flattened)
+                Each dict contains tensors with batch dimension (batch_size, ...)
+                Layout: observations[t] = all batch_size environments' data at timestep t
+              - masks, actions, log_probs, advantages, returns, entropies: flattened tensors
+                Layout: flat indices map to (timestep, env) via: flat_idx = t*batch_size + e
         """
         from core.vec_env import stack_obs, batch_obs_to_tensor
 
@@ -639,13 +644,12 @@ class MetaTrainer(BaseTrainer):
                 obs_final, mask_final, deterministic=False
             )
             bootstrap_vals = bootstrap_vals.squeeze(-1)
-            # Mask out bootstrap values for episodes that terminated
+            # Compute done_mask for bootstrap masking (per-env)
             done_mask = torch.tensor(
                 np.logical_or(terminateds, truncateds),
                 dtype=torch.bool,
                 device=globals.DEVICE,
             )
-            bootstrap_vals = bootstrap_vals * (~done_mask).float()
 
         # Compute per-env advantages and returns
         advantages_list = []
@@ -657,7 +661,9 @@ class MetaTrainer(BaseTrainer):
             )
             values_b = torch.stack([value_buffer[t][b] for t in range(rollout_length)])
             dones_b = torch.stack([done_buffer[t][b] for t in range(rollout_length)])
-            v_with_bootstrap = torch.cat([values_b, bootstrap_vals[b : b + 1]], dim=0)
+            # Only use bootstrap if env is not done at final step
+            bootstrap_masked = bootstrap_vals[b] * (~done_mask[b]).float()
+            v_with_bootstrap = torch.cat([values_b, bootstrap_masked.unsqueeze(0)], dim=0)
 
             from core.collector import _compute_gae
 
@@ -668,6 +674,8 @@ class MetaTrainer(BaseTrainer):
                 gamma=gamma,
                 gae_lambda=gae_lambda,
             )
+            # Normalize advantages PER-environment, not globally
+            adv_b = (adv_b - adv_b.mean()) / (adv_b.std() + 1e-8)
             advantages_list.append(adv_b)
             returns_list.append(ret_b)
 
@@ -675,7 +683,6 @@ class MetaTrainer(BaseTrainer):
         returns = torch.stack(returns_list, dim=0)
 
         advantages = advantages.view(-1)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = returns.view(-1)
 
         masks_stacked = torch.stack(mask_buffer, dim=0)
@@ -743,13 +750,13 @@ class MetaTrainer(BaseTrainer):
             base_seed=42,
         )
 
-        best_objective = float("-inf")
+        best_objective = float("inf")
         task_summaries = {}
 
         try:
             for task_id in self.env.tasks:
                 self._print_header_task(task_id)
-                task_best_objective = float("-inf")
+                task_best_objective = float("inf")
                 task_patience_counter = 0
                 iteration = -1
 
@@ -782,12 +789,12 @@ class MetaTrainer(BaseTrainer):
                             # For batch_size = 1: same logic, just 1 environment
                             for ppo_epoch in range(ppo_epochs):
                                 # Process each environment's timesteps independently
-                                for env_idx in range(batch_size):
+                                for env_id in range(batch_size):
                                     # Get all timesteps for this environment
-                                    # With batch_size=4, env_idx=0 gets [0, 4, 8, 12, ...]
-                                    # With batch_size=1, env_idx=0 gets [0, 1, 2, 3, ...]
+                                    # With batch_size=4, env_id=0 gets [0, 4, 8, 12, ...]
+                                    # With batch_size=1, env_id=0 gets [0, 1, 2, 3, ...]
                                     env_timestep_indices = torch.arange(
-                                        env_idx, num_timesteps, batch_size,
+                                        env_id, num_timesteps, batch_size,
                                         device=old_log_probs.device, dtype=torch.long
                                     )
 
@@ -804,26 +811,30 @@ class MetaTrainer(BaseTrainer):
 
                                         # Extract mini-batch
                                         if isinstance(observations, list):
-                                            if batch_size > 1:
-                                                mb_observations = []
-                                                for flat_idx in batch_indices.cpu().numpy():
-                                                    timestep_idx = flat_idx // batch_size
-                                                    env_idx = flat_idx % batch_size
-                                                    stacked_obs = observations[timestep_idx]
-                                                    single_obs = {}
-                                                    for k, v in stacked_obs.items():
-                                                        if "edge_index" in k:
-                                                            single_obs[k] = v
-                                                        else:
-                                                            single_obs[k] = v[
-                                                                env_idx : env_idx + 1
-                                                            ]
-                                                    mb_observations.append(single_obs)
-                                            else:
-                                                mb_observations = [
-                                                    observations[i]
-                                                    for i in batch_indices.cpu().numpy()
-                                                ]
+                                            # observations[t] is a dict with tensors stacked across batch_size
+                                            # batch_indices are flat indices (0 to batch_size*rollout_length)
+                                            # Convert to (timestep, env) coordinates: flat_idx = t*batch_size + e
+                                            mb_observations = []
+                                            for flat_idx in batch_indices.cpu().numpy():
+                                                # Recover timestep from flat index
+                                                timestep_idx = flat_idx // batch_size
+                                                # Verify this index belongs to env_id
+                                                idx_env = flat_idx % batch_size
+                                                assert idx_env == env_id, (
+                                                    f"Index mismatch: flat_idx={flat_idx} "
+                                                    f"belongs to env {idx_env}, not {env_id}"
+                                                )
+
+                                                stacked_obs = observations[timestep_idx]
+                                                single_obs = {}
+                                                for k, v in stacked_obs.items():
+                                                    if "edge_index" in k:
+                                                        # Shared across batch (no env dimension)
+                                                        single_obs[k] = v
+                                                    else:
+                                                        # Extract this env's data: v.shape = (batch_size, ...)
+                                                        single_obs[k] = v[env_id : env_id + 1]
+                                                mb_observations.append(single_obs)
                                         else:
                                             mb_observations = observations[batch_indices]
 
@@ -926,9 +937,9 @@ class MetaTrainer(BaseTrainer):
                                 }
 
                                 mean_obj = eval_stats.get(
-                                    "mean_objective", float("-inf")
+                                    "mean_objective", float("inf")
                                 )
-                                if mean_obj > task_best_objective + self.fcfg.get(
+                                if mean_obj < task_best_objective - self.fcfg.get(
                                     "min_delta", 0.0001
                                 ):
                                     task_best_objective = mean_obj
@@ -1006,7 +1017,7 @@ class MetaTrainer(BaseTrainer):
                     )
                     raise
 
-                best_objective = max(best_objective, task_best_objective)
+                best_objective = min(best_objective, task_best_objective)
                 task_summaries[task_id] = {
                     "best_objective": float(task_best_objective),
                     "iterations_completed": iteration + 1,
@@ -1716,8 +1727,8 @@ class POMOTrainer(BaseTrainer):
             self.env.retask(task_id)
 
             best_objective = float(
-                "-inf"
-            )  # For maximization problems, higher is better
+                "inf"
+            )  # For minimization problems, lower is better
             best_epoch = -1
             patience_counter = 0
 
@@ -1838,8 +1849,8 @@ class POMOTrainer(BaseTrainer):
                     eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
                     # Track best objective with early stopping
-                    mean_obj = eval_stats.get("mean_objective", float("-inf"))
-                    if mean_obj > best_objective + self.tcfg["min_delta"]:
+                    mean_obj = eval_stats.get("mean_objective", float("inf"))
+                    if mean_obj < best_objective - self.tcfg["min_delta"]:
                         best_objective = mean_obj
                         best_epoch = epoch + 1
                         patience_counter = 0

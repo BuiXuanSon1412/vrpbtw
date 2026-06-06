@@ -250,11 +250,15 @@ class GAECollector(BaseCollector):
             advantages_list.append(adv_b)
             returns_list.append(ret_b)
 
-        advantages = torch.stack(advantages_list, dim=0)
+        advantages = torch.stack(advantages_list, dim=0)  # (n_envs, rollout_length)
         returns = torch.stack(returns_list, dim=0)
 
+        # Normalize advantages per-environment (batch-size invariant)
+        for i in range(n_envs):
+            adv_i = advantages[i]
+            advantages[i] = (adv_i - adv_i.mean()) / (adv_i.std() + 1e-8)
+
         advantages = advantages.view(-1)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = returns.view(-1)
 
         masks_stacked = torch.stack(mask_buffer, dim=0)
