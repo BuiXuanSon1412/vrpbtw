@@ -1,0 +1,278 @@
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                              GEMAN ACTOR-CRITIC NETWORK ARCHITECTURE (VRPBTW)                                               ║
+║                    Graph-Enhanced Multi-relational Attention Network for Route Planning                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+
+INPUT LAYER
+═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+                    ┌──────────────────────────────┐
+                    │  node_features (B, N+1, 5)  │
+                    │  [x, y, lh_dem, bh_dem,     │
+                    │   tw_open, tw_close]        │
+                    └──────────────────────────────┘
+                                 │
+                    ┌────────────┼────────────┐
+                    │            │            │
+        ┌───────────▼───────┐  │  ┌──────────▼──────────┐
+        │vehicle_features   │  │  │ Extract coords and │
+        │(B, 2K, 5)         │  │  │ time windows for   │
+        │[capacity,battery, │  │  │ GraphEncoder:      │
+        │ cost,speed,time]  │  │  │ [x, y, tw_o, tw_c]│
+        └────────────────────┘  │  └─────────┬──────────┘
+                                 │           │
+                    ┌────────────┼───────────┼────────────┐
+                    │            │           │            │
+                    │      ┌──────▼─────┐    │            │
+                    │      │ Truck &    │    │            │
+                    │      │ Drone Edges│    │            │
+                    │      │ (indices & │    │            │
+                    │      │  attributes)   │            │
+                    │      └──────┬─────┘    │            │
+                    │             │          │            │
+                    ▼             ▼          ▼            ▼
+
+
+ENCODER STAGE (Parallel Processing)
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+┌──────────────────────────────────────┐   ┌──────────────────────────────────────┐   ┌──────────────────────────────────────┐
+│        NODE ENCODER                  │   │        VEHICLE ENCODER               │   │        GRAPH ENCODER                 │
+├──────────────────────────────────────┤   ├──────────────────────────────────────┤   ├──────────────────────────────────────┤
+│ Input: node_features (B, N+1, 5)   │   │ Input: vehicle_features (B, 2K, 5) │   │ Input: [x,y,tw_o,tw_c] (B,N+1,4) │
+│        dim=128, n_heads=4, depth=3 │   │        dim=128, n_heads=4, depth=3 │   │        truck/drone edges            │
+│                                      │   │                                      │   │        dim=128, n_layers=3          │
+│  ┌──────────────────────────────┐  │   │  ┌──────────────────────────────┐  │   │  ┌──────────────────────────────┐  │
+│  │ Linear(5 → 128)              │  │   │  │ Linear(5 → 128)              │  │   │  │ Linear(4 → 128)              │  │
+│  └────────────┬─────────────────┘  │   │  └────────────┬─────────────────┘  │   │  └────────────┬─────────────────┘  │
+│               │                     │   │               │                     │   │               │                     │
+│  ┌────────────▼─────────────────┐  │   │  ┌────────────▼─────────────────┐  │   │  ┌────────────▼─────────────────┐  │
+│  │ [3x NodeEncoderLayer]         │  │   │  │ [3x VehicleEncoderLayer]    │  │   │  │ [3x MRGNNLayer]              │  │
+│  │ ├─ MultiHeadAttention (SA)   │  │   │  │ ├─ MultiHeadAttention (SA)  │  │   │  │ ├─ Truck Message Passing:    │  │
+│  │ ├─ ReLU FFN                   │  │   │  │ ├─ ReLU FFN                 │  │   │  │ │  msg = MLP(h_src||edge_a) │  │
+│  │ └─ LayerNorm                  │  │   │  │ └─ LayerNorm                │  │   │  │ ├─ Mean aggregation (scatter)│  │
+│  │                               │  │   │  │                              │  │   │  │ ├─ Drone Message Passing:    │  │
+│  │ Output: (B, N+1, 128)        │  │   │  │ Output: (B, 2K, 128)       │  │   │  │ │  msg = MLP(h_src||edge_a) │  │
+│  └────────────┬─────────────────┘  │   │  └────────────┬─────────────────┘  │   │  │ ├─ Concatenate & update:     │  │
+│               │                     │   │               │                     │   │  │ │  h' = LayerNorm(h + proj)  │  │
+│  ┌────────────▼─────────────────┐  │   │  ┌────────────▼─────────────────┐  │   │  │                              │  │
+│  │ Adaptive Pooling              │  │   │  │ Adaptive Pooling            │  │   │  │ Output: (B, N+1, 128)      │  │
+│  │ w = softmax(Linear(128→1))   │  │   │  │ w = softmax(Linear(128→1)) │  │   │  └────────────┬─────────────────┘  │
+│  │ g_node = sum(w * h) → (B, D) │  │   │  │ g_veh = sum(w * h) → (B, D)│  │   │               │                     │
+│  └────────────┬─────────────────┘  │   │  └────────────┬─────────────────┘  │   │  ┌────────────▼─────────────────┐  │
+│               │                     │   │               │                     │   │  │ Adaptive Pooling            │  │
+│               │                     │   │               │                     │   │  │ w = softmax(Linear(128→1)) │  │
+└───────────────┼─────────────────────┘   └───────────────┼─────────────────────┘   │  │ g_graph = sum(w*h) → (B,D) │  │
+                │                                         │                         │  └────────────┬─────────────────┘  │
+     OUTPUTS:   │                                         │                         │               │                     │
+     Z_node     │                          Z_veh          │                  Z_graph│ g_graph       │                     │
+     g_node     │                          g_veh          │                         │               │                     │
+                │                                         │                         │               │                     │
+                └─────────────────────────────────────────────────────────────────────────────────────┘
+
+
+DECODER STAGE (Bilevel Decision Making)
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+            g_node (B,D)          mean(Z_veh)           g_graph (B,D)
+                │                      │                      │
+    ┌───────────┴──────────┐   ┌──────┴──────────┐   ┌───────┴──────────┐
+    │                      │   │                 │   │                  │
+    │  ┌──────────────────────────────────────────────────────────────┐ │
+    │  │ Context Projection: Linear(D*3 → hidden_dim=128)           │ │
+    │  └──────────────────────┬───────────────────────────────────────┘ │
+    │                         │                                          │
+    │  ┌──────────────────────▼───────────────────────────────────────┐ │
+    │  │ ReLU Activation + Optional Dropout                           │ │
+    │  └──────────────────────┬───────────────────────────────────────┘ │
+    │                         │                                          │
+    └─────────────────────────┼──────────────────────────────────────────┘
+                              │
+                              │
+            ┌─────────────────┴─────────────────┐
+            │                                   │
+            ▼                                   ▼
+    ╔═══════════════════════════╗     ╔═══════════════════════════╗
+    ║    NODE DECODER           ║     ║   VEHICLE DECODER         ║
+    ╠═══════════════════════════╣     ╠═══════════════════════════╣
+    │                           │     │                           │
+    │ Inputs:                   │     │ Inputs:                   │
+    │ - ctx (B, hidden_dim)    │     │ - ctx (B, hidden_dim)    │
+    │ - Z_node (B, N+1, D)     │     │ - Z_veh (B, 2K, D)       │
+    │ - g_veh (B, D) [cross]   │     │ - g_node (B, D) [cross]  │
+    │ - action_mask (B, N+1)   │     │ - action_mask (B, 2K)    │
+    │                           │     │                           │
+    │ Query:                    │     │ Query:                    │
+    │ Q = Linear(hidden → D)   │     │ Q = Linear(hidden → D)   │
+    │ Q.shape = (B, 1, D)      │     │ Q.shape = (B, 1, D)      │
+    │                           │     │                           │
+    │ Attention:                │     │ Attention:                │
+    │ K = Linear(Z_node)       │     │ K = Linear(Z_veh)        │
+    │ scores = Q @ K^T / √D    │     │ scores = Q @ K^T / √D    │
+    │ logits = clip*tanh(scores)     │ logits = clip*tanh(scores) │
+    │                           │     │                           │
+    │ Output: node_logits      │     │ Output: veh_logits       │
+    │ (B, N+1)                 │     │ (B, 2K)                  │
+    │                           │     │                           │
+    └─────────────┬─────────────┘     └─────────────┬─────────────┘
+                  │                                 │
+                  └────────────────┬────────────────┘
+                                   │
+                   ┌───────────────▼───────────────┐
+                   │                               │
+                   │ JOINT ACTION LOGITS           │
+                   │                               │
+                   │ flat_logits = outer_sum(      │
+                   │   node_logits,                │
+                   │   veh_logits                  │
+                   │ ).reshape(B, N+1 × 2K)        │
+                   │                               │
+                   │ if mask: apply -∞ to masked   │
+                   │                               │
+                   │ Output: (B, N+1 × 2K)        │
+                   │ → Policy distribution via     │
+                   │   Categorical(logits=...)    │
+                   │                               │
+                   └───────────────┬───────────────┘
+                                   │
+                                   ▼
+
+
+VALUE HEAD
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    g_node (B,D)   g_veh (B,D)   g_graph (B,D)
+        │              │              │
+        └──────────────┬──────────────┘
+                       │
+        ┌──────────────▼──────────────┐
+        │ Concatenate:                │
+        │ x = cat[g_node, g_veh,      │
+        │        g_graph]             │
+        │ x.shape = (B, D*3)          │
+        └──────────────┬──────────────┘
+                       │
+        ┌──────────────▼──────────────┐
+        │ Multi-Layer MLP:            │
+        │ ├─ Linear(D*3 → h[0]=128)  │
+        │ ├─ ReLU + Dropout (if set) │
+        │ ├─ Linear(h[0] → h[1]=128) │
+        │ ├─ ReLU + Dropout (if set) │
+        │ └─ Linear(h[1] → 1)        │
+        └──────────────┬──────────────┘
+                       │
+                       ▼
+            Value Estimate (B,) → scalar
+
+
+OUTPUT LAYER
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────┐
+    │ POLICY OUTPUT (Actor Head)                           │
+    │ flat_logits: (B, N+1 × 2K)                          │
+    │ → Categorical distribution                          │
+    │ → Sample action: a ~ π(·|s)                        │
+    │ → Log probability: log π(a|s)                      │
+    │ → Entropy: H(π(·|s))                               │
+    └──────────────────────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────┐
+    │ VALUE OUTPUT (Critic Head)                           │
+    │ value: (B,) scalar                                  │
+    │ → State value V(s)                                 │
+    │ → TD error for training                            │
+    └──────────────────────────────────────────────────────┘
+
+
+KEY DESIGN ELEMENTS
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+✓ Hierarchical Encoding:      Separate encoders for nodes and vehicles
+✓ Multi-relational Graph:      Truck and drone edge relations processed separately
+✓ Bilevel Decoding:            Independent heads for node and vehicle decisions (no coupling)
+✓ Cross-Attention Pattern:     Each decoder sees mean embedding of the other modality
+✓ Adaptive Pooling:            Learned weights for context aggregation
+✓ Feasibility Masking:         Action constraints enforced via -∞ masking
+✓ Attention-based Selection:   Dot-product attention for soft selection of next location/vehicle
+✓ Tanh Clipping:               Logits clipped to [-clip, +clip] for numerical stability
+✓ Flexible Graph Encoder:      Supports GraphEncoder, EGAEncoder, and MEGA variants
+
+
+DATA SHAPES & PARAMETER COUNTS (Example: D=128, N+1=100 nodes, K=5 vehicles, E=500 edges)
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Layer                              Input Shape              Output Shape         Params
+──────────────────────────────────────────────────────────────────────────────────────
+NodeEncoder.input_proj             (B, 100, 5)             (B, 100, 128)        5*128 + 128 = 768
+NodeEncoder (3 layers, 4 heads)    (B, 100, 128)           (B, 100, 128)        ~200K
+NodeEncoder.pool                   (B, 100, 128)           (B, 128)             128*1 + 1 = 129
+VehicleEncoder.input_proj          (B, 10, 5)              (B, 10, 128)         5*128 + 128 = 768
+VehicleEncoder (3 layers)          (B, 10, 128)            (B, 10, 128)         ~200K
+VehicleEncoder.pool                (B, 10, 128)            (B, 128)             129
+GraphEncoder.input_proj            (B, 100, 4)             (B, 100, 128)        4*128 + 128 = 640
+GraphEncoder (3 MRNN layers)       (B, 100, 128)           (B, 100, 128)        ~150K
+GraphEncoder.pool                  (B, 100, 128)           (B, 128)             129
+
+NodeDecoder.ctx_proj               (B, 384)                (B, 128)             384*128 + 128 = 49,280
+NodeDecoder.Wq                     (B, 128)                (B, 128)             128*128 = 16,384
+NodeDecoder.Wk                     (B, 100, 128)           (B, 100, 128)        128*128 = 16,384
+VehicleDecoder (similar structure) (B, 384)                (B, 128)             ~49K + 32K
+
+ValueHead.layer1                   (B, 384)                (B, 128)             384*128 + 128 = 49,280
+ValueHead.layer2                   (B, 128)                (B, 128)             128*128 + 128 = 16,512
+ValueHead.output                   (B, 128)                (B, 1)               128*1 + 1 = 129
+
+──────────────────────────────────────────────────────────────────────────────────────
+TOTAL (approximate):               ~700,000 parameters
+
+
+ALTERNATIVE ENCODERS FOR ABLATION STUDIES
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+┌──────────────────────────┬──────────────────────────┬──────────────────────────┐
+│      EGAEncoder          │   MLP_MEGAGraphEncoder   │   GCN_MEGAGraphEncoder   │
+├──────────────────────────┼──────────────────────────┼──────────────────────────┤
+│ Sparse Attention         │ Simple MLP aggregation   │ Normalized aggregation   │
+│ k-NN mask (k=3)          │ No degree normalization  │ D^(-1/2) A D^(-1/2)      │
+│ Distance-based pos.enc.  │ Fast baseline            │ Skewed degree graphs     │
+│ Single relation          │ Multi-relation support   │ Multi-relation support   │
+│ ~80K params              │ ~150K params             │ ~150K params             │
+└──────────────────────────┴──────────────────────────┴──────────────────────────┘
+
+                         ┌────────────────────────────┐
+                         │ GAT_MEGAGraphEncoder       │
+                         ├────────────────────────────┤
+                         │ Attention-weighted agg.    │
+                         │ Multi-head per relation    │
+                         │ Most expressive            │
+                         │ ~200K params (slowest)     │
+                         └────────────────────────────┘
+
+
+TRAINING LOOP INTEGRATION
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Forward Pass:
+  1. obs dict → unpacking (to torch tensors)
+  2. Encoders: (Z_node, g_node), (Z_veh, g_veh), (Z_graph, g_graph)
+  3. Decoders: node_logits, veh_logits
+  4. Combine: flat_logits (N+1)*2K logits
+  5. Value: scalar V(s)
+
+Policy Loss (PPO):
+  dist = Categorical(logits=flat_logits)
+  log_probs = dist.log_prob(actions)
+  policy_loss = -log_probs * advantages  (+ entropy bonus)
+
+Value Loss (MSE):
+  value_loss = (V(s) - returns)^2
+
+Total Loss:
+  loss = policy_loss + λ_v * value_loss + λ_ent * entropy
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+End of Architecture Diagram
+═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

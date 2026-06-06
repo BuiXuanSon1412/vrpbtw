@@ -1,0 +1,108 @@
+digraph GEMANArchitecture {
+    rankdir=TB;
+    node [shape=box, style="filled,rounded", fontname="Arial"];
+    graph [rankdir=TB];
+
+    // Color scheme
+    node [color=lightblue];
+
+    // Input Layer
+    subgraph cluster_input {
+        label="Input Layer";
+        style=filled;
+        color=lightgrey;
+
+        node_feat [label="node_features\n(B, N+1, 5)", color=lightcyan];
+        veh_feat [label="vehicle_features\n(B, 2K, 5)", color=lightcyan];
+        truck_edge [label="truck_edge_index\n(2, E)", color=lightcyan];
+        truck_attr [label="truck_edge_attr\n(E, 2)", color=lightcyan];
+        drone_edge [label="drone_edge_index\n(2, E)", color=lightcyan];
+        drone_attr [label="drone_edge_attr\n(E, 2)", color=lightcyan];
+    }
+
+    // Encoder Layer
+    subgraph cluster_encoders {
+        label="Encoder Stage (Parallel)";
+        style=filled;
+        color=lightgrey;
+
+        node_enc [label="NodeEncoder\nMultiHeadAttention\n× 3 layers\n→ Z_node (B,N+1,D)\n→ g_node (B,D)", color=lightyellow];
+        veh_enc [label="VehicleEncoder\nMultiHeadAttention\n× 3 layers\n→ Z_veh (B,2K,D)\n→ g_veh (B,D)", color=lightyellow];
+        graph_enc [label="GraphEncoder\nMulti-Relational GNN\nTruck & Drone Relations\n× 3 layers\n→ Z_graph (B,N+1,D)\n→ g_graph (B,D)", color=lightyellow];
+    }
+
+    // Decoder Layer
+    subgraph cluster_decoders {
+        label="Decoder Stage (Bilevel)";
+        style=filled;
+        color=lightgrey;
+
+        node_dec [label="NodeDecoder\nContext Projection\nDot-Product Attention\nTanh Clipping\n→ node_logits (B,N+1)", color=lightgreen];
+        veh_dec [label="VehicleDecoder\nContext Projection\nDot-Product Attention\nTanh Clipping\n→ veh_logits (B,2K)", color=lightgreen];
+
+        joint [label="Joint Logits\nOuter Sum + Reshape\nfeat_logits[b,i,j] = \nnode[b,i] + veh[b,j]\n→ flat_logits (B,N+1×2K)", color=lightgreen];
+    }
+
+    // Value Head
+    subgraph cluster_value {
+        label="Value Head";
+        style=filled;
+        color=lightgrey;
+
+        value [label="ValueHead\nLinear Projection\nMulti-Layer MLP\n→ value (B,)", color=lightcoral];
+    }
+
+    // Output Layer
+    subgraph cluster_output {
+        label="Output";
+        style=filled;
+        color=lightgrey;
+
+        policy [label="Policy Distribution\nCategorical(logits)\nAction Sampling\nLog Probability Computation", color=lightblue];
+        value_out [label="State Value Estimate\nV(s) scalar", color=lightblue];
+    }
+
+    // Edges - Input to Encoders
+    node_feat -> node_enc;
+    veh_feat -> veh_enc;
+
+    node_feat -> graph_enc [label="Extract\n[x,y,tw_o,tw_c]"];
+    truck_edge -> graph_enc;
+    truck_attr -> graph_enc;
+    drone_edge -> graph_enc;
+    drone_attr -> graph_enc;
+
+    // Encoders to Decoders
+    node_enc -> node_dec [label="Z_node, g_node"];
+    veh_enc -> veh_dec [label="Z_veh, g_veh"];
+    veh_enc -> node_dec [label="Z_veh (mean)"];
+    node_enc -> veh_dec [label="Z_node (mean)"];
+
+    graph_enc -> node_dec [label="g_graph"];
+    graph_enc -> veh_dec [label="g_graph"];
+    graph_enc -> value [label="g_graph"];
+
+    node_enc -> value [label="g_node"];
+    veh_enc -> value [label="g_veh"];
+
+    // Decoders to Joint
+    node_dec -> joint [label="node_logits"];
+    veh_dec -> joint [label="veh_logits"];
+
+    // Joint to Output
+    joint -> policy [label="flat_logits"];
+    value -> value_out [label="V(s)"];
+
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        style=filled;
+        color=white;
+
+        l1 [label="D = embedding_dim (default 128)", shape=plaintext];
+        l2 [label="B = batch size", shape=plaintext];
+        l3 [label="N = number of nodes", shape=plaintext];
+        l4 [label="K = number of vehicles (×2 for truck/drone)", shape=plaintext];
+        l5 [label="E = number of edges", shape=plaintext];
+    }
+}
