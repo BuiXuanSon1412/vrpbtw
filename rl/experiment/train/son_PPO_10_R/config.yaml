@@ -25,7 +25,7 @@ trainer:
       name: ppo
       learning_rate: 0.0001
       optimizer: adam
-      clip_eps: 0.2
+      clip_eps: 0.1
       value_coef: 0.5
       entropy_coef: 0.05
       max_grad_norm: 0.5
@@ -152,6 +152,9 @@ environment:
     drone_takeoff_min: 1.0
     drone_landing_min: 1.0
     service_time_min: 5.0
+    demand_min: 1
+    demand_max: 30
+    time_window_scaling_factor: 1.5
     tasks:
     - 002_N10_F2_R
 device: cpu

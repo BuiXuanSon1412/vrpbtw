@@ -157,8 +157,8 @@ class MetaTrainer(BaseTrainer):
         # Training state
         self._total_updates = 0
         self._best_objective = float(
-            "inf"
-        )  # For minimization problems, lower is better
+            "-inf"
+        )  # For maximization problems, higher is better
         self._patience_counter = 0
         self._curriculum_check_counter = 0
 
@@ -356,8 +356,8 @@ class MetaTrainer(BaseTrainer):
                         eval_stats = self.meta_evaluator.evaluate(eval_task_id)
                         eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
-                        mean_obj = eval_stats.get("mean_objective", float("inf"))
-                        if mean_obj < self._best_objective - self.mcfg["min_delta"]:
+                        mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                        if mean_obj > self._best_objective + self.mcfg["min_delta"]:
                             self._best_objective = mean_obj
                             self._patience_counter = 0
                             self.logger.save_checkpoint(
@@ -643,7 +643,6 @@ class MetaTrainer(BaseTrainer):
             _, _, bootstrap_vals, _ = agent.act(
                 obs_final, mask_final, deterministic=False
             )
-            bootstrap_vals = bootstrap_vals.squeeze(-1)
             # Compute done_mask for bootstrap masking (per-env)
             done_mask = torch.tensor(
                 np.logical_or(terminateds, truncateds),
@@ -750,15 +749,25 @@ class MetaTrainer(BaseTrainer):
             base_seed=42,
         )
 
-        best_objective = float("inf")
+        best_objective = float("-inf")
         task_summaries = {}
 
         try:
             for task_id in self.env.tasks:
                 self._print_header_task(task_id)
-                task_best_objective = float("inf")
+                task_best_objective = float("-inf")
                 task_patience_counter = 0
                 iteration = -1
+
+                # Reset agent to meta-trained weights for per-task specialization
+                if self.enable_meta_learning and hasattr(self, "meta_agent"):
+                    agent.network.load_state_dict(self.meta_agent.network.state_dict())
+                    self.logger.log_event(
+                        "tune_agent_reset",
+                        self._total_updates,
+                        task=task_id,
+                        source="meta_agent",
+                    )
 
                 try:
                     for iteration in range(n_iteration):
@@ -814,18 +823,16 @@ class MetaTrainer(BaseTrainer):
                                             # observations[t] is a dict with tensors stacked across batch_size
                                             # batch_indices are flat indices (0 to batch_size*rollout_length)
                                             # Convert to (timestep, env) coordinates: flat_idx = t*batch_size + e
-                                            mb_observations = []
-                                            for flat_idx in batch_indices.cpu().numpy():
-                                                # Recover timestep from flat index
-                                                timestep_idx = flat_idx // batch_size
-                                                # Verify this index belongs to env_id
-                                                idx_env = flat_idx % batch_size
-                                                assert idx_env == env_id, (
-                                                    f"Index mismatch: flat_idx={flat_idx} "
-                                                    f"belongs to env {idx_env}, not {env_id}"
-                                                )
+                                            # Note: env_timestep_indices constructed as arange(env_id, ..., batch_size)
+                                            # guarantees all indices belong to this env_id, so no assertion needed
 
-                                                stacked_obs = observations[timestep_idx]
+                                            # Vectorized extraction: convert flat indices to timestep indices
+                                            timestep_indices = batch_indices // batch_size
+
+                                            # Extract observations for these timesteps
+                                            mb_observations = []
+                                            for timestep_idx in timestep_indices:
+                                                stacked_obs = observations[int(timestep_idx.item())]
                                                 single_obs = {}
                                                 for k, v in stacked_obs.items():
                                                     if "edge_index" in k:
@@ -937,9 +944,9 @@ class MetaTrainer(BaseTrainer):
                                 }
 
                                 mean_obj = eval_stats.get(
-                                    "mean_objective", float("inf")
+                                    "mean_objective", float("-inf")
                                 )
-                                if mean_obj < task_best_objective - self.fcfg.get(
+                                if mean_obj > task_best_objective + self.fcfg.get(
                                     "min_delta", 0.0001
                                 ):
                                     task_best_objective = mean_obj
@@ -969,6 +976,17 @@ class MetaTrainer(BaseTrainer):
                                     iteration=iteration,
                                 )
                                 raise
+
+                            # Early stopping: check patience threshold
+                            if task_patience_counter >= self.fcfg.get("patience", 1000):
+                                self.logger.log_event(
+                                    "fine_tune_early_stop",
+                                    self._total_updates,
+                                    task=task_id,
+                                    iteration=iteration,
+                                    patience=self.fcfg.get("patience", 1000),
+                                )
+                                break
 
                         # Checkpointing
                         if (iteration + 1) % checkpoint_interval == 0:
@@ -1017,7 +1035,7 @@ class MetaTrainer(BaseTrainer):
                     )
                     raise
 
-                best_objective = min(best_objective, task_best_objective)
+                best_objective = max(best_objective, task_best_objective)
                 task_summaries[task_id] = {
                     "best_objective": float(task_best_objective),
                     "iterations_completed": iteration + 1,
@@ -1727,8 +1745,8 @@ class POMOTrainer(BaseTrainer):
             self.env.retask(task_id)
 
             best_objective = float(
-                "inf"
-            )  # For minimization problems, lower is better
+                "-inf"
+            )  # For maximization problems, higher is better
             best_epoch = -1
             patience_counter = 0
 
@@ -1849,8 +1867,8 @@ class POMOTrainer(BaseTrainer):
                     eval_metrics = {f"eval/{k}": v for k, v in eval_stats.items()}
 
                     # Track best objective with early stopping
-                    mean_obj = eval_stats.get("mean_objective", float("inf"))
-                    if mean_obj < best_objective - self.tcfg["min_delta"]:
+                    mean_obj = eval_stats.get("mean_objective", float("-inf"))
+                    if mean_obj > best_objective + self.tcfg["min_delta"]:
                         best_objective = mean_obj
                         best_epoch = epoch + 1
                         patience_counter = 0

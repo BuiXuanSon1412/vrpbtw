@@ -1,22 +1,22 @@
 {
   "stop_reason": "completed",
-  "total_updates": 800,
+  "total_updates": 224,
   "total_epochs": 0,
-  "best_objective": 15267.3291015625,
-  "training_time_s": 2892.1,
+  "best_objective": 15442.6015625,
+  "training_time_s": 632.2,
   "meta_learning_enabled": false,
   "fine_tuning_enabled": true,
   "meta_summary": null,
   "fine_tune_summary": {
     "stop_reason": "completed",
     "total_iterations": 100,
-    "total_updates": 800,
-    "best_objective": 15267.3291015625,
-    "training_time_s": 2892.1,
+    "total_updates": 224,
+    "best_objective": 15442.6015625,
+    "training_time_s": 632.2,
     "task_summaries": {
       "002_N10_F2_R": {
-        "best_objective": 15267.3291015625,
-        "iterations_completed": 100
+        "best_objective": 15442.6015625,
+        "iterations_completed": 28
       }
     }
   }

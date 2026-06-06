@@ -176,14 +176,10 @@ class VRPBTWEnv(Environment):
         self.service_time: float = float(cfg.get("service_time_min", 5.0)) / 60.0
 
         # Instance generation parameters (for _generate_instance)
-        self.demand_range_linehaul: Tuple[int, int] = (
-            int(cfg.get("demand_range_linehaul_min", 5)),
-            int(cfg.get("demand_range_linehaul_max", 10)),
-        )
-        self.demand_range_backhaul: Tuple[int, int] = (
-            int(cfg.get("demand_range_backhaul_min", 5)),
-            int(cfg.get("demand_range_backhaul_max", 10)),
-        )
+        demand_min = int(cfg.get("demand_min", 1))
+        demand_max = int(cfg.get("demand_max", 30))
+        self.demand_range_linehaul: Tuple[int, int] = (demand_min, demand_max)
+        self.demand_range_backhaul: Tuple[int, int] = (-demand_max, -demand_min)
         self.time_window_scaling_factor: float = float(
             cfg.get("time_window_scaling_factor", 1.0)
         )

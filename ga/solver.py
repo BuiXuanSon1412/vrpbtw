@@ -12,8 +12,8 @@ W_TARDINESS = 0.5
 W_COST = 0.5
 
 
-def scalarize(tardiness: float, cost: float) -> float:
-    return W_TARDINESS * tardiness + W_COST * cost
+def scalarize(served: float, cost: float) -> float:
+    return W_TARDINESS * served + W_COST * cost
 
 
 def cal_scalar_fitness(problem: Problem, indi: Individual):
@@ -33,8 +33,15 @@ class GAPopulation(Population):
         candidates = random.sample(self.indivs, min(k, len(self.indivs)))
         return min(candidates, key=lambda ind: ind.scalar_fitness)
 
-    # Offspring generation 
-    def gen_offspring_ga(self,problem: Problem,crossover_operator,mutation_operator,crossover_rate: float,mutation_rate: float):
+    # Offspring generation
+    def gen_offspring_ga(
+        self,
+        problem: Problem,
+        crossover_operator,
+        mutation_operator,
+        crossover_rate: float,
+        mutation_rate: float,
+    ):
         offspring = []
         while len(offspring) < self.pop_size:
             p1 = self.tournament_selection()
@@ -52,7 +59,7 @@ class GAPopulation(Population):
             offspring.append(off2)
         return offspring[: self.pop_size]
 
-    # Survivor selection 
+    # Survivor selection
     def natural_selection(self, combined: list):
         combined.sort(key=lambda ind: ind.scalar_fitness)
         self.indivs = combined[: self.pop_size]
@@ -63,13 +70,24 @@ def _evaluate_population(pool, problem, individuals):
     results = pool.starmap(cal_scalar_fitness, args)
     for ind, res in zip(individuals, results):
         chro, scalar, tardiness, cost = res
-        ind.chromosome = chro          # repaired chromosome
+        ind.chromosome = chro  # repaired chromosome
         ind.scalar_fitness = scalar
         ind.objectives = [tardiness, cost]
     return individuals
 
 
-def run_ga(processing_number: int,problem: Problem,indi_list: list,pop_size: int,max_gen: int,crossover_operator=crossover_PMX,mutation_operator=mutation_flip,crossover_rate: float = 0.9,mutation_rate: float = 0.1,verbose: bool = True,):
+def run_ga(
+    processing_number: int,
+    problem: Problem,
+    indi_list: list,
+    pop_size: int,
+    max_gen: int,
+    crossover_operator=crossover_PMX,
+    mutation_operator=mutation_flip,
+    crossover_rate: float = 0.9,
+    mutation_rate: float = 0.1,
+    verbose: bool = True,
+):
     print("GA (w_tardiness=0.5, w_cost=0.5)")
 
     ga_pop = GAPopulation(pop_size)
@@ -143,7 +161,7 @@ def _print_gen(gen: int, best_ind: Individual):
 if __name__ == "__main__":
     import json
     import sys
-    import os   
+    import os
 
     DATA_PATH = sys.argv[1] if len(sys.argv) > 1 else "./data/N10/"
     POP_SIZE = 50
@@ -168,16 +186,16 @@ if __name__ == "__main__":
     )
 
     base_filename = os.path.splitext(os.path.basename(DATA_PATH))[0]
-    if not base_filename: # Trường hợp DATA_PATH là đường dẫn thư mục
+    if not base_filename:  # Trường hợp DATA_PATH là đường dẫn thư mục
         base_filename = "result"
     parent_dir = os.path.basename(os.path.dirname(os.path.normpath(DATA_PATH)))
     output_dir = os.path.join("result_ga", parent_dir)
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # 4. Tạo tên file JSON mới: result_ga/N10/ten_file_goc.json
     out_path = os.path.join(output_dir, f"{base_filename}.json")
-    
+
     with open(out_path, "w") as f:
         json.dump(result["history"], f, indent=2)
-    
+
     print(f"\n[OK] History saved to: {out_path}")

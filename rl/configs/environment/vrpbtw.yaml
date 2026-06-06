@@ -30,6 +30,14 @@ environment:
     drone_takeoff_min: 1.0
     drone_landing_min: 1.0
     service_time_min: 5.0
+
+    # Customer demand range (backhaul demands will be negated)
+    demand_min: 1
+    demand_max: 30
+
+    # Time window scaling
+    time_window_scaling_factor: 1.5
+
     # Available tasks for training/evaluation
     # Format: {difficulty:003d}_N{customers}_F{fleets}_{distribution}
     tasks:
