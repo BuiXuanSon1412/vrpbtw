@@ -53,16 +53,19 @@ class BaseAgent(ABC):
         network: Any,
         optimizer: Optional[optim.Optimizer] = None,
         max_grad_norm: float = 0.5,
+        learning_rate: float = 0.001,
     ):
         """
         Args:
             network: network (must have parameters() method)
             optimizer: optimizer instance (Adam, SGD, AdamW, etc.), or None for manual updates
             max_grad_norm: gradient clipping threshold
+            learning_rate: learning rate used for optimizer
         """
         self.network = network
         self.optimizer = optimizer
         self.max_grad_norm = max_grad_norm
+        self.learning_rate = learning_rate
 
     def act(
         self,
@@ -164,8 +167,9 @@ class PPOAgent(BaseAgent):
         value_coef: float = 0.5,
         entropy_coef: float = 0.01,
         max_grad_norm: float = 0.5,
+        learning_rate: float = 0.001,
     ):
-        super().__init__(network, optimizer, max_grad_norm)
+        super().__init__(network, optimizer, max_grad_norm, learning_rate)
         self.clip_eps = clip_eps
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
@@ -181,6 +185,7 @@ class PPOAgent(BaseAgent):
         value_coef = cfg.get("value_coef", 0.5)
         entropy_coef = cfg.get("entropy_coef", 0.01)
         max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        learning_rate = cfg.get("learning_rate", 0.001)
         return cls(
             network=network,
             optimizer=opt_network,
@@ -188,6 +193,7 @@ class PPOAgent(BaseAgent):
             value_coef=value_coef,
             entropy_coef=entropy_coef,
             max_grad_norm=max_grad_norm,
+            learning_rate=learning_rate,
         )
 
     def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -302,8 +308,9 @@ class ReinforceAgent(BaseAgent):
         optimizer: Optional[optim.Optimizer] = None,
         entropy_coef: float = 0.0,
         max_grad_norm: float = 0.5,
+        learning_rate: float = 0.001,
     ):
-        super().__init__(network, optimizer, max_grad_norm)
+        super().__init__(network, optimizer, max_grad_norm, learning_rate)
         self.entropy_coef = entropy_coef
 
     @classmethod
@@ -315,11 +322,13 @@ class ReinforceAgent(BaseAgent):
     ) -> "ReinforceAgent":
         entropy_coef = cfg.get("entropy_coef", 0.0)
         max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        learning_rate = cfg.get("learning_rate", 0.001)
         return cls(
             network=network,
             optimizer=opt_network,
             entropy_coef=entropy_coef,
             max_grad_norm=max_grad_norm,
+            learning_rate=learning_rate,
         )
 
     def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -384,8 +393,9 @@ class POMOAgent(BaseAgent):
         optimizer: Optional[optim.Optimizer] = None,
         entropy_coef: float = 0.0,
         max_grad_norm: float = 0.5,
+        learning_rate: float = 0.001,
     ):
-        super().__init__(network, optimizer, max_grad_norm)
+        super().__init__(network, optimizer, max_grad_norm, learning_rate)
         self.entropy_coef = entropy_coef
 
     @classmethod
@@ -397,11 +407,13 @@ class POMOAgent(BaseAgent):
     ) -> "POMOAgent":
         entropy_coef = cfg.get("entropy_coef", 0.0)
         max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        learning_rate = cfg.get("learning_rate", 0.001)
         return cls(
             network=network,
             optimizer=opt_network,
             entropy_coef=entropy_coef,
             max_grad_norm=max_grad_norm,
+            learning_rate=learning_rate,
         )
 
     def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -497,8 +509,9 @@ class MetaAgent(BaseAgent):
         network: Any,
         optimizer: Optional[optim.Optimizer] = None,
         max_grad_norm: float = 0.5,
+        learning_rate: float = 0.001,
     ):
-        super().__init__(network, optimizer, max_grad_norm)
+        super().__init__(network, optimizer, max_grad_norm, learning_rate)
 
     @classmethod
     def from_config(
@@ -508,10 +521,12 @@ class MetaAgent(BaseAgent):
         opt_network: Optional[optim.Optimizer] = None,
     ) -> "MetaAgent":
         max_grad_norm = cfg.get("max_grad_norm", 0.5)
+        learning_rate = cfg.get("learning_rate", 0.001)
         return cls(
             network=network,
             optimizer=opt_network,
             max_grad_norm=max_grad_norm,
+            learning_rate=learning_rate,
         )
 
     def update(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
