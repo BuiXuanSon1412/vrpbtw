@@ -35,11 +35,11 @@ trainer:
       max_grad_norm: 0.5
     tune_agent:
       name: ppo
-      learning_rate: 0.0001
+      learning_rate: 0.00005
       optimizer: adam
       clip_eps: 0.1
-      value_coef: 0.5
-      entropy_coef: 0.05
+      value_coef: 0.2
+      entropy_coef: 0.1
       max_grad_norm: 0.5
     eval_agent:
       name: ppo

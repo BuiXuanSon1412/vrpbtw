@@ -2,8 +2,8 @@
   "stop_reason": "completed",
   "total_updates": 800,
   "total_epochs": 0,
-  "best_objective": 2962.978515625,
-  "training_time_s": 2572.5,
+  "best_objective": 17680.94921875,
+  "training_time_s": 3085.1,
   "meta_learning_enabled": false,
   "fine_tuning_enabled": true,
   "meta_summary": null,
@@ -11,11 +11,11 @@
     "stop_reason": "completed",
     "total_iterations": 100,
     "total_updates": 800,
-    "best_objective": 2962.978515625,
-    "training_time_s": 2572.5,
+    "best_objective": 17680.94921875,
+    "training_time_s": 3085.1,
     "task_summaries": {
       "001_N10_F2_RC": {
-        "best_objective": 2962.978515625,
+        "best_objective": 17680.94921875,
         "iterations_completed": 100
       }
     }

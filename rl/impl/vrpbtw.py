@@ -171,6 +171,7 @@ class VRPBTWEnv(Environment):
         self.v_d: float = float(cfg.get("v_drone_km_h", 60.0))
         self.c_t: float = float(cfg.get("truck_cost_unit", 1.0))
         self.c_d: float = float(cfg.get("drone_cost_unit", 0.5))
+        self.c_b: float = float(cfg.get("fleet_basis_cost", 50.0))
         self.launch_time: float = float(cfg.get("drone_takeoff_min", 1.0)) / 60.0
         self.land_time: float = float(cfg.get("drone_landing_min", 1.0)) / 60.0
         self.service_time: float = float(cfg.get("service_time_min", 5.0)) / 60.0
@@ -330,7 +331,7 @@ class VRPBTWEnv(Environment):
                 )
             )
 
-            demand = float(int(np.random.randint(demand_range[0], demand_range[1])))
+            demand = float(int(np.random.randint(demand_range[0], demand_range[1] + 1)))
             if node_type == "BACKHAUL":
                 demand = -demand
             customers.append(
@@ -411,7 +412,8 @@ class VRPBTWEnv(Environment):
         N = self.n_customers
         k = served_count
         max_dist = 2.0 * self.max_coord
-        service_reward = max(self.c_t, self.c_d) * max_dist * N * k
+        weight = max(self.c_t, self.c_d) * max_dist * N + self.c_b * self.n_fleets
+        service_reward = weight * k
         return service_reward - cost
 
     def compute_return(self) -> float:
@@ -430,6 +432,7 @@ class VRPBTWEnv(Environment):
         solution = self.current_solution()
         normalized_factor = (
             2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
+            + self.n_fleets * self.c_b
         )
         return solution.objective / normalized_factor
 
@@ -1158,6 +1161,7 @@ class VRPBTWEnv(Environment):
         curr_obj = self._compute_objective(state.current_cost, curr_served)
         normalized_factor = (
             2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
+            + self.c_b * self.n_fleets
         )
 
         # When objective increases (good), reward is positive
@@ -1214,7 +1218,10 @@ class VRPBTWEnv(Environment):
             state.served[j] = True
             self._update_truck_phase(state, k)
 
+        # Update current cost
         state.current_cost += self.c_t * dist
+        if state.truck_prev_node[k] == DEPOT:
+            state.current_cost += self.c_b
 
         # Update load arrays
         if j != DEPOT:
@@ -1470,7 +1477,9 @@ class VRPBTWEnv(Environment):
     This is O(N^2) numpy work — fast enough for N<=50.
     """
 
-    def _filter_edges_sparse(self, src: np.ndarray, dst: np.ndarray, state: "VRPBTWState") -> tuple:
+    def _filter_edges_sparse(
+        self, src: np.ndarray, dst: np.ndarray, state: "VRPBTWState"
+    ) -> tuple:
         """Sparse edge filtering: keep only routing-relevant edges.
 
         Removes edges involving served nodes to reduce graph complexity during routing.
@@ -1505,7 +1514,9 @@ class VRPBTWEnv(Environment):
 
         return truck_edge_index, drone_edge_index
 
-    def _filter_edges_complete(self, src: np.ndarray, dst: np.ndarray, state: "VRPBTWState") -> tuple:
+    def _filter_edges_complete(
+        self, src: np.ndarray, dst: np.ndarray, state: "VRPBTWState"
+    ) -> tuple:
         """Complete edge filtering: keep all edges.
 
         Returns full complete graph (all src-dst pairs). Enables efficient batching
@@ -1534,9 +1545,9 @@ class VRPBTWEnv(Environment):
             self.v_t, self.v_d
         )  # time to traverse longest path at slowest speed
 
-        mc = max(self.c_t, self.c_d) + 1e-8  # max cost unit
+        mc = max(self.c_t, self.c_d)  # max cost unit
         norm_cost_denom = max_dist * mc  # cost normalisation denominator
-        max_capacity = max(self.Q_t, self.Q_d) + 1e-8  # universal load normalizer
+        max_capacity = max(self.Q_t, self.Q_d)  # universal load normalizer
 
         # ── Node features ────────────────────────────────────────────────
         # Demand is zeroed for served nodes so the network can distinguish
@@ -1624,7 +1635,9 @@ class VRPBTWEnv(Environment):
         # Swap method call below to change strategy:
         #   self._filter_edges_complete(src, dst, state)  # ← Fixed-size (batching-friendly)
         #   self._filter_edges_sparse(src, dst, state)    # ← Variable-size (efficiency)
-        truck_edge_index, drone_edge_index = self._filter_edges_complete(src, dst, state)
+        truck_edge_index, drone_edge_index = self._filter_edges_complete(
+            src, dst, state
+        )
 
         # Get edge attributes for selected edges
         if truck_edge_index.shape[1] == len(src):

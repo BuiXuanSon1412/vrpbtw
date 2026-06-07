@@ -112,7 +112,7 @@ class MetaTrainer(BaseTrainer):
         self.enable_meta_learning = bool(meta_phase.get("enabled", True))
         curriculum_cfg = meta_phase.get("curriculum", {})
         meta_control_cfg = meta_phase.get("control", {})
-        meta_early_stop = meta_control_cfg.get("early_stopping", {})
+        meta_early_stop = meta_phase.get("early_stopping", {})
 
         # Meta-learning config: epochs/batches instead of timesteps
         self.mcfg = {
@@ -130,7 +130,7 @@ class MetaTrainer(BaseTrainer):
         fine_tune_phase = phases_cfg.get("fine_tuning", {})
         self.enable_fine_tuning = bool(fine_tune_phase.get("enabled", True))
         fine_control_cfg = fine_tune_phase.get("control", {})
-        fine_early_stop = fine_control_cfg.get("early_stopping", {})
+        fine_early_stop = fine_tune_phase.get("early_stopping", {})
 
         # Fine-tuning config: per-task PPO training with optional parallelization
         # Structure: for each task → for each iteration → collect rollout → PPO updates
