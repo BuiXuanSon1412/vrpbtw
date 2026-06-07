@@ -53,7 +53,7 @@ class Problem:
 
     truck_speed: float
     drone_speed: float
-    distance_matrix: List[List[float]]
+    drone_distance_matrix: List[List[float]]
 
     launch_time: float
     land_time: float
@@ -71,6 +71,8 @@ class Problem:
 
         config = data["Config"]
 
+        self.max_coord = config["General"]["MAX_COORD_KM"]
+        self.num_customer = config["General"]["NUM_CUSTOMERS"]
         self.num_fleet = config["Vehicles"]["NUM_TRUCKS"]
         self.truck_capacity = config["Vehicles"]["CAPACITY_TRUCK"]
         self.drone_capacity = config["Vehicles"]["CAPACITY_DRONE"]
@@ -98,7 +100,9 @@ class Problem:
                     node["tw_h"],
                 )
             )
-        self.distance_matrix = calculate_euclidean_distance_matrix(self.nodes)
-        self.truck_cost = 25
-        self.drone_cost = 1
-        self.basis_cost = 500
+        self.drone_distance_matrix = calculate_euclidean_distance_matrix(self.nodes)
+        self.truck_distance_matrix = calculate_manhattan_distance_matrix(self.nodes)
+
+        self.truck_cost = config["Vehicles"]["TRUCK_COST_UNIT"]
+        self.drone_cost = config["Vehicles"]["DRONE_COST_UNIT"]
+        self.basis_cost = config["Vehicles"]["FLEET_BASIS_COST"]

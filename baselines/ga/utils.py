@@ -212,7 +212,7 @@ def schedule(
         # 1. Truck Arrival Time
         if i > 0:
             prev_node = route[i - 1]
-            dist = problem.distance_matrix[prev_node][curr_node % n_node]
+            dist = problem.drone_distance_matrix[prev_node][curr_node % n_node]
             travel_time = dist / problem.truck_speed
             t_route.arrival[i] = t_route.departure[i - 1] + travel_time
 
@@ -224,7 +224,7 @@ def schedule(
         # 3. Complete current drone trip
         if trip_idx < len(d_trips) and curr_node == d_trips[trip_idx].nodes[0]:
             curr_trip = d_trips[trip_idx]
-            dist = problem.distance_matrix[curr_node][curr_trip.nodes[1]]
+            dist = problem.drone_distance_matrix[curr_node][curr_trip.nodes[1]]
             travel_time = dist / problem.drone_speed
             temp_launch = (
                 problem.nodes[curr_trip.nodes[1]].time_window[0]
@@ -236,7 +236,9 @@ def schedule(
             t_route.departure[i] = max(curr_trip.departure[0], t_route.service[i])
             for i in range(1, len(curr_trip.nodes)):
                 prev_node = curr_trip.nodes[i - 1]
-                dist = problem.distance_matrix[prev_node][curr_trip.nodes[i] % n_node]
+                dist = problem.drone_distance_matrix[prev_node][
+                    curr_trip.nodes[i] % n_node
+                ]
                 travel_time = dist / problem.drone_speed
                 curr_trip.arrival[i] = (
                     curr_trip.departure[i - 1] + problem.launch_time + travel_time
@@ -263,7 +265,9 @@ def schedule(
                         and curr_node == d_trips[trip_idx].nodes[0]
                     ):
                         curr_trip = d_trips[trip_idx]
-                        dist = problem.distance_matrix[curr_node][curr_trip.nodes[1]]
+                        dist = problem.drone_distance_matrix[curr_node][
+                            curr_trip.nodes[1]
+                        ]
                         travel_time = dist / problem.drone_speed
                         temp_launch = (
                             problem.nodes[curr_trip.nodes[1]].time_window[0]
@@ -277,7 +281,7 @@ def schedule(
                         )
                         for i in range(1, len(curr_trip.nodes)):
                             prev_node = curr_trip.nodes[i - 1]
-                            dist = problem.distance_matrix[prev_node][
+                            dist = problem.drone_distance_matrix[prev_node][
                                 curr_trip.nodes[i] % n_node
                             ]
                             travel_time = dist / problem.drone_speed
@@ -339,200 +343,35 @@ def routing(seq, problem: Problem):
     if trip:
         trips.append(trip)
 
-    if trips:
-        queue = deque()
-        opt_tardiness = float("inf")
-        opt_cost = float("inf")
-        opt_tardiness_route = None
-        opt_tardiness_trips = None
-
-        opt_cost_route = None
-        opt_cost_trips = None
-
-        # push initial state into stack
-        first = trips[0][0]
-        last = trips[0][-1]
-        for launch in range(0, first):
-            for land in range(last + 1, len(nodes)):
-                if nodes[land][1]:
-                    break
-                temp_trip = [launch] + trips[0] + [land]
-
-                d = cal_route_distance([nodes[idx][0] for idx in trip], problem)
-                if d <= problem.drone_speed * problem.drone_trip_duration:
-                    queue.append([temp_trip])
-        while queue:
-            ll_trips = queue.popleft()
-            if len(ll_trips) == len(trips):
-                # print("route:")
-                # print(route)
-                # print("trips: ")
-                # print(ll_trips)
-                temp_route, temp_trips, temp_tardiness, temp_cost = schedule(
-                    route,
-                    [[nodes[idx][0] for idx in trip] for trip in ll_trips],
-                    problem,
-                )
-                # print("SCHEDULED: ")
-                # print("route: ")
-                # print(temp_route)
-                # print("trips: ")
-                # print(temp_trips)
-
-                drained = False
-                if temp_trips:
-                    for trip in temp_trips:
-                        launch = trip.departure[0]
-                        land = trip.arrival[-1] + problem.land_time
-                        if launch - land > problem.drone_trip_duration:
-                            drained = True
-                            break
-
-                if opt_tardiness > temp_tardiness and not drained:
-                    opt_tardiness_route, opt_tardiness_trips, opt_tardiness = (
-                        temp_route,
-                        temp_trips,
-                        temp_tardiness,
-                    )
-                if opt_cost > temp_cost:
-                    opt_cost_route, opt_cost_trips, opt_cost = (
-                        temp_route,
-                        temp_trips,
-                        temp_tardiness,
-                    )
-                continue
-
-            last_trip = ll_trips[-1]
-            last_land = last_trip[-1]
-
-            next_trip = trips[len(ll_trips)]
-            for launch in range(last_land, next_trip[0]):
-                for land in range(next_trip[-1] + 1, len(nodes)):
-                    if nodes[land][1]:
-                        break
-                    temp_trip = [launch] + next_trip + [land]
-                    d = cal_route_distance(
-                        [nodes[idx][0] for idx in temp_trip], problem
-                    )
-                    if d <= problem.drone_speed * problem.drone_trip_duration:
-                        temp_ll_trips = ll_trips + [temp_trip]
-                        queue.append(temp_ll_trips)
-    else:
-        temp_route, temp_trips, temp_tardiness, temp_cost = schedule(route, [], problem)
-        opt_tardiness_route, opt_tardiness_trips, opt_tardiness = (
-            temp_route,
-            temp_trips,
-            temp_tardiness,
-        )
-        opt_cost_route, opt_cost_trips, opt_cost = temp_route, temp_trips, temp_cost
     return (
-        opt_tardiness_route,
-        opt_tardiness_trips,
-        opt_cost_route,
-        opt_cost_trips,
+        route,
+        trips,
     )
 
 
-def decode(indi: Individual, problem: Problem) -> Tuple[Solution, Solution]:
+def decode(indi: Individual, problem: Problem) -> Solution:
     chro = indi.chromosome
 
-    # print("CHROMOSOME: ")
-    # print(chro)
     seqs = partition(chro, problem)
-    # print("PARTITIONED: ")
-    # print(seqs)
-    tardiness_routes = []
-    cost_routes = []
+    routes = []
 
-    seq_indices = []
-    for idx, seq in enumerate(seqs):
-        tardiness_route, tardiness_trips, cost_route, cost_trips = routing(seq, problem)
+    for seq in seqs:
+        route, trips = routing(seq, problem)
 
-        if not tardiness_route:
-            for i in range(len(seq)):
-                seq[i] = (seq[i][0], 0)
+        routes.append((route, trips))
 
-            seq_indices.append(idx)
-            tardiness_route, tardiness_trips, cost_route, cost_trips = routing(
-                seq, problem
-            )
-
-        tardiness_routes.append((tardiness_route, tardiness_trips))
-        cost_routes.append((cost_route, cost_trips))
-
-    if seq_indices:
-        chro = indi.chromosome
-        seq_idx = 0
-
-        n_node = len(problem.nodes)
-        start = 0
-
-        for i in range(len(chro[0])):
-            if chro[0][i] >= n_node:
-                if i > start:
-                    if seq_idx in seq_indices:
-                        for j in range(start, i):
-                            chro[1][j] = 0
-                    seq_idx = seq_idx + 1
-                start = i + 1
-            elif i == len(chro[0]) - 1:
-                if start < len(chro[0]):
-                    if seq_idx in seq_indices:
-                        for j in range(start, len(chro[0])):
-                            chro[1][j] = 0
-                    seq_idx = seq_idx + 1
-
-    return Solution(tardiness_routes), Solution(cost_routes)
+    return Solution(routes)
 
 
 def cal_route_distance(route, problem: Problem):
     n_node = len(problem.nodes)
     distance = sum(
         [
-            problem.distance_matrix[route[i] % n_node][route[i - 1] % n_node]
+            problem.drone_distance_matrix[route[i] % n_node][route[i - 1] % n_node]
             for i in range(1, len(route))
         ]
     )
     return distance
-
-
-def cal_tardiness(solution: Solution, problem: Problem):
-    routes = solution.routes
-    tardiness = 0.0
-    for route, trips in routes:
-        # Calculate truck tardiness
-        truck_tardiness_list = [
-            max(
-                0.0,
-                route.service[idx]
-                + problem.service_time
-                - problem.nodes[route.nodes[idx]].time_window[1],
-            )
-            for idx in range(1, len(route.nodes) - 1)
-        ]
-
-        # Handle empty list case
-        truck_tardiness = max(truck_tardiness_list) if truck_tardiness_list else 0.0
-
-        # Calculate drone tardiness
-        if trips:
-            drone_tardiness_list = [
-                max(
-                    0.0,
-                    trip.service[idx]
-                    + problem.service_time
-                    - problem.nodes[trip.nodes[idx]].time_window[1],
-                )
-                for trip in trips
-                for idx in range(1, len(trip.nodes) - 1)
-            ]
-            drone_tardiness = max(drone_tardiness_list) if drone_tardiness_list else 0.0
-        else:
-            drone_tardiness = 0.0
-
-        temp_tardiness = max(truck_tardiness, drone_tardiness)
-        tardiness = max(tardiness, temp_tardiness)
-    return tardiness
 
 
 def cal_service_rate(solution, problem):
@@ -569,11 +408,17 @@ def cal_cost(solution, problem):
     return cost
 
 
+def cal_objective(problem: Problem, indi: Individual):
+    chro = indi.chromosome
+    solution = decode(indi, problem)
+    cost = cal_cost(solution, problem)
+    service_rate = cal_service_rate(solution, problem)
+    weight = problem.num_customer * 2 * problem.max_coord
+
+
 def cal_fitness(problem: Problem, indi: Individual):
     chro = indi.chromosome
-    tardiness_solution, cost_solution = decode(indi, problem)
+    solution = decode(indi, problem)
 
-    tardiness = cal_tardiness(tardiness_solution, problem)
-    cost = cal_cost(cost_solution, problem)
-
-    return chro, tardiness, cost
+    fitness = cal_objective(problem, indi)
+    return (chro,)

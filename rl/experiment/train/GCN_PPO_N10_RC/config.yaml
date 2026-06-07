@@ -71,7 +71,7 @@ trainer:
         n_iteration: 100
         rollout_length: 256
         ppo_epochs: 1
-        minibatch_size: 32
+        minibatch_size: 16
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
@@ -84,13 +84,13 @@ network:
       node_encoder:
         embedding_dim: 128
         n_heads: 4
-        n_layers: 3
+        n_layers: 4
         dropout: 0.1
         use_instance_norm: true
       vehicle_encoder:
         embedding_dim: 128
         n_heads: 4
-        n_layers: 3
+        n_layers: 4
         dropout: 0.1
         use_instance_norm: true
       graph_encoder: gcn_mega

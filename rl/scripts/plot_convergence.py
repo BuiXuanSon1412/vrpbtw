@@ -256,14 +256,14 @@ def plot_convergence_per_task(
             label="mean_objective",
         )
         ax.axhline(
-            y=min(objectives),
+            y=max(objectives),
             color="r",
             linestyle="--",
             alpha=0.5,
-            label=f"best={min(objectives):.2f}",
+            label=f"best={max(objectives):.2f}",
         )
         ax.set_xlabel("Epoch")
-        ax.set_ylabel("Objective (Cost)")
+        ax.set_ylabel("Objective (Service Value - Cost)")
         ax.set_title(f"Objective Convergence - {exp_dir.name}")
         ax.grid(True, alpha=0.3)
         ax.legend()
@@ -436,11 +436,10 @@ def plot_convergence_comparison(
                 label=exp_name,
             )
 
-        # Plot final objective
+        # Plot best objective
         ax = axes[1, 0]
         if objectives:
-            final_obj = objectives[-1]
-            best_obj = min(objectives)
+            best_obj = max(objectives)
             ax.bar(
                 idx,
                 best_obj,
