@@ -343,6 +343,8 @@ def routing(seq, problem: Problem):
     if trip:
         trips.append(trip)
 
+    rroute, rtrips, max_service_rate, cost = schedule(route, trips, problem)
+
     return (
         route,
         trips,

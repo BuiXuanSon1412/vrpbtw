@@ -71,7 +71,7 @@ trainer:
         n_iteration: 100
         rollout_length: 1024
         ppo_epochs: 1
-        minibatch_size: 16
+        minibatch_size: 32
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
@@ -157,7 +157,7 @@ environment:
     demand_max: 30
     time_window_scaling_factor: 1.5
     tasks:
-    - 003_N10_F2_R
+    - 005_N20_F3_R
 device: cpu
 reproducibility:
   seed:
@@ -165,7 +165,7 @@ reproducibility:
     numpy_seed: 42
     torch_seed: 42
 experiment:
-  name: GCN_PPO_N10_R
+  name: GCN_PPO_N20_R
   description: mvrpbtw experiment
 logger:
   base_dir: experiment/train

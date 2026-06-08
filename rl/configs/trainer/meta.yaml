@@ -85,11 +85,11 @@ trainer:
         # Rollout collection
         batch_size: 1             # Number of parallel environments (1=sequential, N>1=parallel with SubprocVecEnv)
         n_iteration: 100          # Number of rollout collections per task
-        rollout_length: 256       # Timesteps per environment per rollout collection
+        rollout_length: 1024       # Timesteps per environment per rollout collection
 
         # PPO optimization on collected data
         ppo_epochs: 1             # Gradient steps per rollout (1=single pass, higher=risk of overfitting)
-        minibatch_size: 16        # Mini-batch size for SGD over collected timesteps
+        minibatch_size: 32        # Mini-batch size for SGD over collected timesteps
 
         # Evaluation and checkpointing
         eval_interval: 1          # Evaluate every N iterations
