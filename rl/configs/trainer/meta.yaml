@@ -89,7 +89,7 @@ trainer:
 
         # PPO optimization on collected data
         ppo_epochs: 1             # Gradient steps per rollout (1=single pass, higher=risk of overfitting)
-        minibatch_size: 32        # Mini-batch size for SGD over collected timesteps
+        minibatch_size: 16        # Mini-batch size for SGD over collected timesteps
 
         # Evaluation and checkpointing
         eval_interval: 1          # Evaluate every N iterations
