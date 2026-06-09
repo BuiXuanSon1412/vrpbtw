@@ -1,0 +1,1448 @@
+{
+  "history": {
+    "0": {
+      "scalar": -252409.1118798865,
+      "cost": 13585.48038987358,
+      "service_rate": 0.6,
+      "served_count": 6,
+      "tardiness_penalty_value": 7.4127146814753
+    },
+    "1": {
+      "scalar": -253102.63900859212,
+      "cost": 12891.95326116797,
+      "service_rate": 0.6,
+      "served_count": 6,
+      "tardiness_penalty_value": 7.4127146814753
+    },
+    "2": {
+      "scalar": -297614.44435034366,
+      "cost": 12712.579964376424,
+      "service_rate": 0.7,
+      "served_count": 7,
+      "tardiness_penalty_value": 7.4127146814753
+    },
+    "3": {
+      "scalar": -297614.44435034366,
+      "cost": 12712.579964376424,
+      "service_rate": 0.7,
+      "served_count": 7,
+      "tardiness_penalty_value": 7.4127146814753
+    },
+    "4": {
+      "scalar": -298330.4848757504,
+      "cost": 11996.539438969708,
+      "service_rate": 0.7,
+      "served_count": 7,
+      "tardiness_penalty_value": 7.4127146814753
+    },
+    "5": {
+      "scalar": -298330.4848757504,
+      "cost": 11996.539438969708,
+      "service_rate": 0.7,
+      "served_count": 7,
+      "tardiness_penalty_value": 7.4127146814753
+    },
+    "6": {
+      "scalar": -342061.1492285128,
+      "cost": 12598.307131167341,
+      "service_rate": 0.8,
+      "served_count": 8,
+      "tardiness_penalty_value": 8.230708075961548
+    },
+    "7": {
+      "scalar": -387710.4305874924,
+      "cost": 11281.457817147731,
+      "service_rate": 0.9,
+      "served_count": 9,
+      "tardiness_penalty_value": 4.065491482773229
+    },
+    "8": {
+      "scalar": -387710.4305874924,
+      "cost": 11281.457817147731,
+      "service_rate": 0.9,
+      "served_count": 9,
+      "tardiness_penalty_value": 4.065491482773229
+    },
+    "9": {
+      "scalar": -432225.6137993674,
+      "cost": 11098.70665023271,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "10": {
+      "scalar": -432225.6137993674,
+      "cost": 11098.70665023271,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "11": {
+      "scalar": -432225.6137993674,
+      "cost": 11098.70665023271,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "12": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "13": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "14": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "15": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "16": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "17": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "18": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "19": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "20": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "21": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "22": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "23": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "24": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "25": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "26": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "27": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "28": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "29": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "30": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "31": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "32": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "33": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "34": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "35": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "36": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "37": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "38": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "39": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "40": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "41": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "42": {
+      "scalar": -432789.37959639693,
+      "cost": 10534.94085320319,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "43": {
+      "scalar": -433145.39013323514,
+      "cost": 10178.93031636496,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "44": {
+      "scalar": -433145.39013323514,
+      "cost": 10178.93031636496,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "45": {
+      "scalar": -433145.39013323514,
+      "cost": 10178.93031636496,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "46": {
+      "scalar": -433145.39013323514,
+      "cost": 10178.93031636496,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "47": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "48": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "49": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "50": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "51": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "52": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "53": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "54": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "55": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "56": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "57": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "58": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "59": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "60": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "61": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "62": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "63": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "64": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "65": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "66": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "67": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "68": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "69": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "70": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "71": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "72": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "73": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "74": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "75": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "76": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "77": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "78": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "79": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "80": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "81": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "82": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "83": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "84": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "85": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "86": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "87": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "88": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "89": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "90": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "91": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "92": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "93": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "94": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "95": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "96": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "97": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "98": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "99": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "100": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "101": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "102": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "103": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "104": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "105": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "106": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "107": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "108": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "109": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "110": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "111": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "112": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "113": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "114": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "115": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "116": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "117": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "118": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "119": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "120": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "121": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "122": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "123": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "124": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "125": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "126": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "127": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "128": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "129": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "130": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "131": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "132": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "133": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "134": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "135": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "136": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "137": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "138": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "139": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "140": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "141": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "142": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "143": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "144": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "145": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "146": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "147": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "148": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "149": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "150": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "151": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "152": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "153": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "154": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "155": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "156": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "157": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "158": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "159": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "160": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "161": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "162": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "163": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "164": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "165": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "166": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "167": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "168": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "169": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "170": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "171": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "172": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "173": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "174": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "175": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "176": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "177": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "178": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "179": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "180": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "181": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "182": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "183": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "184": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "185": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "186": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "187": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "188": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "189": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "190": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "191": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "192": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "193": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "194": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "195": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "196": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "197": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "198": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "199": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    },
+    "200": {
+      "scalar": -433332.0543548084,
+      "cost": 9992.266094791703,
+      "service_rate": 1.0,
+      "served_count": 10,
+      "tardiness_penalty_value": 0.0
+    }
+  },
+  "best": {
+    "chromosome": [
+      [
+        5,
+        4,
+        6,
+        10,
+        1,
+        3,
+        11,
+        2,
+        7,
+        9,
+        8
+      ],
+      [
+        0,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+      ]
+    ],
+    "scalar": -433332.0543548084,
+    "cost": 9992.266094791703,
+    "service_rate": 1.0,
+    "served_count": 10,
+    "tardiness_penalty_value": 0.0
+  },
+  "time": 2.5885567665100098,
+  "data": "data\\generated\\data\\N10\\S043_N10_R_R50.json"
+}
