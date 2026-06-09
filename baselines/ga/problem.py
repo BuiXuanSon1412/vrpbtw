@@ -9,7 +9,6 @@ class Route:
     nodes: List[int]
     arrival: List[float]
     departure: List[float]
-    service: List[float]
 
 
 @dataclass
@@ -102,6 +101,18 @@ class Problem:
             )
         self.drone_distance_matrix = calculate_euclidean_distance_matrix(self.nodes)
         self.truck_distance_matrix = calculate_manhattan_distance_matrix(self.nodes)
+
+        self.truck_time_matrix = [
+            [dist / self.truck_speed for dist in dists]
+            for dists in self.truck_distance_matrix
+        ]
+        self.drone_time_matrix = [
+            [
+                dist / self.drone_speed + self.launch_time + self.land_time
+                for dist in dists
+            ]
+            for dists in self.truck_distance_matrix
+        ]
 
         self.truck_cost = config["Vehicles"]["TRUCK_COST_UNIT"]
         self.drone_cost = config["Vehicles"]["DRONE_COST_UNIT"]
