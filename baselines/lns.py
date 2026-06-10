@@ -293,7 +293,6 @@ class LNSSolver:
         return {
             "time": end_time - start_time,
             "history": history,
-            "best_individual": self.best_indi,
             "best_fitness": self.best_fitness,
             "best_cost": self.best_cost,
             "best_service_rate": self.best_sr,

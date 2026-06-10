@@ -588,10 +588,8 @@ def cal_fitness(problem: Problem, indi: Individual):
     return fitness, service_rate, cost
 
 
-def get_data_files(base_dir: str = None) -> Dict[str, list]:
+def get_data_files(base_dir: str) -> Dict[str, list]:
     """Get all JSON data files organized by problem size."""
-    if base_dir is None:
-        base_dir = str(Path(__file__).parent.parent / "data" / "generated" / "data")
 
     data_files = {}
     base_path = Path(base_dir).resolve()
@@ -609,18 +607,11 @@ def get_data_files(base_dir: str = None) -> Dict[str, list]:
     return data_files
 
 
-def save_result(result: Dict, output_path: Path, exclude_keys: list = None):
+def save_result(result: Dict, output_path: Path):
     """Save result to JSON file."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if exclude_keys is None:
-        exclude_keys = []
-
-    serializable_result = {k: v for k, v in result.items() if k not in exclude_keys}
-
     with open(output_path, "w") as f:
-        json.dump(serializable_result, f, indent=2)
+        json.dump(result, f, indent=2)
 
     print(f"Saved result to {output_path}")
-
-
