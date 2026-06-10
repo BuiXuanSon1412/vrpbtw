@@ -1,12 +1,18 @@
 from copy import deepcopy
 import enum
+import json
 import random
-from typing import List, Optional, Tuple, Any
+from pathlib import Path
+from typing import List, Optional, Tuple, Any, Dict
 import numpy as np
 from collections import deque
 
-from problem import Problem, Solution, Route
-from population import Individual
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from problem import Problem, Solution, Route, Individual
 
 
 def init_population(num_indi, seed, problem):
@@ -577,15 +583,44 @@ def cal_fitness(problem: Problem, indi: Individual):
     solution = decode(indi, problem)
 
     fitness = cal_objective(problem, solution)
-    service_rate = cal_service_rate(solution, problem)
+    service_rate = cal_service_rate(solution, problem) / len(problem.nodes)
     cost = cal_cost(solution, problem)
     return fitness, service_rate, cost
 
 
-def cal_all_metrics(problem: Problem, indi: Individual):
-    """Calculate fitness, service_rate, and cost for an individual."""
-    solution = decode(indi, problem)
-    fitness = cal_objective(problem, solution)
-    service_rate = cal_service_rate(solution, problem)
-    cost = cal_cost(solution, problem)
-    return fitness, service_rate, cost
+def get_data_files(base_dir: str = None) -> Dict[str, list]:
+    """Get all JSON data files organized by problem size."""
+    if base_dir is None:
+        base_dir = str(Path(__file__).parent.parent / "data" / "generated" / "data")
+
+    data_files = {}
+    base_path = Path(base_dir).resolve()
+
+    if not base_path.exists():
+        print(f"Warning: Data directory {base_dir} does not exist!")
+        return data_files
+
+    for size_dir in sorted(base_path.iterdir()):
+        if size_dir.is_dir() and size_dir.name.startswith("N"):
+            json_files = list(size_dir.glob("*.json"))
+            if json_files:
+                data_files[size_dir.name] = sorted(json_files)
+
+    return data_files
+
+
+def save_result(result: Dict, output_path: Path, exclude_keys: list = None):
+    """Save result to JSON file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if exclude_keys is None:
+        exclude_keys = []
+
+    serializable_result = {k: v for k, v in result.items() if k not in exclude_keys}
+
+    with open(output_path, "w") as f:
+        json.dump(serializable_result, f, indent=2)
+
+    print(f"Saved result to {output_path}")
+
+

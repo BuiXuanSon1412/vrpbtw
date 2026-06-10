@@ -40,6 +40,12 @@ class Solution:
         self.routes = routes
 
 
+class Individual:
+    def __init__(self, chromosome):
+        self.chromosome = chromosome
+        self.fitness = None
+
+
 class Problem:
     nodes: List[Node]
     num_fleet: int
