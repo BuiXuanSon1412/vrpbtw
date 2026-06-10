@@ -306,9 +306,18 @@ class LNSSolver:
 def main():
     """Run LNS on datasets."""
     parser = argparse.ArgumentParser(description="Run LNS solver")
-    parser.add_argument("--sizes", nargs="+", default=["N10", "N20", "N50", "N100", "N150"], help="Problem sizes")
-    parser.add_argument("--max-iterations", type=int, default=100, help="Maximum iterations")
-    parser.add_argument("--lns-iterations", type=int, default=50, help="Local search iterations")
+    parser.add_argument(
+        "--sizes",
+        nargs="+",
+        default=["N10", "N20", "N50", "N100", "N150"],
+        help="Problem sizes",
+    )
+    parser.add_argument(
+        "--max-iterations", type=int, default=100, help="Maximum iterations"
+    )
+    parser.add_argument(
+        "--lns-iterations", type=int, default=50, help="Local search iterations"
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     args = parser.parse_args()
@@ -354,7 +363,7 @@ def main():
                 )
 
                 output_path = result_dir / size_dir / data_file.name
-                save_result(result, output_path, exclude_keys=["best_individual"])
+                save_result(result, output_path)
 
                 print(f"  Completed in {result['time']:.2f} seconds")
                 print(f"  Best fitness: {result['best_fitness']:.2f}")
@@ -362,6 +371,7 @@ def main():
             except Exception as e:
                 print(f"  ERROR: {str(e)}")
                 import traceback
+
                 traceback.print_exc()
                 continue
 
