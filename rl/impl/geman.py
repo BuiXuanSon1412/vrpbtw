@@ -8,8 +8,8 @@ VRPBTWProblem.state_to_obs — all arrays are already normalised and the
 static compatibility graph is already built. No preprocessing happens inside this file.
 
 Obs dict keys (all numpy arrays, produced by state_to_obs):
-  node_features     (B, N+1, 5)
-  vehicle_features  (B, 2K,  5)
+  node_features     (B, N+1, 6)  [x, y, linehaul_demand, backhaul_demand, tw_open, tw_close]
+  vehicle_features  (B, 2K,  6)  [x, y, linehaul_bound, backhaul_bound, time, deadline]
   truck_edge_index  (B, 2, E)   or  (2, E)  — shared across batch
   truck_edge_attr   (B, E, 2)   or  (E, 2)
   drone_edge_index  (B, 2, E)   or  (2, E)
@@ -1077,10 +1077,10 @@ class GEMANActorCritic(ActorCritic):
         """
         nf = self._to_tensor(
             obs["node_features"], device, torch.float32
-        )  # (B, N+1, 5)  or (N+1, 5)
+        )  # (B, N+1, 6)  or (N+1, 6)
         vf = self._to_tensor(
             obs["vehicle_features"], device, torch.float32
-        )  # (B, 2K,  5)  or (2K,  5)
+        )  # (B, 2K,  6)  or (2K,  6)
         t_ei = self._to_tensor(obs["truck_edge_index"], device, torch.long)  # (2, E)
         t_ea = self._to_tensor(obs["truck_edge_attr"], device, torch.float32)  # (E, 2)
         d_ei = self._to_tensor(obs["drone_edge_index"], device, torch.long)  # (2, E)

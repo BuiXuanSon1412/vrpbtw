@@ -1,0 +1,8 @@
+{
+  "training_experiment": "GCN_PPO_N10_C",
+  "task_id": "014_N150_F15_R",
+  "n_episodes": 10,
+  "beam_width": 1,
+  "device": "cpu",
+  "checkpoint": "GCN_PPO_N10_C_tune_best_002_N10_F2_C.pt"
+}

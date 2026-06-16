@@ -1,0 +1,22 @@
+{
+  "mean_objective": 1434964.125,
+  "std_objective": 130262.1640625,
+  "best_objective": 1574161.0,
+  "worst_objective": 1205738.5,
+  "median_objective": 1482088.25,
+  "mean_reward": 69.97926330566406,
+  "mean_time_s": 42.80966138839722,
+  "n_episodes": 10.0,
+  "mean_cost": 4135.855786132813,
+  "std_cost": 348.2226631523242,
+  "best_cost": 4812.26025390625,
+  "mean_service_rate": 0.7020000000000001,
+  "std_service_rate": 0.06368673331236265,
+  "best_service_rate": 0.77,
+  "solution_mean_objective": 1434964.125,
+  "solution_std_objective": 130262.1640625,
+  "solution_best_objective": 1574161.0,
+  "solution_worst_objective": 1205738.5,
+  "solution_median_objective": 1482088.25,
+  "solution_n_solutions": 10.0
+}

@@ -209,14 +209,15 @@ def balance(chro, problem: Problem):
 def repair(chro, problem):
     unset(chro, problem)
 
-    if overload(chro, problem):
-        chro = balance(chro, problem)
+    # if overload(chro, problem):
+    #     chro = balance(chro, problem)
 
     dronable(chro, problem)
+    return chro
 
 
 def routing(seq, problem: Problem):
-    end_depot = len(problem.nodes)
+    end_depot = 0
     nodes = seq + [[end_depot, 0]]
     # separate truck route and drone trips in one sequence
     route = []
@@ -284,10 +285,12 @@ def routing(seq, problem: Problem):
         truck_depart.append(truck_service[-1] + problem.service_time)
 
         if demand > 0:
-            for idx, _ in enumerate(truck_load[:-1]):
+            for idx in range(1, len(truck_load)):
                 truck_load[idx] += demand
         else:
             truck_load[-1] += demand
+
+        truck_time = truck_depart[-1]
 
     d_trips = []
     drone_trips = []
@@ -295,187 +298,91 @@ def routing(seq, problem: Problem):
     drone_departs = []
 
     for trip in trips:
-        drone_trip = []
-        drone_load = []
-        drone_arrive = []
-        drone_depart = []
-
         for idx in trip:
-            # launch indices
-            if not drone_trip:
-                launch_indices = []
-                launch_idx = idx - 1
-                while launch_idx >= 0 and (nodes[launch_idx][1] == 0):
-                    if nodes[launch_idx][1] + nodes[idx][1] == 0:
-                        break
-                    if (
-                        nodes[launch_idx][1] == 0
-                        and nodes[launch_idx][0] in truck_route
-                    ):
-                        launch_indices.append(launch_idx)
+            service_node = nodes[idx][0]
+            service_demand = problem.nodes[service_node].demand
 
-                    launch_idx = launch_idx - 1
+            launch_indices = []
+            launch_idx = idx - 1
+            while launch_idx >= 0 and nodes[launch_idx][1] == 0:
+                if nodes[launch_idx][0] in truck_route:
+                    launch_indices.append(launch_idx)
+                launch_idx -= 1
 
-                # land indices
-                land_indices = []
-                land_idx = trip[-1] + 1
-                while land_idx < len(nodes):
-                    if nodes[land_idx][1] + nodes[idx][1] == 0:
-                        break
-                    if nodes[land_idx][1] == 0 and nodes[land_idx][0] in truck_route:
-                        land_indices.append(land_idx)
+            land_indices = []
+            land_idx = idx + 1
+            while land_idx < len(nodes):
+                if nodes[land_idx][1] == 0 and nodes[land_idx][0] in truck_route:
+                    land_indices.append(land_idx)
+                land_idx += 1
 
-                    land_idx = land_idx + 1
+            if not launch_indices or not land_indices:
+                continue
 
-                if not launch_indices or not land_indices:
-                    continue
+            found_trip = False
+            for launch_idx in launch_indices:
+                if found_trip:
+                    break
 
-                for launch_idx in launch_indices:
-                    launch_node = nodes[launch_idx][0]
-                    node = nodes[idx][0]
+                launch_node = nodes[launch_idx][0]
+                launch_truck_idx = truck_route.index(launch_node)
 
-                    ub_depart = (
-                        problem.nodes[node].time_window[1]
-                        - problem.service_time
-                        - problem.drone_time_matrix[node][launch_node]
-                    )
-
-                    # can serve on time
-                    if ub_depart > truck_depart[truck_route.index(launch_node)]:
-                        break
-
-                    # load feasible
-                    demand = problem.nodes[node].demand
-                    max_linehaul = problem.truck_capacity - max(
-                        truck_load[: truck_route.index(launch_node)], default=0
-                    )
-
-                    if demand > 0 and demand > max_linehaul:
-                        continue
-
-                    launch_depart = max(
-                        ub_depart, truck_arrive[truck_route.index(launch_node)]
-                    )
-
-                    node_arrive = max(
-                        launch_depart + problem.drone_time_matrix[launch_node][node],
-                        problem.nodes[node].time_window[0],
-                    )
-                    node_depart = node_arrive + problem.service_time
-
-                    found_pair = False
-                    for land_idx in land_indices:
-                        land_node = nodes[land_idx][0]
-                        land_arrive = max(
-                            node_depart
-                            + problem.drone_time_matrix[node][
-                                land_node % len(problem.nodes)
-                            ],
-                            problem.nodes[land_node % len(problem.nodes)].time_window[
-                                0
-                            ],
-                        )
-                        if land_arrive - launch_depart > problem.drone_trip_duration:
-                            break
-
-                        # backhaul feasible
-                        if (
-                            demand < 0
-                            and max(truck_load[truck_route.index(land_node) :])
-                            + abs(demand)
-                            > problem.truck_capacity
-                        ):
-                            continue
-
-                        drone_trip.extend([launch_node, node, land_node])
-                        if demand > 0:
-                            drone_load.extend([demand, 0, 0])
-                        else:
-                            drone_load.extend([0, abs(demand), 0])
-
-                        drone_arrive.extend([0, node_arrive, land_arrive])
-                        drone_depart.extend([launch_depart, node_depart, 0])
-                        found_pair = True
-                        break
-                    if found_pair:
-                        break
-            else:
-                node = nodes[idx][0]
-                # linehaul feasible
-                demand = problem.nodes[node].demand
-                max_linehaul = min(
-                    problem.truck_capacity
-                    - max(truck_load[: truck_route.index(drone_trip[0])], default=0),
-                    problem.drone_capacity - max(drone_load[:-1], default=0),
+                ub_depart = (
+                    problem.nodes[service_node].time_window[1]
+                    - problem.service_time
+                    - problem.drone_time_matrix[service_node][launch_node]
                 )
-                if demand > 0 and demand > max_linehaul:
+
+                if ub_depart < truck_arrive[launch_truck_idx]:
                     continue
 
-                # land indices
-                land_indices = []
-                land_idx = trip[-1] + 1
-
-                while land_idx < len(nodes):
-                    if nodes[land_idx][1] + nodes[idx][1] == 0:
-                        break
-                    if nodes[land_idx][1] == 0 and nodes[land_idx][0] in truck_route:
-                        land_indices.append(land_idx)
-
-                    land_idx = land_idx + 1
-
-                last_depart = drone_depart[-2]
-                last_node = drone_trip[-2]
-                node_arrive = max(
-                    last_depart + problem.drone_time_matrix[last_node][node],
-                    problem.nodes[node].time_window[0],
+                launch_depart = max(
+                    ub_depart - problem.drone_time_matrix[service_node][launch_node],
+                    truck_arrive[launch_truck_idx],
                 )
-                # serve on time
-                if (
-                    node_arrive
-                    > problem.nodes[node].time_window[1] - problem.service_time
-                ):
+
+                service_arrive = max(
+                    launch_depart + problem.drone_time_matrix[launch_node][service_node],
+                    problem.nodes[service_node].time_window[0],
+                )
+
+                if service_arrive > problem.nodes[service_node].time_window[1] - problem.service_time:
                     continue
 
-                node_depart = node_arrive + problem.service_time
+                service_depart = service_arrive + problem.service_time
 
-                found_pair = False
+                max_linehaul = problem.truck_capacity - max(
+                    truck_load[: launch_truck_idx], default=0
+                )
+                if service_demand > 0 and service_demand > max_linehaul:
+                    continue
+
                 for land_idx in land_indices:
                     land_node = nodes[land_idx][0]
+                    land_truck_idx = truck_route.index(land_node)
+
                     land_arrive = max(
-                        node_depart
-                        + problem.drone_time_matrix[node][
-                            land_node % len(problem.nodes)
-                        ],
-                        problem.nodes[land_node % len(problem.nodes)].time_window[0],
+                        service_depart + problem.drone_time_matrix[service_node][land_node],
+                        problem.nodes[land_node].time_window[0],
                     )
-                    # drone trip duration
-                    if land_arrive - drone_depart[0] > problem.drone_trip_duration:
+
+                    if land_arrive - launch_depart > problem.drone_trip_duration:
                         break
-                    # backhaul feasible
-                    if (
-                        demand < 0
-                        and max(
-                            truck_load[
-                                truck_route.index(land_node % len(problem.nodes)) :
-                            ]
-                        )
-                        + abs(demand)
-                        > problem.truck_capacity
-                    ):
-                        continue
 
-                    drone_trip.extend([node, land_node])
-                    drone_depart.extend([node_depart, 0])
-                    drone_arrive.extend([node_arrive, land_arrive])
-                    found_pair = True
-                    break
-                if found_pair:
-                    break
+                    if service_demand < 0:
+                        truck_load_at_land = max(truck_load[land_truck_idx:])
+                        if truck_load_at_land + abs(service_demand) > problem.truck_capacity:
+                            continue
 
-        if drone_trip:
-            drone_trips.append(drone_trip)
-            drone_arrives.append(drone_arrive)
-            drone_departs.append(drone_depart)
+                    drone_trip = [launch_node, service_node, land_node]
+                    drone_arrive = [0, service_arrive, land_arrive]
+                    drone_depart = [launch_depart, service_depart, 0]
+
+                    drone_trips.append(drone_trip)
+                    drone_arrives.append(drone_arrive)
+                    drone_departs.append(drone_depart)
+                    found_trip = True
+                    break
 
     t_route = Route(
         nodes=truck_route,
@@ -499,7 +406,7 @@ def decode(indi: Individual, problem: Problem) -> Solution:
     chro = indi.chromosome
 
     repaired = deepcopy(chro)
-    repair(repaired, problem)
+    repaired = repair(repaired, problem)
 
     seqs = partition(repaired, problem)
     routes = []
@@ -513,10 +420,9 @@ def decode(indi: Individual, problem: Problem) -> Solution:
 
 
 def cal_drone_route_distance(route, problem: Problem):
-    n_node = len(problem.nodes)
     distance = sum(
         [
-            problem.drone_distance_matrix[route[i] % n_node][route[i - 1] % n_node]
+            problem.drone_distance_matrix[route[i]][route[i - 1]]
             for i in range(1, len(route))
         ]
     )
@@ -524,10 +430,9 @@ def cal_drone_route_distance(route, problem: Problem):
 
 
 def cal_truck_route_distance(route, problem: Problem):
-    n_node = len(problem.nodes)
     distance = sum(
         [
-            problem.truck_distance_matrix[route[i] % n_node][route[i - 1] % n_node]
+            problem.truck_distance_matrix[route[i]][route[i - 1]]
             for i in range(1, len(route))
         ]
     )
@@ -583,7 +488,7 @@ def cal_fitness(problem: Problem, indi: Individual):
     solution = decode(indi, problem)
 
     fitness = cal_objective(problem, solution)
-    service_rate = cal_service_rate(solution, problem) / len(problem.nodes)
+    service_rate = cal_service_rate(solution, problem) / (len(problem.nodes) - 1)
     cost = cal_cost(solution, problem)
     return fitness, service_rate, cost
 
