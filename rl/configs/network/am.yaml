@@ -1,0 +1,83 @@
+# network/am.yaml
+# Attention Model (AM) Actor-Critic Policy Configuration
+#
+# Single-decoder attention model for sequential vehicle routing.
+# Key differences from GEMAN:
+# - Single NodeDecoder (not bilevel): selects one node at each step
+# - VehicleEncoder processes only CURRENT vehicle (vehicle_idx parameter)
+# - Action space: (B, N+1) node selection (not (B, N+1×2K) pairs)
+#
+# Architecture:
+# - NodeEncoder: self-attention over all delivery nodes
+# - VehicleEncoder: self-attention over current vehicle features
+# - GraphEncoder: multi-relational GNN (truck/drone compatibility)
+# - NodeDecoder: attention-based node selection
+# - ValueHead: MLP-based state value estimation
+
+network:
+  name: am
+  layers:
+    encoder:
+      node_encoder:
+        embedding_dim: 128
+        n_heads: 4
+        n_layers: 3
+        dropout: 0.1
+        use_instance_norm: true
+      vehicle_encoder:
+        embedding_dim: 128
+        n_heads: 4
+        n_layers: 3
+        dropout: 0.1
+        use_instance_norm: true
+      graph_encoder: mlp_mega
+
+    decoder:
+      node_decoder:
+        clip: 10.0
+        context_hidden_dim: 128
+        context_dropout: 0.1
+
+    value_head:
+      hidden_dims: [128, 128]
+      use_dropout: true
+      dropout: 0.1
+
+    regularization:
+      ortho_init: true
+
+# Graph Encoder Variants (for ablation studies)
+# ============================================
+# All variants use two-stage design:
+# Stage 1: Project edge attributes [cost, time] → D-dim embeddings
+# Stage 2: Different aggregation mechanisms per variant
+
+graph_encoders:
+  graph:
+    description: "Original multi-relational GNN with raw edge attributes"
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+
+  mlp_mega:
+    description: "Simple MLP message passing with mean aggregation"
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+
+  gcn_mega:
+    description: "GCN-style symmetric degree normalization D^(-1/2) A D^(-1/2)"
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+
+  gat_mega:
+    description: "Multi-head attention with learned edge importance weights"
+    embedding_dim: 128
+    n_layers: 3
+    dropout: 0.1
+    use_instance_norm: false
+    n_heads: 4

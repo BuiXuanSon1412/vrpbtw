@@ -25,16 +25,17 @@ import globals
 
 # Problems
 from impl.vrpbtw import VRPBTWEnv
-from impl.mvrpbtw import MVRPBTWEnv
+from impl.mvrpbtw import ParallelMVRPBTW, MonoMVRPBTW, SequentialMVRPBTW
 
 # Networks
 from impl.geman import (
     GEMANActorCritic,
+    FreeGraphEncoder,
     MLP_MEGAGraphEncoder,
     GCN_MEGAGraphEncoder,
     GAT_MEGAGraphEncoder,
-    GraphEncoder,
 )
+from impl.am import AMActorCritic
 
 # Core
 from core.agent import BaseAgent, PPOAgent, ReinforceAgent, POMOAgent, MetaAgent
@@ -55,6 +56,7 @@ from core.collector import (
 
 _NETWORK_REGISTRY: Dict[str, type] = {
     "geman": GEMANActorCritic,
+    "am": AMActorCritic,
 }
 
 _AGENT_REGISTRY: Dict[str, type] = {
@@ -71,7 +73,9 @@ _TRAINER_REGISTRY: Dict[str, type] = {
 
 _ENVIRONMENT_REGISTRY: Dict[str, type] = {
     "vrpbtw": VRPBTWEnv,
-    "mvrpbtw": MVRPBTWEnv,
+    "parallel": ParallelMVRPBTW,  # All vehicles available simultaneously
+    "mono": MonoMVRPBTW,           # One vehicle at a time, interleaved
+    "sequential": SequentialMVRPBTW,  # Fleet pairs sequentially
 }
 
 _OPTIMIZER_REGISTRY: Dict[str, type | None] = {
@@ -88,10 +92,10 @@ _COLLECTOR_REGISTRY: Dict[str, type] = {
 }
 
 _GRAPH_ENCODER_REGISTRY: Dict[str, type] = {
-    "mlp_mega": MLP_MEGAGraphEncoder,
-    "gcn_mega": GCN_MEGAGraphEncoder,
-    "gat_mega": GAT_MEGAGraphEncoder,
-    "graph": GraphEncoder,
+    "free": FreeGraphEncoder,  # Null encoder for ablation studies
+    "mlp_mega": MLP_MEGAGraphEncoder,  # Default: fastest, simplest
+    "gcn_mega": GCN_MEGAGraphEncoder,  # GCN with degree normalization
+    "gat_mega": GAT_MEGAGraphEncoder,  # Multi-head attention
 }
 
 
