@@ -695,6 +695,10 @@ def run(filename):
             )
             solver.Add(total_time <= T_tilde_max)
 
+    # Constraint system time limit
+    for k in K:
+        solver.Add(a[k, end_depot_idx] <= T_max)
+
     # Constraints 76-77
     for k in K:
         for r in R[:-1]:
