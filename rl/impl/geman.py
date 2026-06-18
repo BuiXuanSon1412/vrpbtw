@@ -18,12 +18,13 @@ Obs dict keys (all numpy arrays, produced by state_to_obs):
 Architecture
 ============
 Encoder
-  NodeEncoder      heterogeneous self-attention (linehaul ↔ backhaul)
-                   → Z_node (B, N+1, D),  g_node (B, D)
-  VehicleEncoder   self-attention + cross-attention to Z_node
-                   → Z_veh  (B, 2K,  D),  g_veh  (B, D)
-  GraphEncoder     3-layer multi-relational GNN (truck / drone relations)
-                   → Z_graph (B, N+1, D),  g_graph (B, D)
+  NodeEncoder         heterogeneous self-attention (linehaul ↔ backhaul)
+                      → Z_node (B, N+1, D),  g_node (B, D)
+  VehicleEncoder      self-attention + cross-attention to Z_node
+                      → Z_veh  (B, 2K,  D),  g_veh  (B, D)
+  GraphEncoder*       multi-relational GNN (truck / drone relations) [*configurable]
+                      → Z_graph (B, N+1, D),  g_graph (B, D)
+                      Options: MLP_MEGA (default), GCN_MEGA, GAT_MEGA
 
 Decoder  (bilevel, two independent heads)
   NodeDecoder      query = f(g_node, mean(Z_veh), g_graph)
@@ -166,107 +167,9 @@ class VehicleEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# GraphEncoder — multi-relational GNN
 # ---------------------------------------------------------------------------
-
-
-class _MRGNNLayer(nn.Module):
-    """
-    One multi-relational GNN layer (truck + drone relations).
-
-    For each relation:
-      msg(i→j) = MLP( h_i ‖ edge_feat_{ij} )
-      agg(j)   = mean over incoming messages
-
-    Update:
-      h' = LayerNorm( h + proj( cat[agg_truck, agg_drone] ) )
-    """
-
-    def __init__(self, D: int, edge_feat_dim: int, dropout: float = 0.0):
-        super().__init__()
-        self.msg_truck = _mlp(D + edge_feat_dim, D * 2, D, dropout)
-        self.msg_drone = _mlp(D + edge_feat_dim, D * 2, D, dropout)
-        self.update = nn.Linear(D * 2, D)
-        self.norm = nn.LayerNorm(D)
-        self.drop = nn.Dropout(dropout)
-
-    def _pass(
-        self,
-        h: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor,
-        mlp: nn.Module,
-    ) -> torch.Tensor:
-        """
-        h          : (B, N, D)
-        edge_index : (2, E)
-        edge_attr  : (E, ef)   or (B, E, ef)
-        returns      (B, N, D)  mean-aggregated messages
-        """
-        B, N, D = h.shape
-        src, dst = edge_index[0], edge_index[1]
-        E = src.shape[0]
-
-        h_src = h[:, src, :]  # (B, E, D)
-        if edge_attr.dim() == 2:
-            ea = edge_attr.unsqueeze(0).expand(B, -1, -1)  # (B, E, ef)
-        else:
-            ea = edge_attr
-        msg = mlp(torch.cat([h_src, ea], dim=-1))  # (B, E, D)
-
-        agg = torch.zeros(B, N, D, device=h.device, dtype=h.dtype)
-        count = torch.zeros(N, device=h.device, dtype=h.dtype)
-        dst_e = dst.unsqueeze(0).unsqueeze(-1).expand(B, E, D)
-        agg.scatter_add_(1, dst_e, msg)
-        count.scatter_add_(0, dst, torch.ones(E, device=h.device))
-        count = count.clamp(min=1.0).view(1, N, 1)
-        return agg / count
-
-    def forward(
-        self,
-        h: torch.Tensor,
-        t_ei: torch.Tensor,
-        t_ea: torch.Tensor,
-        d_ei: torch.Tensor,
-        d_ea: torch.Tensor,
-    ) -> torch.Tensor:
-        agg_t = self._pass(h, t_ei, t_ea, self.msg_truck)
-        agg_d = self._pass(h, d_ei, d_ea, self.msg_drone)
-        upd = self.drop(self.update(torch.cat([agg_t, agg_d], dim=-1)))
-        return self.norm(h + upd)
-
-
-class GraphEncoder(nn.Module):
-    def __init__(self, cfg: Dict):
-        super().__init__()
-        D = cfg.get("embedding_dim", 128)
-        n_layers = cfg.get("n_layers", 3)
-        dropout = cfg.get("dropout", 0.1)
-        use_instance_norm = cfg.get("use_instance_norm", False)
-
-        self.input_proj = nn.Linear(GRAPH_NODE_DIM, D)
-        self.layers = nn.ModuleList(
-            [_MRGNNLayer(D, GRAPH_EDGE_DIM, dropout) for _ in range(n_layers)]
-        )
-        self.out_norm = _make_norm(use_instance_norm, D)
-        self.pool = nn.Linear(D, 1)
-
-    def forward(
-        self,
-        node_feat: torch.Tensor,
-        t_ei: torch.Tensor,
-        t_ea: torch.Tensor,
-        d_ei: torch.Tensor,
-        d_ea: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = self.input_proj(node_feat)
-        for layer in self.layers:
-            h = layer(h, t_ei, t_ea, d_ei, d_ea)
-        h = self.out_norm(h)
-        w = torch.softmax(self.pool(h), dim=1)  # (B, N+1, 1)
-        return h, (w * h).sum(dim=1)            # (B, N+1, D), (B, D)
-
-
+# Graph encoders: MEGA variants (MLP, GCN, GAT)
+# (Legacy MRGNN/GraphEncoder removed in favor of MLP_MEGA as baseline)
 # ---------------------------------------------------------------------------
 # EGALayer - Expander Graph Attention (for ablation studies)
 # ---------------------------------------------------------------------------
@@ -467,6 +370,32 @@ class EGAEncoder(nn.Module):
 # MEGAGraphEncoder Variants - Multi-Edge Graph Aggregation (for ablation studies)
 # ---------------------------------------------------------------------------
 # Three implementations: MLP (simplest), GCN (normalized), GAT (attention-based)
+
+
+class FreeGraphEncoder(nn.Module):
+    """Null graph encoder that returns empty tensors for ablation studies.
+
+    Returns Z_graph (B, N+1, 0) and g_graph (B, 0) with zero feature dimensions,
+    so concatenation with other encodings doesn't add unnecessary parameters.
+    """
+
+    def __init__(self, cfg: Dict):
+        super().__init__()
+
+    def forward(
+        self,
+        node_feat: torch.Tensor,
+        t_ei: torch.Tensor,
+        t_ea: torch.Tensor,
+        d_ei: torch.Tensor,
+        d_ea: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, N1, _ = node_feat.shape
+        device = node_feat.device
+        dtype = node_feat.dtype
+        Z_graph = torch.empty(B, N1, 0, device=device, dtype=dtype)
+        g_graph = torch.empty(B, 0, device=device, dtype=dtype)
+        return Z_graph, g_graph
 
 
 class MLP_MEGAGraphEncoder(nn.Module):
