@@ -952,7 +952,9 @@ def run(filename):
             return f"{value:.12g}"
 
         def format_solution_list(values):
-            return "[" + ", ".join(format_solution_value(value) for value in values) + "]"
+            return (
+                "[" + ", ".join(format_solution_value(value) for value in values) + "]"
+            )
 
         def write_variable_group(file, group_name, variables, display_name=None):
             display_name = display_name or group_name
@@ -968,7 +970,9 @@ def run(filename):
         for variables in binary_vars:
             for variable in variables.values():
                 value = variable.solution_value()
-                binary_max_deviation = max(binary_max_deviation, abs(value - round(value)))
+                binary_max_deviation = max(
+                    binary_max_deviation, abs(value - round(value))
+                )
 
         verify_solution = solver.VerifySolution(1e-7, False)
         solution_errors = []
@@ -978,7 +982,9 @@ def run(filename):
         with open(solution_output_path, "w") as f:
             f.write(f"Instance: {filename}\n")
             f.write(f"Status: {status_str}\n")
-            f.write(f"Objective exported: {format_solution_value(result_data['objective'])}\n")
+            f.write(
+                f"Objective exported: {format_solution_value(result_data['objective'])}\n"
+            )
             f.write(
                 f"Raw solver objective: "
                 f"{format_solution_value(solver.Objective().Value())}\n"
@@ -992,12 +998,16 @@ def run(filename):
                 f"Service rate: "
                 f"{format_solution_value(result_data['f1_service_rate'])}\n"
             )
-            f.write(f"Running time seconds: {format_solution_value(result_data['time'])}\n")
+            f.write(
+                f"Running time seconds: {format_solution_value(result_data['time'])}\n"
+            )
 
             f.write("\n[SOLUTION CHECK]\n")
             f.write(f"Valid: {not solution_errors}\n")
             f.write(f"solver.VerifySolution: {verify_solution}\n")
-            f.write(f"Binary max deviation: {format_solution_value(binary_max_deviation)}\n")
+            f.write(
+                f"Binary max deviation: {format_solution_value(binary_max_deviation)}\n"
+            )
             f.write(f"Number of errors: {len(solution_errors)}\n")
             f.write(
                 "Errors: "
@@ -1021,8 +1031,7 @@ def run(filename):
                     )
                     for trip_info in route_info["trips"]:
                         f.write(
-                            f"  Drone trip {trip_info['id']}: "
-                            f"{trip_info['route']}\n"
+                            f"  Drone trip {trip_info['id']}: {trip_info['route']}\n"
                         )
                         f.write(
                             f"    arrival: "
@@ -1072,7 +1081,3 @@ def run(filename):
 
 for file in files:
     run(file)
-<<<<<<< HEAD
-
-=======
->>>>>>> 9a0f776e4113d27aeebfd4cb714883869932ecb4
