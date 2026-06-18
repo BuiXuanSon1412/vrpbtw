@@ -29,6 +29,48 @@ from core.agent import BaseAgent
 from core.utils import obs_to_tensor
 
 
+from core.pool import SubprocVecEnv
+from core.pool import stack_obs, batch_obs_to_tensor
+# ---------------------------------------------------------------------------
+# GAE Computation
+# ---------------------------------------------------------------------------
+
+
+def _compute_gae(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute Generalized Advantage Estimation (GAE).
+
+    Args:
+        rewards: (T,) tensor of rewards
+        values: (T+1,) tensor of value estimates (includes bootstrap value)
+        dones: (T,) tensor of done flags
+        gamma: discount factor
+        gae_lambda: GAE lambda parameter
+
+    Returns:
+        advantages: (T,) tensor of advantage estimates
+        returns: (T,) tensor of return estimates
+    """
+    T = len(rewards)
+    advantages = torch.zeros(T, dtype=torch.float32, device=rewards.device)
+    gae = 0.0
+
+    for t in reversed(range(T)):
+        next_value = values[t + 1]
+        current_value = values[t]
+        delta = rewards[t] + gamma * next_value * (1 - dones[t]) - current_value
+        gae = delta + gamma * gae_lambda * (1 - dones[t]) * gae
+        advantages[t] = gae
+
+    returns = (advantages + values[:T]).detach()
+    return advantages, returns
+
+
 # ---------------------------------------------------------------------------
 # BaseTrainer (abstract interface)
 # ---------------------------------------------------------------------------
@@ -116,10 +158,11 @@ class MetaTrainer(BaseTrainer):
 
         # Meta-learning config: epochs/batches instead of timesteps
         self.mcfg = {
+            "batch_size": int(meta_control_cfg.get("batch_size", 1)),
+            "rollout_length": int(meta_control_cfg.get("rollout_length", 256)),
             "entropy_threshold": float(curriculum_cfg.get("entropy_threshold", 0.5)),
-            "curriculum_check_interval": int(curriculum_cfg.get("check_interval", 1)),
+            "curriculum_check_interval": int(curriculum_cfg.get("check_interval", 10)),
             "epochs": int(meta_control_cfg.get("epochs", 200)),
-            "batches_per_epoch": int(meta_control_cfg.get("batches_per_epoch", 50)),
             "eval_interval": int(meta_control_cfg.get("eval_interval", 1)),
             "checkpoint_interval": int(meta_control_cfg.get("checkpoint_interval", 10)),
             "patience": int(meta_early_stop.get("patience", 20)),
@@ -266,86 +309,74 @@ class MetaTrainer(BaseTrainer):
         stop_reason = "completed"
         epoch = -1
 
+        # Setup vectorized environment for meta-learning (serial or parallel)
+
+        batch_size = self.mcfg["batch_size"]
+        vec_env = SubprocVecEnv(
+            env_class=type(self.env),
+            env_cfg=self.env_cfg,
+            n_envs=batch_size,
+            base_seed=42,
+        )
+
         try:
             for epoch in range(self.mcfg["epochs"]):
                 epoch_start = time.time()
-                epoch_losses = []
-                epoch_task_metrics = {}
 
                 try:
-                    for _ in range(self.mcfg["batches_per_epoch"]):
-                        # Compute task losses across active tasks
-                        task_losses, task_metrics = self._compute_task_losses()
+                    # Compute task losses across active tasks
+                    task_losses, task_metrics = self._compute_task_losses(vec_env)
 
-                        # Update meta-policy on aggregated task losses
-                        self.meta_agent.update({"task_losses": task_losses})
-                        self._total_updates += 1
+                    # Update meta-policy on aggregated task losses
+                    self.meta_agent.update({"task_losses": task_losses})
+                    self._total_updates += 1
 
-                        epoch_losses.extend(task_losses)
-                        for task_id, metrics_dict in task_metrics.items():
-                            if task_id not in epoch_task_metrics:
-                                epoch_task_metrics[task_id] = {}
-                            for key, val in metrics_dict.items():
-                                if key not in epoch_task_metrics[task_id]:
-                                    epoch_task_metrics[task_id][key] = []
-                                epoch_task_metrics[task_id][key].append(val)
+                    # Curriculum check per epoch
+                    max_entropy = None
+                    for task_id, metrics_dict in task_metrics.items():
+                        entropy = metrics_dict.get("entropy", 0)
+                        if max_entropy is None or entropy > max_entropy:
+                            max_entropy = entropy
 
-                        # Curriculum check per batch
-                        max_entropy = None
-                        for task_id, metrics_dict in task_metrics.items():
-                            entropy = metrics_dict.get("entropy", 0)
-                            if max_entropy is None or entropy > max_entropy:
-                                max_entropy = entropy
+                    self._curriculum_check_counter += 1
+                    if (
+                        self._curriculum_check_counter
+                        >= self.mcfg["curriculum_check_interval"]
+                    ):
+                        self._curriculum_check_counter = 0
+                        if (
+                            max_entropy is not None
+                            and max_entropy < self.mcfg["entropy_threshold"]
+                        ):
+                            if len(self.active_tasks) < len(self.env.tasks):
+                                next_task = self.env.tasks[len(self.active_tasks)]
+                                self.active_tasks.add(next_task)
+                                self.logger.log_event(
+                                    "curriculum_expansion",
+                                    self._total_updates,
+                                    num_tasks=len(self.active_tasks),
+                                    task_id=str(next_task),
+                                )
 
-                        if max_entropy is not None:
-                            self._curriculum_check_counter += 1
-                            if (
-                                self._curriculum_check_counter
-                                >= self.mcfg["curriculum_check_interval"]
-                            ):
-                                self._curriculum_check_counter = 0
-                                if max_entropy < self.mcfg["entropy_threshold"]:
-                                    if len(self.active_tasks) < len(self.env.tasks):
-                                        next_task = self.env.tasks[
-                                            len(self.active_tasks)
-                                        ]
-                                        self.active_tasks.add(next_task)
-                                        self.logger.log_event(
-                                            "curriculum_expansion",
-                                            self._total_updates,
-                                            num_tasks=len(self.active_tasks),
-                                            task_id=str(next_task),
-                                        )
                 except Exception as e:
                     self.logger.log_exception(
                         e,
-                        message=f"Error during meta-training batch computation in epoch {epoch}",
+                        message=f"Error during meta-training in epoch {epoch}",
                         step=self._total_updates,
                         epoch=epoch,
                     )
                     raise
 
-                # Per-epoch aggregation
+                # Per-epoch metrics
                 epoch_time = time.time() - epoch_start
-                train_metrics = {}
-                if epoch_losses:
-                    epoch_losses_tensor = torch.stack(epoch_losses).detach()
-                    train_metrics = {
-                        "meta/loss_mean": float(epoch_losses_tensor.mean()),
-                        "meta/loss_std": float(epoch_losses_tensor.std()),
-                    }
-                else:
-                    train_metrics = {
-                        "meta/loss_mean": 0.0,
-                        "meta/loss_std": 0.0,
-                    }
-                train_metrics.update(
-                    {
-                        "meta/num_active_tasks": float(len(self.active_tasks)),
-                        "meta/total_updates": float(self._total_updates),
-                        "meta/epoch_time_s": epoch_time,
-                    }
-                )
+                epoch_losses_tensor = task_losses.detach()
+                train_metrics = {
+                    "meta/loss_mean": float(epoch_losses_tensor.mean()),
+                    "meta/loss_std": float(epoch_losses_tensor.std()),
+                    "meta/num_active_tasks": float(len(self.active_tasks)),
+                    "meta/total_updates": float(self._total_updates),
+                    "meta/epoch_time_s": epoch_time,
+                }
 
                 # Evaluation every eval_interval epochs
                 eval_metrics = {}
@@ -440,121 +471,15 @@ class MetaTrainer(BaseTrainer):
         self.logger.log_event("meta_training_complete", self._total_updates, **summary)
         return summary
 
-    def collect_episode(
-        self,
-        agent: BaseAgent,
-        env: Any,
-    ) -> Dict[str, Any]:
-        """Collect one complete episode with GAE advantage estimation (meta-learning).
-
-        Used during meta-training to collect complete episodes from serial environment.
-
-        Args:
-            agent: Policy agent
-            env: Single environment instance
-
-        Returns:
-            dict with observations, actions, log_probs, advantages, returns, entropies
-        """
-        from core.collector import _compute_gae
-
-        gamma = 0.99  # Default values for meta-learning
-        gae_lambda = 0.95
-
-        observations = []
-        masks = []
-        actions = []
-        log_probs = []
-        values = []
-        entropies = []
-        rewards = []
-        dones = []
-
-        obs, info = env.reset()
-        action_mask = info["action_mask"]
-
-        with torch.no_grad():
-            is_truncated = False
-            while True:
-                obs_t = obs_to_tensor(obs, device=globals.DEVICE)
-                mask_t = torch.tensor(
-                    action_mask, dtype=torch.bool, device=globals.DEVICE
-                ).unsqueeze(0)
-                action_t, lp, val, ent = agent.act(obs_t, mask_t, deterministic=False)
-                action = int(action_t.item())
-
-                next_obs, reward, terminated, truncated, info = env.step(action)
-
-                observations.append(obs_t)
-                masks.append(mask_t)
-                actions.append(action_t)
-                log_probs.append(lp)
-                values.append(val)
-                entropies.append(ent)
-                rewards.append(reward)
-                dones.append(terminated or truncated)
-
-                obs = next_obs
-                action_mask = info["action_mask"]
-
-                if terminated or truncated or not action_mask.any():
-                    is_truncated = truncated
-                    break
-
-            # Get bootstrap value at episode end
-            if is_truncated and action_mask.any():
-                obs_end = obs_to_tensor(obs, device=globals.DEVICE)
-                mask_end = torch.tensor(
-                    action_mask, dtype=torch.bool, device=globals.DEVICE
-                ).unsqueeze(0)
-                _, _, bootstrap_val, _ = agent.act(
-                    obs_end, mask_end, deterministic=False
-                )
-            else:
-                bootstrap_val = torch.tensor(0.0, device=globals.DEVICE)
-
-        # Compute GAE
-        observations_tensor = observations
-        masks_tensor = torch.cat(masks, dim=0)
-        actions_tensor = torch.cat(actions, dim=0)
-        log_probs_tensor = torch.stack(log_probs).squeeze(-1)
-        values_tensor = torch.stack(values).squeeze(-1)
-        entropies_tensor = torch.stack(entropies).squeeze(-1)
-        rewards_tensor = torch.tensor(
-            rewards, dtype=torch.float32, device=globals.DEVICE
-        )
-        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=globals.DEVICE)
-
-        bootstrap_val_1d = bootstrap_val.view(-1)
-        values_with_bootstrap = torch.cat([values_tensor, bootstrap_val_1d], dim=0)
-
-        advantages, returns = _compute_gae(
-            rewards_tensor,
-            values_with_bootstrap,
-            dones_tensor,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-        )
-
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        return {
-            "observations": observations_tensor,
-            "masks": masks_tensor,
-            "actions": actions_tensor,
-            "log_probs": log_probs_tensor,
-            "advantages": advantages,
-            "returns": returns,
-            "entropies": entropies_tensor,
-        }
-
     def collect(
         self,
         agent: BaseAgent,
         env: Any,
         rollout_length: int,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
     ) -> Dict[str, Any]:
-        """Collect trajectory data with GAE advantage estimation (fine-tuning).
+        """Collect trajectory data with GAE advantage estimation (meta-learning or fine-tuning).
 
         Collects rollout_length timesteps from vectorized environment (SubprocVecEnv)
         and computes per-env advantages using GAE.
@@ -563,6 +488,8 @@ class MetaTrainer(BaseTrainer):
             agent: Policy agent
             env: SubprocVecEnv instance
             rollout_length: Target timesteps to collect per environment
+            gamma: Discount factor (default: from fine-tuning config if available, else 0.99)
+            gae_lambda: GAE lambda parameter (default: from fine-tuning config if available, else 0.95)
 
         Returns:
             dict with:
@@ -572,10 +499,7 @@ class MetaTrainer(BaseTrainer):
               - masks, actions, log_probs, advantages, returns, entropies: flattened tensors
                 Layout: flat indices map to (timestep, env) via: flat_idx = t*batch_size + e
         """
-        from core.vec_env import stack_obs, batch_obs_to_tensor
 
-        gamma = self.fcfg["gamma"]
-        gae_lambda = self.fcfg["gae_lambda"]
         n_envs = env.n_envs
 
         obs_list, info_list = env.reset()
@@ -662,9 +586,9 @@ class MetaTrainer(BaseTrainer):
             dones_b = torch.stack([done_buffer[t][b] for t in range(rollout_length)])
             # Only use bootstrap if env is not done at final step
             bootstrap_masked = bootstrap_vals[b] * (~done_mask[b]).float()
-            v_with_bootstrap = torch.cat([values_b, bootstrap_masked.unsqueeze(0)], dim=0)
-
-            from core.collector import _compute_gae
+            v_with_bootstrap = torch.cat(
+                [values_b, bootstrap_masked.unsqueeze(0)], dim=0
+            )
 
             adv_b, ret_b = _compute_gae(
                 rewards_b,
@@ -740,7 +664,6 @@ class MetaTrainer(BaseTrainer):
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
 
         # Setup vectorized environment (serial or parallel)
-        from core.vec_env import SubprocVecEnv
 
         vec_env = SubprocVecEnv(
             env_class=type(self.env),
@@ -803,20 +726,32 @@ class MetaTrainer(BaseTrainer):
                                     # With batch_size=4, env_id=0 gets [0, 4, 8, 12, ...]
                                     # With batch_size=1, env_id=0 gets [0, 1, 2, 3, ...]
                                     env_timestep_indices = torch.arange(
-                                        env_id, num_timesteps, batch_size,
-                                        device=old_log_probs.device, dtype=torch.long
+                                        env_id,
+                                        num_timesteps,
+                                        batch_size,
+                                        device=old_log_probs.device,
+                                        dtype=torch.long,
                                     )
 
                                     # Shuffle within this environment only
                                     shuffled_indices = env_timestep_indices[
-                                        torch.randperm(len(env_timestep_indices),
-                                                     device=old_log_probs.device)
+                                        torch.randperm(
+                                            len(env_timestep_indices),
+                                            device=old_log_probs.device,
+                                        )
                                     ]
 
                                     # Mini-batch SGD on this environment's data
-                                    for start_idx in range(0, len(shuffled_indices), minibatch_size):
-                                        end_idx = min(start_idx + minibatch_size, len(shuffled_indices))
-                                        batch_indices = shuffled_indices[start_idx:end_idx]
+                                    for start_idx in range(
+                                        0, len(shuffled_indices), minibatch_size
+                                    ):
+                                        end_idx = min(
+                                            start_idx + minibatch_size,
+                                            len(shuffled_indices),
+                                        )
+                                        batch_indices = shuffled_indices[
+                                            start_idx:end_idx
+                                        ]
 
                                         # Extract mini-batch
                                         if isinstance(observations, list):
@@ -827,12 +762,16 @@ class MetaTrainer(BaseTrainer):
                                             # guarantees all indices belong to this env_id, so no assertion needed
 
                                             # Vectorized extraction: convert flat indices to timestep indices
-                                            timestep_indices = batch_indices // batch_size
+                                            timestep_indices = (
+                                                batch_indices // batch_size
+                                            )
 
                                             # Extract observations for these timesteps
                                             mb_observations = []
                                             for timestep_idx in timestep_indices:
-                                                stacked_obs = observations[int(timestep_idx.item())]
+                                                stacked_obs = observations[
+                                                    int(timestep_idx.item())
+                                                ]
                                                 single_obs = {}
                                                 for k, v in stacked_obs.items():
                                                     if "edge_index" in k:
@@ -840,10 +779,14 @@ class MetaTrainer(BaseTrainer):
                                                         single_obs[k] = v
                                                     else:
                                                         # Extract this env's data: v.shape = (batch_size, ...)
-                                                        single_obs[k] = v[env_id : env_id + 1]
+                                                        single_obs[k] = v[
+                                                            env_id : env_id + 1
+                                                        ]
                                                 mb_observations.append(single_obs)
                                         else:
-                                            mb_observations = observations[batch_indices]
+                                            mb_observations = observations[
+                                                batch_indices
+                                            ]
 
                                         # Prepare mini-batch dict for agent.update()
                                         minibatch = {
@@ -862,13 +805,27 @@ class MetaTrainer(BaseTrainer):
                                         # Collect metrics
                                         loss_buffer.append(
                                             {
-                                                "policy": float(update_metrics["policy_loss"].detach()),
-                                                "value": float(update_metrics["value_loss"].detach()),
-                                                "entropy": float(update_metrics["entropy"].detach()),
-                                                "total": float(update_metrics["loss"].detach()),
+                                                "policy": float(
+                                                    update_metrics[
+                                                        "policy_loss"
+                                                    ].detach()
+                                                ),
+                                                "value": float(
+                                                    update_metrics[
+                                                        "value_loss"
+                                                    ].detach()
+                                                ),
+                                                "entropy": float(
+                                                    update_metrics["entropy"].detach()
+                                                ),
+                                                "total": float(
+                                                    update_metrics["loss"].detach()
+                                                ),
                                             }
                                         )
-                                        grad_norm_buffer.append(float(update_metrics["grad_norm"].detach()))
+                                        grad_norm_buffer.append(
+                                            float(update_metrics["grad_norm"].detach())
+                                        )
 
                                         self._total_updates += 1
 
@@ -1143,7 +1100,7 @@ class MetaTrainer(BaseTrainer):
         print("\n".join(lines))
 
     def _compute_task_losses(
-        self,
+        self, vec_env: Any
     ) -> Tuple[torch.Tensor, Dict[Any, Dict[str, float]]]:
         """Compute task losses across all active tasks using FOMAML (first-order MAML).
 
@@ -1154,6 +1111,9 @@ class MetaTrainer(BaseTrainer):
           4. Outer loop: collect query set, evaluate with adapted parameters
           5. Return query loss (connected to meta_agent for outer-loop update)
 
+        Args:
+            vec_env: Vectorized environment (SubprocVecEnv with n_envs batch_size)
+
         Returns:
             (task_losses_tensor, task_metrics)
         """
@@ -1163,6 +1123,7 @@ class MetaTrainer(BaseTrainer):
         # Extract agent hyperparameters (safe access for type checker)
         clip_eps = getattr(self.sub_agent, "clip_eps", 0.2)
         value_coef = getattr(self.sub_agent, "value_coef", 0.5)
+        rollout_length = self.mcfg["rollout_length"]
 
         # Process each active task
         for task_id in self.active_tasks:
@@ -1171,8 +1132,10 @@ class MetaTrainer(BaseTrainer):
             sub_agent.clone(self.meta_agent)
 
             # Inner loop: collect support set and compute gradients (FOMAML)
-            self.env.retask(task_id)
-            support_batch = self.collect_episode(sub_agent, self.env)
+            vec_env.retask(task_id)
+            support_batch = self.collect(
+                sub_agent, vec_env, rollout_length, gamma=0.99, gae_lambda=0.95
+            )
 
             # Compute support loss manually to retain graph for adapted parameters
             observations = support_batch["observations"]
@@ -1180,6 +1143,26 @@ class MetaTrainer(BaseTrainer):
             old_log_probs = support_batch["log_probs"]
             advantages = support_batch["advantages"]
             returns = support_batch["returns"]
+
+            # Convert observations from batch format (list of stacked dicts/tensors)
+            # to per-timestep format (list of single obs per timestep)
+            # collect() returns obs with batch dimension; extract [0] for batch_size
+            if observations and isinstance(observations[0], dict):
+                observations = [
+                    {
+                        k: v[0] if isinstance(v, torch.Tensor) else v[0]
+                        for k, v in obs.items()
+                    }
+                    for obs in observations
+                ]
+            elif observations:
+                observations = [
+                    obs[0] if isinstance(obs, torch.Tensor) else obs[0]
+                    for obs in observations
+                ]
+
+            # Flatten batch dimension from masks (collect returns (batch_size*T, n_actions))
+            masks = masks.view(-1, masks.shape[-1])
 
             # Handle observations as list (graph-based with dynamic sizes)
             if isinstance(observations, list):
@@ -1261,13 +1244,33 @@ class MetaTrainer(BaseTrainer):
             }
 
             # Outer loop: collect query set and evaluate with adapted parameters
-            self.env.retask(task_id)
-            query_batch = self.collect_episode(sub_agent, self.env)
+            vec_env.retask(task_id)
+            query_batch = self.collect(
+                sub_agent, vec_env, rollout_length, gamma=0.99, gae_lambda=0.95
+            )
 
             # Evaluate query loss with adapted parameters using functional_call
             # This maintains gradient flow through the adaptation for proper meta-gradients
             query_observations = query_batch["observations"]
             query_masks = query_batch["masks"]
+
+            # Convert observations from batch format to per-timestep format
+            if query_observations and isinstance(query_observations[0], dict):
+                query_observations = [
+                    {
+                        k: v[0] if isinstance(v, torch.Tensor) else v[0]
+                        for k, v in obs.items()
+                    }
+                    for obs in query_observations
+                ]
+            elif query_observations:
+                query_observations = [
+                    obs[0] if isinstance(obs, torch.Tensor) else obs[0]
+                    for obs in query_observations
+                ]
+
+            # Flatten batch dimension from masks
+            query_masks = query_masks.view(-1, query_masks.shape[-1])
 
             # Create params dict for functional_call (adapted parameters only)
             # Filter by actual parameters, not state_dict (which includes buffers)
@@ -1382,12 +1385,8 @@ class MetaTrainer(BaseTrainer):
             algo = "INVALID"
 
         # Calculate training statistics
-        # Meta-learning: each batch is one complete episode
-        meta_batches = (
-            self.mcfg["epochs"] * self.mcfg["batches_per_epoch"]
-            if self.enable_meta_learning
-            else 0
-        )
+        # Meta-learning: one update per epoch
+        meta_batches = self.mcfg["epochs"] if self.enable_meta_learning else 0
 
         # Fine-tuning: per-task statistics
         if self.enable_fine_tuning:
@@ -1453,11 +1452,11 @@ class MetaTrainer(BaseTrainer):
                 [
                     f"  Meta-Learning Phase",
                     f"    Epochs              : {self.mcfg['epochs']}",
-                    f"    Batches/Epoch       : {self.mcfg['batches_per_epoch']}",
-                    f"    Episodes/Batch      : 1 (collects complete episode per batch)",
-                    f"    Total Batches       : {meta_batches:,}",
-                    f"    Total Episodes      : {meta_batches:,}",
-                    f"    Task Curriculum     : Start with {len(self.active_tasks)} task(s), expand based on entropy < {self.mcfg['entropy_threshold']}",
+                    f"    Batch Size          : {self.mcfg['batch_size']} (parallel environments)",
+                    f"    Rollout Length      : {self.mcfg['rollout_length']} timesteps per collection",
+                    f"    Updates/Epoch       : 1 (support + query per epoch)",
+                    f"    Total Updates       : {meta_batches:,}",
+                    f"    Task Curriculum     : Start with {len(self.active_tasks)} task(s), expand every {self.mcfg['curriculum_check_interval']} epochs if entropy < {self.mcfg['entropy_threshold']}",
                 ]
             )
 

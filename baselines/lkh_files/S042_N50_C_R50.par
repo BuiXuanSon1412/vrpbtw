@@ -1,9 +1,9 @@
-PROBLEM_FILE = ./lkh_files/S042_N50_C_R50.vrp
-OUTPUT_TOUR_FILE = ./lkh_files/S042_N50_C_R50.tour
+PROBLEM_FILE = /home/bxs/thesis/vrpbtw/baselines/lkh_files/S042_N50_C_R50.vrp
+OUTPUT_TOUR_FILE = /home/bxs/thesis/vrpbtw/baselines/lkh_files/S042_N50_C_R50.tour
 RUNS = 10
 TIME_LIMIT = 3600
 SEED = 1234
-TRACE_LEVEL = 1
+TRACE_LEVEL = 0
 MAX_TRIALS = 1000
 POPULATION_SIZE = 50
 MTSP_OBJECTIVE = MINSUM

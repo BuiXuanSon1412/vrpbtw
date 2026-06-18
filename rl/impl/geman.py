@@ -830,7 +830,7 @@ class NodeDecoder(nn.Module):
     ):
         super().__init__()
         self.clip = clip
-        layers = [nn.Linear(D * 3, context_hidden_dim), nn.ReLU()]
+        layers = [nn.Linear(D * 2, context_hidden_dim), nn.ReLU()]
         if context_dropout > 0:
             layers.append(nn.Dropout(context_dropout))
         self.ctx_proj = nn.Sequential(*layers)
@@ -840,16 +840,14 @@ class NodeDecoder(nn.Module):
 
     def forward(
         self,
-        g_node: torch.Tensor,
-        Z_veh: torch.Tensor,
+        g_veh: torch.Tensor,
         g_graph: torch.Tensor,
         Z_node: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self._scale is None:
             self._scale = math.sqrt(Z_node.shape[-1])
-        z_veh_mean = Z_veh.mean(1)
-        ctx = self.ctx_proj(torch.cat([g_node, z_veh_mean, g_graph], dim=-1))
+        ctx = self.ctx_proj(torch.cat([g_veh, g_graph], dim=-1))
         Q = self.Wq(ctx).unsqueeze(1)
         logits = torch.bmm(Q, self.Wk(Z_node).transpose(1, 2)).squeeze(1) / self._scale
         logits = self.clip * torch.tanh(logits)
@@ -868,7 +866,7 @@ class VehicleDecoder(nn.Module):
     ):
         super().__init__()
         self.clip = clip
-        layers = [nn.Linear(D * 3, context_hidden_dim), nn.ReLU()]
+        layers = [nn.Linear(D * 2, context_hidden_dim), nn.ReLU()]
         if context_dropout > 0:
             layers.append(nn.Dropout(context_dropout))
         self.ctx_proj = nn.Sequential(*layers)
@@ -878,16 +876,14 @@ class VehicleDecoder(nn.Module):
 
     def forward(
         self,
-        g_veh: torch.Tensor,
-        Z_node: torch.Tensor,
+        g_node: torch.Tensor,
         g_graph: torch.Tensor,
         Z_veh: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self._scale is None:
             self._scale = math.sqrt(Z_veh.shape[-1])
-        z_node_mean = Z_node.mean(1)
-        ctx = self.ctx_proj(torch.cat([g_veh, z_node_mean, g_graph], dim=-1))
+        ctx = self.ctx_proj(torch.cat([g_node, g_graph], dim=-1))
         Q = self.Wq(ctx).unsqueeze(1)
         logits = torch.bmm(Q, self.Wk(Z_veh).transpose(1, 2)).squeeze(1) / self._scale
         logits = self.clip * torch.tanh(logits)
@@ -901,7 +897,7 @@ class VehicleDecoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class GEMANActorCritic(ActorCritic):
+class ParaGEMANActorCritic(ActorCritic):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -967,8 +963,8 @@ class GEMANActorCritic(ActorCritic):
             self._ortho_init(self)
 
     @classmethod
-    def from_config(cls, cfg: Dict) -> "GEMANActorCritic":
-        """Factory method: instantiate GEMANActorCritic from config dict.
+    def from_config(cls, cfg: Dict) -> "ParaGEMANActorCritic":
+        """Factory method: instantiate ParaGEMANActorCritic from config dict.
 
         Supports both old flat structure and new hierarchical structure with network key.
         """
@@ -1074,8 +1070,8 @@ class GEMANActorCritic(ActorCritic):
             self._veh_mask(action_mask, N1, V2K) if action_mask is not None else None
         )
 
-        ln = self.node_decoder(g_node, Z_veh, g_graph, Z_node, n_mask)  # (B, N1)
-        lv = self.vehicle_decoder(g_veh, Z_node, g_graph, Z_veh, v_mask)  # (B, V2K)
+        ln = self.node_decoder(g_veh, g_graph, Z_node, n_mask)  # (B, N1)
+        lv = self.vehicle_decoder(g_node, g_graph, Z_veh, v_mask)  # (B, V2K)
 
         flat = (ln.unsqueeze(2) + lv.unsqueeze(1)).view(ln.shape[0], N1 * V2K)
         if action_mask is not None:
@@ -1116,8 +1112,8 @@ class GEMANActorCritic(ActorCritic):
             self._veh_mask(action_mask, N1, V2K) if action_mask is not None else None
         )
 
-        ln = self.node_decoder(g_node, Z_veh, g_graph, Z_node, n_mask)
-        lv = self.vehicle_decoder(g_veh, Z_node, g_graph, Z_veh, v_mask)
+        ln = self.node_decoder(g_veh, g_graph, Z_node, n_mask)
+        lv = self.vehicle_decoder(g_node, g_graph, Z_veh, v_mask)
 
         # Joint logits over all (node, vehicle) pairs, masked to feasible pairs.
         # Sampling and log-prob use the single joint Categorical, so the policy
@@ -1143,3 +1139,240 @@ class GEMANActorCritic(ActorCritic):
         else:
             log_probs = dist.log_prob(actions)
             return log_probs, value, entropy
+
+
+# ---------------------------------------------------------------------------
+# SeqGEMANActorCritic: GEMAN for SequentialMVRPBTW (fleet pairs)
+# ---------------------------------------------------------------------------
+
+
+class SeqGEMANActorCritic(ActorCritic):
+    """GEMAN for SequentialMVRPBTW: bilevel selection over 2 vehicles (truck + drone pair) × (N+1) nodes.
+
+    Key difference from ParaGEMANActorCritic:
+      - ParaGEMANActorCritic: 2K × (N+1) action space (all vehicles in parallel)
+      - SeqGEMANActorCritic: 2 × (N+1) action space (current fleet pair only)
+    """
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+        # Extract encoder and decoder configs
+        encoder_cfg = cfg.get("encoder", {})
+        decoder_cfg = cfg.get("decoder", {})
+        value_head_cfg = cfg.get("value_head", {})
+        node_enc_cfg = encoder_cfg.get("node_encoder", {})
+        veh_enc_cfg = encoder_cfg.get("vehicle_encoder", {})
+        graph_enc_cfg = encoder_cfg.get("graph_encoder", {})
+        node_dec_cfg = decoder_cfg.get("node_decoder", {})
+        veh_dec_cfg = decoder_cfg.get("vehicle_decoder", {})
+
+        # Read directly from current config structure
+        D: int = int(node_enc_cfg.get("embedding_dim", 128))
+        H: int = int(node_enc_cfg.get("n_heads", 4))
+        drop: float = float(node_enc_cfg.get("dropout", 0.1))
+        use_in: bool = bool(node_enc_cfg.get("use_instance_norm", True))
+        clip: float = float(node_dec_cfg.get("clip", 10.0))
+
+        # Encoder layers
+        n_node_layers: int = int(node_enc_cfg.get("n_layers", 3))
+        n_veh_layers: int = int(veh_enc_cfg.get("n_layers", 3))
+
+        # Decoder context projection parameters
+        node_ctx_hidden = int(node_dec_cfg.get("context_hidden_dim", 128))
+        node_ctx_dropout = float(node_dec_cfg.get("context_dropout", 0.0))
+        veh_ctx_hidden = int(veh_dec_cfg.get("context_hidden_dim", 128))
+        veh_ctx_dropout = float(veh_dec_cfg.get("context_dropout", 0.0))
+
+        self.node_encoder = NodeEncoder(D, H, n_node_layers, drop, use_in)
+        self.vehicle_encoder = VehicleEncoder(D, H, n_veh_layers, drop, use_in)
+
+        # Build graph encoder
+        graph_encoder_cls = graph_enc_cfg.get("name")
+        self.graph_encoder = graph_encoder_cls(graph_enc_cfg)
+
+        self.node_decoder = NodeDecoder(
+            D, clip, context_hidden_dim=node_ctx_hidden, context_dropout=node_ctx_dropout
+        )
+        self.vehicle_decoder = VehicleDecoder(
+            D, clip, context_hidden_dim=veh_ctx_hidden, context_dropout=veh_ctx_dropout
+        )
+
+        # Value head
+        value_hidden_dims = value_head_cfg.get("hidden_dims", [D, D])
+        value_use_dropout = value_head_cfg.get("use_dropout", True)
+        value_dropout = float(value_head_cfg.get("dropout", 0.1))
+
+        self.value_head = ValueHead(
+            input_dim=D * 3,
+            hidden_dims=value_hidden_dims,
+            dropout=value_dropout,
+            use_dropout=value_use_dropout,
+        )
+
+        ortho_init: bool = (
+            cfg.get("regularization", {}).get("ortho_init", True)
+            if isinstance(cfg.get("regularization"), dict)
+            else cfg.get("ortho_init", True)
+        )
+        if ortho_init:
+            self._ortho_init(self)
+
+    @classmethod
+    def from_config(cls, cfg: Dict) -> "SeqGEMANActorCritic":
+        """Factory method: instantiate SeqGEMANActorCritic from config dict."""
+        network_cfg = cfg.get("layers", cfg)
+        return cls(cfg=network_cfg)
+
+    @staticmethod
+    def _to_tensor(x, device: str, dtype=torch.float32) -> torch.Tensor:
+        if isinstance(x, torch.Tensor):
+            return x.to(device=device, dtype=dtype)
+        return torch.tensor(x, dtype=dtype, device=device)
+
+    # For 2 vehicles (truck + drone), mask shape is (B, N+1, 2)
+    @staticmethod
+    def _node_mask(action_mask: torch.Tensor, N1: int) -> torch.Tensor:
+        """Extract node mask: True if any vehicle can visit node."""
+        return action_mask.view(action_mask.shape[0], N1, 2).any(dim=-1)
+
+    @staticmethod
+    def _veh_mask(action_mask: torch.Tensor, N1: int) -> torch.Tensor:
+        """Extract vehicle mask: True if any node is feasible for vehicle."""
+        return action_mask.view(action_mask.shape[0], N1, 2).any(dim=1)
+
+    def _unpack(self, obs: Dict, device: str):
+        """Convert obs dict values to tensors on the correct device."""
+        for key, val in obs.items():
+            if isinstance(val, np.ndarray):
+                obs[key] = self._to_tensor(val, device)
+        return obs
+
+    def _encode(self, obs: Dict, device: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode observation to embeddings.
+
+        Returns:
+            (Z_node, g_node, Z_veh, g_veh, g_graph)
+        """
+        obs = self._unpack(obs, device)
+
+        Z_node, g_node = self.node_encoder(obs["node_features"])
+        Z_veh, g_veh = self.vehicle_encoder(
+            obs["vehicle_features"],
+            Z_node,
+            obs["truck_edge_index"],
+            obs["truck_edge_attr"],
+            obs["drone_edge_index"],
+            obs["drone_edge_attr"],
+        )
+        Z_graph, g_graph = self.graph_encoder(
+            Z_node,
+            obs["truck_edge_index"],
+            obs["truck_edge_attr"],
+            obs["drone_edge_index"],
+            obs["drone_edge_attr"],
+        )
+
+        return Z_node, g_node, Z_veh, g_veh, g_graph
+
+    def forward(
+        self,
+        obs: Dict,
+        action_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass: encode → decode → logits & value.
+
+        Args:
+            obs: observation dict
+            action_mask: (B, 2*(N+1)) boolean mask or None
+
+        Returns:
+            (logits, value, entropy) where logits is (B, 2*(N+1))
+        """
+        device = globals.DEVICE
+        Z_node, g_node, Z_veh, g_veh, g_graph = self._encode(obs, device)
+
+        B = Z_node.shape[0]
+        N1 = Z_node.shape[1]
+
+        # Compute node logits: ln (B, N1)
+        n_mask = (
+            self._node_mask(action_mask, N1) if action_mask is not None else None
+        )
+        ln = self.node_decoder(g_veh, g_graph, Z_node, n_mask)  # (B, N1)
+
+        # Compute vehicle logits: lv (B, 2)
+        v_mask = (
+            self._veh_mask(action_mask, N1) if action_mask is not None else None
+        )
+        lv = self.vehicle_decoder(g_node, g_graph, Z_veh[:, :2, :], v_mask)  # (B, 2)
+
+        # Combine: (B, N1) ⊕ (B, 2) → (B, 2*N1)
+        flat = (ln.unsqueeze(2) + lv.unsqueeze(1)).view(B, 2 * N1)
+        if action_mask is not None:
+            flat = flat.masked_fill(~action_mask, float("-inf"))
+
+        # Value head
+        g_node_2d = g_node if g_node.dim() == 2 else g_node.flatten(1)
+        g_veh_2d = g_veh if g_veh.dim() == 2 else g_veh.flatten(1)
+        g_graph_2d = g_graph if g_graph.dim() == 2 else g_graph.flatten(1)
+        value_input = torch.cat([g_node_2d, g_veh_2d, g_graph_2d], dim=-1)
+        value = self.value_head(value_input)  # (B, 1)
+
+        entropy = torch.tensor(0.0, device=device)
+
+        return flat, value, entropy
+
+    def evaluate(
+        self,
+        obs: Dict,
+        actions: torch.Tensor,
+        action_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluate actions and compute log-probs, values, entropies.
+
+        Args:
+            obs: observation dict
+            actions: (B,) action indices
+            action_mask: (B, 2*(N+1)) mask or None
+
+        Returns:
+            (log_probs, values, entropies)
+        """
+        device = globals.DEVICE
+        Z_node, g_node, Z_veh, g_veh, g_graph = self._encode(obs, device)
+
+        B = Z_node.shape[0]
+        N1 = Z_node.shape[1]
+
+        # Compute logits
+        n_mask = (
+            self._node_mask(action_mask, N1) if action_mask is not None else None
+        )
+        ln = self.node_decoder(g_veh, g_graph, Z_node, n_mask)  # (B, N1)
+
+        v_mask = (
+            self._veh_mask(action_mask, N1) if action_mask is not None else None
+        )
+        lv = self.vehicle_decoder(g_node, g_graph, Z_veh[:, :2, :], v_mask)  # (B, 2)
+
+        # Combine logits
+        flat = (ln.unsqueeze(2) + lv.unsqueeze(1)).view(B, 2 * N1)
+        if action_mask is not None:
+            flat = flat.masked_fill(~action_mask, float("-inf"))
+
+        # Compute log-probs
+        log_probs = F.log_softmax(flat, dim=-1)
+        selected_log_probs = log_probs.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
+
+        # Value head
+        g_node_2d = g_node if g_node.dim() == 2 else g_node.flatten(1)
+        g_veh_2d = g_veh if g_veh.dim() == 2 else g_veh.flatten(1)
+        g_graph_2d = g_graph if g_graph.dim() == 2 else g_graph.flatten(1)
+        value_input = torch.cat([g_node_2d, g_veh_2d, g_graph_2d], dim=-1)
+        value = self.value_head(value_input)  # (B, 1)
+
+        entropy = torch.tensor(0.0, device=device)
+
+        return selected_log_probs, value, entropy

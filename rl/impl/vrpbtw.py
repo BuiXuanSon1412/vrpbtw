@@ -1134,9 +1134,9 @@ class VRPBTWEnv(Environment):
         node, v_idx = self.decode_action(action)
         k, vtype = self.vehicle_fleet_type(v_idx)
 
-        # Compute objective before action for potential-based shaping
+        # Capture state before action
         prev_served = int(state.served[1:].sum())
-        prev_obj = self._compute_objective(state.current_cost, prev_served)
+        prev_cost = state.current_cost
 
         state = _copy_state(state)
 
@@ -1155,17 +1155,14 @@ class VRPBTWEnv(Environment):
 
         terminated = self._is_terminated(state)
 
-        # Compute reward: potential-based shaping = (f_next - f_prev) / normalized_factor
-        # Objective is net value (service reward - cost), so HIGHER is better
+        # Compute reward: service bonus (1 if new customer served) - cost penalty
         curr_served = int(state.served[1:].sum())
-        curr_obj = self._compute_objective(state.current_cost, curr_served)
-        normalized_factor = (
-            2.0 * self.max_coord * max(self.c_t, self.c_d) * self.n_customers
-            + self.c_b * self.n_fleets
-        )
+        curr_cost = state.current_cost
 
-        # When objective increases (good), reward is positive
-        reward = (curr_obj - prev_obj) / normalized_factor
+        delta_served = float(curr_served > prev_served)
+        delta_cost = curr_cost - prev_cost
+        max_cost = 2.0 * self.max_coord * max(self.c_t, self.c_d)
+        reward = delta_served - 0.1 * (delta_cost / max_cost)
 
         next_mask = (
             self.get_action_mask(state)

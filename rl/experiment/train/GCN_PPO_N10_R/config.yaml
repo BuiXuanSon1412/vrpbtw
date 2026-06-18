@@ -55,10 +55,11 @@ trainer:
       enabled: false
       curriculum:
         entropy_threshold: 0.5
-        check_interval: 1
+        check_interval: 10
       control:
+        batch_size: 1
+        rollout_length: 256
         epochs: 200
-        batches_per_epoch: 50
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
@@ -69,7 +70,7 @@ trainer:
       control:
         batch_size: 1
         n_iteration: 100
-        rollout_length: 1024
+        rollout_length: 512
         ppo_epochs: 1
         minibatch_size: 16
         eval_interval: 1
@@ -138,7 +139,7 @@ graph_encoders:
     use_instance_norm: false
     n_heads: 4
 environment:
-  name: mvrpbtw
+  name: parallel
   properties:
     max_coord: 100.0
     capacity_truck: 200

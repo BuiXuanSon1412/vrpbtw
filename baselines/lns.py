@@ -117,32 +117,64 @@ class RepairOperator:
 
 
 class RepairGreedy(RepairOperator):
-    """Repair by random reinsertion of removed nodes."""
+    """Repair by greedy insertion with feasibility bias."""
 
     def __call__(self, destroyed: Individual) -> Individual:
         repaired = deepcopy(destroyed)
         perm, mask = repaired.chromosome
 
+        # Reinsertion priority: truck (most feasible) > drone > skip
         for i in range(len(mask)):
             if perm[i] < len(perm):  # Skip fleet delimiters
-                if mask[i] == 0 and random.random() > 0.5:
-                    mask[i] = random.choice([0, 1, -1])
+                if mask[i] == 0:
+                    # 70% truck, 15% drone, 15% skip (prioritize service)
+                    mask[i] = random.choices([1, -1, 0], weights=[0.7, 0.15, 0.15])[0]
 
         return repaired
 
 
 class RepairBestInsertion(RepairOperator):
-    """Repair by best-cost insertion of removed nodes."""
+    """Repair by best-cost insertion - iteratively reinsert to maximize fitness."""
+
+    def __init__(self, problem: Problem):
+        self.problem = problem
 
     def __call__(self, destroyed: Individual) -> Individual:
         repaired = deepcopy(destroyed)
         perm, mask = repaired.chromosome
 
-        for i in range(len(mask)):
-            if perm[i] < len(perm):  # Skip fleet delimiters
-                if mask[i] == 0:
-                    weights = [0.7, 0.15, 0.15]  # Truck-biased
-                    mask[i] = random.choices([0, 1, -1], weights=weights)[0]
+        # Get current fitness
+        try:
+            current_fitness, _, _ = cal_fitness(self.problem, repaired)
+        except:
+            # If destroyed solution is infeasible, do greedy repair
+            for i in range(len(mask)):
+                if mask[i] == 0 and perm[i] < len(self.problem.nodes):
+                    mask[i] = random.choices([1, -1, 0], weights=[0.6, 0.2, 0.2])[0]
+            return repaired
+
+        removed_positions = [i for i in range(len(mask))
+                            if mask[i] == 0 and perm[i] < len(self.problem.nodes)]
+
+        # Greedily reinsert each removed node to maximize improvement
+        for pos in removed_positions:
+            best_mode = 0  # Default: skip
+            best_fitness = current_fitness
+
+            # Try each mode and pick the one that maximizes fitness
+            for mode in [1, -1, 0]:
+                mask[pos] = mode
+                try:
+                    fitness, _, _ = cal_fitness(self.problem, repaired)
+                    if fitness > best_fitness:
+                        best_fitness = fitness
+                        best_mode = mode
+                except:
+                    continue
+
+            # Accept best mode
+            mask[pos] = best_mode
+            current_fitness = best_fitness
 
         return repaired
 
@@ -156,11 +188,11 @@ def get_destroy_operators(problem: Problem) -> Dict[str, DestroyOperator]:
     }
 
 
-def get_repair_operators() -> Dict[str, RepairOperator]:
+def get_repair_operators(problem: Problem) -> Dict[str, RepairOperator]:
     """Get dictionary of all repair operators."""
     return {
         "greedy": RepairGreedy(),
-        "best_insertion": RepairBestInsertion(),
+        "best_insertion": RepairBestInsertion(problem),
     }
 
 
@@ -179,11 +211,20 @@ class LNSSolver:
 
         # Initialize operators
         self.destroy_ops = get_destroy_operators(problem)
-        self.repair_ops = get_repair_operators()
+        self.repair_ops = get_repair_operators(problem)
 
-        # Initial solution
+        # Initial solution: use best from larger population (better starting point)
         if initial_solution is None:
-            initial_solution = init_population(1, seed, problem)[0]
+            pop = init_population(20, seed, problem)  # Generate 20 candidates
+            best_indi = pop[0]
+            best_fitness, _, _ = cal_fitness(problem, best_indi)
+            for indi in pop[1:]:
+                fitness, _, _ = cal_fitness(problem, indi)
+                if fitness > best_fitness:
+                    best_indi = indi
+                    best_fitness = fitness
+            initial_solution = best_indi
+            self.initial_pop = pop  # Store for potential restart
 
         initial_solution = cast(Individual, initial_solution)
         self.best_indi: Individual = deepcopy(initial_solution)
@@ -199,33 +240,61 @@ class LNSSolver:
         )
         self.current_fitness = self.best_fitness
 
+        # Adaptive parameters
+        self.destroy_size_min = max(1, len(problem.nodes) // 10)
+        self.destroy_size_max = max(3, len(problem.nodes) // 4)
+        self.destroy_size = self.destroy_size_min
+
     def local_search(self, indi: Individual, max_iterations: int = 50) -> Individual:
-        """Apply local search: destroy and repair operations."""
+        """Apply LNS with destroy-repair and simulated annealing acceptance."""
+        import math
+
         best = deepcopy(indi)
         best_fitness, _, _ = cal_fitness(self.problem, best)
 
         destroy_ops_list = list(self.destroy_ops.values())
         repair_ops_list = list(self.repair_ops.values())
 
+        stagnation_count = 0
+        temperature = 1.0
+
         for iteration in range(max_iterations):
+            # Adaptive destroy size: increase on stagnation
+            if stagnation_count > 3:
+                self.destroy_size = min(self.destroy_size + 1, self.destroy_size_max)
+                stagnation_count = 0
+            else:
+                self.destroy_size = max(self.destroy_size_min, self.destroy_size - 0.5)
+
             # Randomly choose destroy and repair operators
             destroy_op = random.choice(destroy_ops_list)
             repair_op = random.choice(repair_ops_list)
 
-            # Random destroy size
-            destroy_size = random.randint(1, max(2, len(self.problem.nodes) // 3))
-
             # Destroy and repair
-            destroyed = destroy_op(best, destroy_size)
-            repaired = repair_op(destroyed)
+            try:
+                destroyed = destroy_op(best, int(self.destroy_size))
+                repaired = repair_op(destroyed)
+                fitness, sr, cost = cal_fitness(self.problem, repaired)
+            except:
+                stagnation_count += 1
+                continue
 
-            # Evaluate
-            fitness, sr, cost = cal_fitness(self.problem, repaired)
-
-            # Accept if better
-            if fitness > best_fitness:
+            # Simulated annealing acceptance
+            delta = fitness - best_fitness
+            if delta > 0:  # Better solution - always accept
                 best = deepcopy(repaired)
                 best_fitness = fitness
+                stagnation_count = 0
+            elif temperature > 0.01 and random.random() < math.exp(delta / max(temperature, 0.1)):
+                # Accept worse solution with decreasing probability
+                best = deepcopy(repaired)
+                best_fitness = fitness
+                stagnation_count += 1
+            else:
+                stagnation_count += 1
+
+            # Cool down temperature
+            temperature *= 0.95
 
         return best
 
@@ -256,12 +325,15 @@ class LNSSolver:
             }
         }
 
+        stagnation_counter = 0
+        restart_threshold = 20  # Restart after 20 iterations without improvement
+
         for iteration in range(max_iterations):
             if verbose and iteration % 10 == 0:
                 print(
                     f"Iteration {iteration}: "
-                    f"Best fitness={self.best_fitness:.2f}, "
-                    f"Cost={self.best_cost:.2f}"
+                    f"Best SR={self.best_sr:.0%}, Cost={self.best_cost:.2f}, "
+                    f"Fitness={self.best_fitness:.2f}, Stagnation={stagnation_counter}"
                 )
 
             # Local search
@@ -278,9 +350,25 @@ class LNSSolver:
                 self.best_fitness = fitness
                 self.best_sr = sr
                 self.best_cost = cost
+                stagnation_counter = 0
 
                 if verbose:
-                    print(f"  *** New best: fitness={fitness:.2f}, cost={cost:.2f} ***")
+                    print(f"  *** New best: SR={sr:.0%}, cost={cost:.2f}, fitness={fitness:.2f} ***")
+            else:
+                stagnation_counter += 1
+
+            # Restart from best solution in initial population if stagnant
+            if stagnation_counter >= restart_threshold and hasattr(self, 'initial_pop'):
+                if verbose:
+                    print(f"  [RESTART] Restarting from initial population...")
+                # Pick next best from initial population
+                for indi in self.initial_pop:
+                    f, _, _ = cal_fitness(self.problem, indi)
+                    if f > self.current_fitness:
+                        self.current_indi = deepcopy(indi)
+                        self.current_fitness = f
+                        stagnation_counter = 0
+                        break
 
             history[iteration + 1] = {
                 "fitness": self.best_fitness,

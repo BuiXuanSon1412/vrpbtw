@@ -10,7 +10,7 @@
 # Dynamic instance parameters (n_customers, n_fleets, coordinates) come from raw_instance
 
 environment:
-  name: mono
+  name: parallel
   properties:
     # Coordinate system bounds
     max_coord: 100.0

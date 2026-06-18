@@ -27,7 +27,7 @@ network:
         n_layers: 4
         dropout: 0.1
         use_instance_norm: true
-      graph_encoder: mlp_mega
+      graph_encoder: gcn_mega
 
     decoder:
       node_decoder:
