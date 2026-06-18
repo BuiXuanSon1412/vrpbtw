@@ -256,6 +256,15 @@ def run(filename):
             for i in N_all:
                 h[k, r, i] = solver.NumVar(0, solver.infinity(), f"h_{k}_{r}_{i}")
 
+    # change: new variable to wait to continue serve
+    h_tilde = {}
+    for k in K:
+        for r in R:
+            for i in N_all:
+                h_tilde[k, r, i] = solver.NumVar(
+                    0, solver.infinity(), f"h_tilde_{k}_{r}_{i}"
+                )
+
     Z_lambda = {}
     for k in K:
         for r in R:
@@ -672,6 +681,17 @@ def run(filename):
                 )
                 solver.Add(h[k, r, i] >= 0)
 
+                # change
+                solver.Add(
+                    h_tilde[k, r, i]
+                    >= b_tilde[k, i] - xi[i] - M_T * (1 - x_tilde[k, r, i])
+                )
+                solver.Add(
+                    h_tilde[k, r, i]
+                    <= b_tilde[k, i] - xi[i] + M_T * (1 - x_tilde[k, r, i])
+                )
+                solver.Add(h_tilde[k, r, i] >= 0)
+
     # Constraint 59
     for k in K:
         for r in R:
@@ -688,10 +708,18 @@ def run(filename):
             service_time_total = solver.Sum(
                 [x_tilde[k, r, i] * (tau_l + tau_r + s[i]) for i in C]
             )
-            wait_time = solver.Sum([h[k, r, i] for i in N])
+            wait_serve = solver.Sum([h[k, r, i] for i in N])
+
+            # change:
+            wait_continue = solver.Sum([h_tilde[k, r, i] for i in C])
 
             total_time = (
-                flight_time + launch_time + land_time + service_time_total + wait_time
+                flight_time
+                + launch_time
+                + land_time
+                + service_time_total
+                + wait_serve
+                + wait_continue
             )
             solver.Add(total_time <= T_tilde_max)
 
@@ -918,3 +946,4 @@ def run(filename):
 
 for file in files:
     run(file)
+
