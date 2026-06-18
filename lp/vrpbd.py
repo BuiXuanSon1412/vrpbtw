@@ -937,13 +937,142 @@ def run(filename):
                         route_info["trips"].append(trip_info)
 
                 result_data["routes"].append(route_info)
+
+        solution_output_path = os.path.join(
+            output_dir, f"{os.path.splitext(filename)[0]}_solution.txt"
+        )
+
+        def format_solution_value(value):
+            if value is None:
+                return "None"
+            if abs(value) < 1e-9:
+                value = 0
+            if abs(value - round(value)) < 1e-9:
+                return str(int(round(value)))
+            return f"{value:.12g}"
+
+        def format_solution_list(values):
+            return "[" + ", ".join(format_solution_value(value) for value in values) + "]"
+
+        def write_variable_group(file, group_name, variables, display_name=None):
+            display_name = display_name or group_name
+            file.write(f"\n[{display_name}]\n")
+            for key in sorted(variables):
+                file.write(
+                    f"{group_name}{key} = "
+                    f"{format_solution_value(variables[key].solution_value())}\n"
+                )
+
+        binary_vars = [x, x_tilde, y, y_tilde, lambda_var, varrho]
+        binary_max_deviation = 0
+        for variables in binary_vars:
+            for variable in variables.values():
+                value = variable.solution_value()
+                binary_max_deviation = max(binary_max_deviation, abs(value - round(value)))
+
+        verify_solution = solver.VerifySolution(1e-7, False)
+        solution_errors = []
+        if not verify_solution:
+            solution_errors.append("solver.VerifySolution returned False")
+
+        with open(solution_output_path, "w") as f:
+            f.write(f"Instance: {filename}\n")
+            f.write(f"Status: {status_str}\n")
+            f.write(f"Objective exported: {format_solution_value(result_data['objective'])}\n")
+            f.write(
+                f"Raw solver objective: "
+                f"{format_solution_value(solver.Objective().Value())}\n"
+            )
+            f.write(f"Cost f2: {format_solution_value(result_data['f2_cost'])}\n")
+            f.write(
+                f"Served customers f1: "
+                f"{format_solution_value(result_data['f1_num_served'])}\n"
+            )
+            f.write(
+                f"Service rate: "
+                f"{format_solution_value(result_data['f1_service_rate'])}\n"
+            )
+            f.write(f"Running time seconds: {format_solution_value(result_data['time'])}\n")
+
+            f.write("\n[SOLUTION CHECK]\n")
+            f.write(f"Valid: {not solution_errors}\n")
+            f.write(f"solver.VerifySolution: {verify_solution}\n")
+            f.write(f"Binary max deviation: {format_solution_value(binary_max_deviation)}\n")
+            f.write(f"Number of errors: {len(solution_errors)}\n")
+            f.write(
+                "Errors: "
+                + ("none" if not solution_errors else "; ".join(solution_errors))
+                + "\n"
+            )
+
+            f.write("\n[ROUTES]\n")
+            if result_data["routes"]:
+                for route_info in result_data["routes"]:
+                    f.write(f"Truck {route_info['id']}: {route_info['route']}\n")
+                    f.write(
+                        f"  arrival: {format_solution_list(route_info['arrival'])}\n"
+                    )
+                    f.write(
+                        f"  departure: "
+                        f"{format_solution_list(route_info['departure'])}\n"
+                    )
+                    f.write(
+                        f"  service: {format_solution_list(route_info['service'])}\n"
+                    )
+                    for trip_info in route_info["trips"]:
+                        f.write(
+                            f"  Drone trip {trip_info['id']}: "
+                            f"{trip_info['route']}\n"
+                        )
+                        f.write(
+                            f"    arrival: "
+                            f"{format_solution_list(trip_info['arrival'])}\n"
+                        )
+                        f.write(
+                            f"    departure: "
+                            f"{format_solution_list(trip_info['departure'])}\n"
+                        )
+                        f.write(
+                            f"    service: "
+                            f"{format_solution_list(trip_info['service'])}\n"
+                        )
+            else:
+                f.write("none\n")
+
+            f.write("\n[ALL VARIABLES]\n")
+            write_variable_group(f, "x", x)
+            write_variable_group(f, "x_tilde", x_tilde)
+            write_variable_group(f, "y", y)
+            write_variable_group(f, "y_tilde", y_tilde)
+            write_variable_group(f, "z", z)
+            write_variable_group(f, "z_tilde", z_tilde)
+            write_variable_group(f, "lambda", lambda_var)
+            write_variable_group(f, "varrho", varrho)
+            write_variable_group(f, "p", p)
+            write_variable_group(f, "p_tilde", p_tilde)
+            write_variable_group(f, "a", a)
+            write_variable_group(f, "a_tilde", a_tilde)
+            write_variable_group(f, "b", b)
+            write_variable_group(f, "b_tilde", b_tilde)
+            write_variable_group(f, "h", h)
+            write_variable_group(f, "Z_lambda", Z_lambda)
+            write_variable_group(f, "Z_varrho", Z_varrho)
+
+            f.write("\n[xi]\n")
+            for i in sorted(xi):
+                f.write(f"xi{i} = {format_solution_value(xi[i].solution_value())}\n")
+
         # Write to file
         with open(output_path, "w") as f:
             json.dump(result_data, f, indent=2)
 
+        print(f"Solution saved to {solution_output_path}")
         print(f"✔ Results saved to {output_path}")
 
 
 for file in files:
     run(file)
+<<<<<<< HEAD
 
+=======
+>>>>>>> 9a0f776e4113d27aeebfd4cb714883869932ecb4
