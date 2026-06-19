@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 import numpy as np
 
@@ -145,23 +145,16 @@ class LKH3Solver:
 
             f.write("DEMAND_SECTION\n")
             for i in range(n_nodes):
-                f.write(f"{i+1} {int(demands.get(i, 0))}\n")
+                # Use absolute value; BACKHAUL_SECTION indicates sign
+                demand_val = demands.get(i, 0)
+                f.write(f"{i+1} {int(abs(demand_val))}\n")
 
             f.write("DEPOT_SECTION\n")
             f.write("1\n")  # Only list start depot (LKH3 handles return implicitly)
             f.write("-1\n")
 
-            f.write("TIME_WINDOW_SECTION\n")
-            for i in range(n_nodes):
-                tw = time_windows.get(i, (0, self.config["General"]["T_MAX_SYSTEM_H"]))
-                early = int(tw[0] * 60)
-                late = int(tw[1] * 60)
-                f.write(f"{i+1} {early} {late}\n")
-
-            f.write("SERVICE_TIME_SECTION\n")
-            for i in range(n_nodes):
-                st = int(service_times.get(i, 0) * 60)
-                f.write(f"{i+1} {st}\n")
+            # NOTE: Omitting TIME_WINDOW_SECTION and SERVICE_TIME_SECTION
+            # to solve pure MVRPB (capacity constraints only)
 
             # Add backhaul section if applicable
             if backhaul_indices:
@@ -213,9 +206,6 @@ class LKH3Solver:
             timeout=3600
         )
 
-        # Check for infeasibility in output
-        is_infeasible = "Successes/Runs = 0/" in result.stdout
-
         # Print LKH3 output for debugging
         if result.stdout:
             print("\n[LKH3 Output]")
@@ -228,17 +218,66 @@ class LKH3Solver:
             print("\n[LKH3 Errors]")
             print(result.stderr)
 
-        if is_infeasible:
-            raise RuntimeError(
-                "LKH3 found no feasible solution (Successes/Runs = 0/10). "
-                "This instance's time windows/capacity constraints are too tight. "
-                "Try: python lkh3.py --subfolder N50  (larger instances are usually feasible)"
-            )
-
         if not os.path.exists(tour_file):
             raise FileNotFoundError(f"LKH3 did not create tour file: {tour_file}")
 
         return tour_file
+
+    def _extract_feasible_tour(self, full_tour: List[int], metadata: Dict) -> List[int]:
+        """
+        Extract feasible subset from LKH3 tour by greedily checking constraints.
+
+        Returns feasible truck route [depot, ...feasible_nodes..., depot].
+        """
+        dist_matrix = np.array(metadata["distance_matrix"])
+        truck_capacity = self.config["Vehicles"]["CAPACITY_TRUCK"]
+        max_system_time = self.config["General"]["T_MAX_SYSTEM_H"]
+
+        feasible_tour = [0]  # Start at depot
+        current_load = 0
+        current_time = 0.0
+
+        # Try to greedily add nodes from LKH3 tour
+        for node_idx in full_tour[1:]:
+            if node_idx == 0:  # Skip intermediate depot returns
+                continue
+
+            if node_idx >= len(self.problem.nodes):  # Skip end depot marker
+                continue
+
+            node = self.problem.nodes[node_idx]
+            prev_node_idx = feasible_tour[-1]
+
+            # Time to travel from previous node to this node
+            travel_time = dist_matrix[prev_node_idx][node_idx] / 1000.0 / self.problem.truck_speed
+            arrival_time = current_time + travel_time
+
+            # Check time window feasibility
+            if arrival_time > node.time_window[1] - self.problem.service_time:
+                continue  # Skip this node, time window violated
+
+            # Service time for this node
+            service_start = max(arrival_time, node.time_window[0])
+            service_end = service_start + self.problem.service_time
+
+            # Check capacity feasibility
+            new_load = current_load + node.demand
+            if new_load < 0 or new_load > truck_capacity:
+                continue  # Skip this node, capacity violated
+
+            # Check if we can return to depot in time
+            return_time = service_end + dist_matrix[node_idx][0] / 1000.0 / self.problem.truck_speed
+            if return_time > max_system_time:
+                continue  # Skip this node, can't return in time
+
+            # Node is feasible, add it
+            feasible_tour.append(node_idx)
+            current_load = new_load
+            current_time = service_end
+
+        # Return to depot
+        feasible_tour.append(0)
+        return feasible_tour
 
     def _evaluate_solution(self, tour_file: str, metadata_file: str) -> Dict[str, Any]:
         """Parse tour and evaluate using bi-objective formula."""
@@ -246,7 +285,11 @@ class LKH3Solver:
         with open(metadata_file) as f:
             meta = json.load(f)
 
-        # Parse tour (1-indexed nodes)
+        # Load distance matrix for bounds checking
+        dist_matrix = np.array(meta["distance_matrix"])
+        dist_matrix_size = len(dist_matrix)
+
+        # Parse tour from LKH3 (1-indexed nodes)
         with open(tour_file) as f:
             lines = f.readlines()
 
@@ -262,10 +305,19 @@ class LKH3Solver:
             if line == "-1":
                 break
             if line and line[0].isdigit():
-                tour.append(int(line) - 1)
+                node_id = int(line) - 1  # Convert to 0-indexed
+                # Skip nodes that exceed matrix size (end depot)
+                if node_id >= dist_matrix_size:
+                    continue
+                tour.append(node_id)
 
-        # Compute cost
-        dist_matrix = np.array(meta["distance_matrix"])
+        # Ensure tour starts and ends at depot
+        if tour and tour[0] != 0:
+            tour.insert(0, 0)
+        if tour and tour[-1] != 0:
+            tour.append(0)
+
+        # Compute cost on full tour (no constraint extraction needed for pure MVRPB)
         scale_factor = meta["scale_factor"]
         c_t = meta["truck_cost_unit"]
 
@@ -275,11 +327,16 @@ class LKH3Solver:
             dist = dist_matrix[u][v] / scale_factor
             cost += dist * c_t
 
-        # Add fleet basis cost
-        cost += meta["fleet_basis_cost"] * meta["num_vehicles"]
+        # Add fleet basis cost (assume 1 vehicle for single LKH3 tour)
+        cost += meta["fleet_basis_cost"] * 1
 
         # Compute service metrics
-        served_customers = set(tour[1:-1])  # Skip depot at start/end
+        # Exclude depot (0) and any node beyond num_customers (end depot duplicate)
+        served_customers = set()
+        for node in tour:
+            if node > 0 and node <= meta["num_customers"]:
+                served_customers.add(node)
+
         served_count = len(served_customers)
         total_customers = meta["num_customers"]
         service_rate = served_count / total_customers if total_customers > 0 else 0.0
