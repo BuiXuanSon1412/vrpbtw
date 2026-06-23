@@ -14,6 +14,7 @@ when phase constraints are strictly enforced.
 from impl.vrpbtw import (
     VRPBTWEnv,
     VRPBTWState,
+    ActionMask,
     DEPOT,
     TRUCK,
     DRONE,
@@ -84,13 +85,6 @@ class ParallelMVRPBTW(MVRPBTWEnv):
     Action space: 2K × (N+1) bilevel (choose any vehicle and node).
     """
 
-    @classmethod
-    def from_config(cls, cfg: Dict) -> "ParallelMVRPBTW":
-        """Factory method: instantiate ParallelMVRPBTW from config dict."""
-        props = cfg.get("properties", cfg)
-        return cls(props)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MonoMVRPBTW: Mono-vehicle Sequential Routing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +134,48 @@ class MonoMVRPBTW(MVRPBTWEnv):
         self.current_vehicle_idx = 0
         return super().reset()
 
-    def _get_current_vehicle_k_and_type(self) -> Tuple[int, str]:
+    def get_action_mask(self, state: VRPBTWState):
+        """Compute unilevel action mask for current vehicle only.
+
+        Independently computes feasibility for the current vehicle, not extracted from parent.
+        This avoids deadlock where parent skips depot because other vehicles can serve.
+        """
+        N1 = self.n_customers + 1
+        mask = np.zeros(N1, dtype=bool)
+
+        k, vehicle_type = self._get_current_vehicle_info()
+
+        if vehicle_type == TRUCK:
+            # Check feasible serving nodes for this truck
+            for j in range(1, N1):
+                if self._truck_feasible(state, k, j):
+                    mask[j] = True
+
+            # If no serving nodes, allow return to depot
+            if not mask.any() and self._truck_return_feasible(state, k):
+                mask[DEPOT] = True
+        else:  # DRONE
+            if state.drone_active[k]:
+                # Drone is active: check extending to unserved customers
+                for j in range(1, N1):
+                    if self._drone_extend_feasible(state, k, j):
+                        mask[j] = True
+                # Check landing at nodes on truck route
+                for land_idx in self._landing_nodes(state, k):
+                    if self._drone_land_feasible(state, k, land_idx):
+                        land_node = int(state.truck_routes[k][land_idx])
+                        mask[land_node] = True
+            else:
+                # Drone is inactive: check launching
+                for j in range(1, N1):
+                    if self._drone_launch_feasible(state, k, j):
+                        mask[j] = True
+                # Inactive drone can always wait at depot
+                mask[DEPOT] = True
+
+        return ActionMask.from_bool_array(mask)
+
+    def _get_current_vehicle_info(self) -> Tuple[int, int]:
         """Get current vehicle index and type (truck or drone).
 
         Routing sequence is interleaved by fleet:
@@ -151,11 +186,11 @@ class MonoMVRPBTW(MVRPBTWEnv):
         - ...
 
         Returns:
-            (k, vehicle_type) where k is fleet index, vehicle_type is "truck" or "drone"
+            (k, vehicle_type) where k is fleet index, vehicle_type is TRUCK or DRONE constant
         """
         k = self.current_vehicle_idx // 2
         is_drone = self.current_vehicle_idx % 2 == 1
-        vehicle_type = "drone" if is_drone else "truck"
+        vehicle_type = DRONE if is_drone else TRUCK
         return k, vehicle_type
 
     def _update_vehicle_index(self, state: VRPBTWState) -> None:
@@ -163,9 +198,9 @@ class MonoMVRPBTW(MVRPBTWEnv):
 
         A vehicle is considered done when it's at the depot.
         """
-        k, vehicle_type = self._get_current_vehicle_k_and_type()
+        k, vehicle_type = self._get_current_vehicle_info()
         current_node = (
-            int(state.drone_node[k]) if vehicle_type == "drone" else int(state.truck_node[k])
+            int(state.drone_node[k]) if vehicle_type == DRONE else int(state.truck_node[k])
         )
 
         if current_node == DEPOT:
@@ -189,11 +224,11 @@ class MonoMVRPBTW(MVRPBTWEnv):
             (obs, reward, terminated, truncated, info)
         """
         node = action
-        k, vehicle_type = self._get_current_vehicle_k_and_type()
+        k, vehicle_type = self._get_current_vehicle_info()
 
         # Convert interleaved indexing to parent's grouped indexing:
         # Parent MVRPBTW: 0 to K-1 are trucks, K to 2K-1 are drones
-        if vehicle_type == "truck":
+        if vehicle_type == TRUCK:
             parent_v_idx = k
         else:
             parent_v_idx = self.n_fleets + k
@@ -268,12 +303,6 @@ class MonoMVRPBTW(MVRPBTWEnv):
 
         return False
 
-    @classmethod
-    def from_config(cls, cfg: Dict) -> "MonoMVRPBTW":
-        """Factory method: instantiate MonoMVRPBTW from config dict."""
-        props = cfg.get("properties", cfg)
-        return cls(props)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SequentialMVRPBTW: Fleet-Sequential Routing
@@ -314,6 +343,56 @@ class SequentialMVRPBTW(MVRPBTWEnv):
         """
         self.current_fleet_idx = 0
         return super().reset()
+
+    def get_action_mask(self, state: VRPBTWState):
+        """Compute bilevel action mask for current fleet pair only.
+
+        Returns mask of shape (2×(N+1),) for (vehicle_in_pair, node) encoding:
+        - vehicle_in_pair ∈ {0=truck, 1=drone}
+        - node ∈ {0, ..., N}
+        """
+        N1 = self.n_customers + 1
+        k = self.current_fleet_idx
+        mask = np.zeros(2 * N1, dtype=bool)
+
+        # Check if there are any feasible serving nodes for this fleet pair
+        has_feasible_serving = False
+
+        # Truck (vehicle_in_pair = 0)
+        feasible_truck_nodes = []
+        for j in range(1, N1):
+            if self._truck_feasible(state, k, j):
+                feasible_truck_nodes.append(j)
+                # Encode as (vehicle=0, node=j)
+                mask[0 * N1 + j] = True
+                has_feasible_serving = True
+
+        # Drone (vehicle_in_pair = 1)
+        if state.drone_active[k]:
+            # Check extending to unserved customers
+            for j in range(1, N1):
+                if self._drone_extend_feasible(state, k, j):
+                    mask[1 * N1 + j] = True
+                    has_feasible_serving = True
+            # Check landing at nodes on truck route
+            for land_idx in self._landing_nodes(state, k):
+                if self._drone_land_feasible(state, k, land_idx):
+                    land_node = int(state.truck_routes[k][land_idx])
+                    mask[1 * N1 + land_node] = True
+                    has_feasible_serving = True
+        else:
+            # Inactive drone: check launching
+            for j in range(1, N1):
+                if self._drone_launch_feasible(state, k, j):
+                    mask[1 * N1 + j] = True
+                    has_feasible_serving = True
+
+        # Only allow return-to-depot if there are NO feasible serving nodes
+        if not has_feasible_serving:
+            if self._truck_return_feasible(state, k):
+                mask[0 * N1 + DEPOT] = True
+
+        return ActionMask.from_bool_array(mask)
 
     def _update_fleet_index(self, state: VRPBTWState) -> None:
         """Update fleet index when both vehicles in current fleet return to depot.
@@ -363,9 +442,3 @@ class SequentialMVRPBTW(MVRPBTWEnv):
             self._update_fleet_index(self._current_state)
 
         return obs, reward, terminated, truncated, info
-
-    @classmethod
-    def from_config(cls, cfg: Dict) -> "SequentialMVRPBTW":
-        """Factory method: instantiate SequentialMVRPBTW from config dict."""
-        props = cfg.get("properties", cfg)
-        return cls(props)

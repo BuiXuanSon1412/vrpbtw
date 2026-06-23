@@ -1,0 +1,23 @@
+{
+  "stop_reason": "completed",
+  "total_updates": 3200,
+  "total_epochs": 0,
+  "best_objective": 12169.1025390625,
+  "training_time_s": 1639.4,
+  "meta_learning_enabled": false,
+  "fine_tuning_enabled": true,
+  "meta_summary": null,
+  "fine_tune_summary": {
+    "stop_reason": "completed",
+    "total_iterations": 100,
+    "total_updates": 3200,
+    "best_objective": 12169.1025390625,
+    "training_time_s": 1639.4,
+    "task_summaries": {
+      "003_N10_F2_R": {
+        "best_objective": 12169.1025390625,
+        "iterations_completed": 100
+      }
+    }
+  }
+}

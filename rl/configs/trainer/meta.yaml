@@ -69,10 +69,11 @@ trainer:
       enabled: false  # Set to false to skip meta-learning phase
       curriculum:
         entropy_threshold: 0.5
-        check_interval: 1
+        check_interval: 10  # Expand tasks every N epochs
       control:
+        batch_size: 1             # Number of parallel environments (1=serial, N>1=parallel with SubprocVecEnv)
+        rollout_length: 256       # Timesteps per collection (support and query sets)
         epochs: 200
-        batches_per_epoch: 50
         eval_interval: 1
         checkpoint_interval: 10
       early_stopping:
@@ -85,7 +86,7 @@ trainer:
         # Rollout collection
         batch_size: 1             # Number of parallel environments (1=sequential, N>1=parallel with SubprocVecEnv)
         n_iteration: 100          # Number of rollout collections per task
-        rollout_length: 1024       # Timesteps per environment per rollout collection
+        rollout_length: 512       # Timesteps per environment per rollout collection
 
         # PPO optimization on collected data
         ppo_epochs: 1             # Gradient steps per rollout (1=single pass, higher=risk of overfitting)

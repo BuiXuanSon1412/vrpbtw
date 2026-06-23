@@ -1,0 +1,21 @@
+NAME : S042_N10_R_R50.393945.tour
+COMMENT : Length = 393945
+COMMENT : Found by LKH-3 [Keld Helsgaun] Fri Jun 19 15:27:56 2026
+TYPE : TOUR
+DIMENSION : 13
+TOUR_SECTION
+1
+12
+13
+10
+5
+7
+2
+6
+3
+8
+4
+9
+11
+-1
+EOF

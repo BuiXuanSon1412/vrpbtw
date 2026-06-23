@@ -388,8 +388,8 @@ class AMActorCritic(ActorCritic):
 
         # Handle action_mask shape for sequential routing
         if action_mask is not None:
-            B = g_node.shape[0]
-            N1 = g_node.shape[1]  # Number of nodes (including depot)
+            B = Z_node.shape[0]
+            N1 = Z_node.shape[1]  # Number of nodes (including depot)
 
             # If mask is bilevel (B, N+1, 2K) from environment, convert to unilevel
             if action_mask.dim() == 3:  # (B, N+1, 2K)
@@ -455,8 +455,8 @@ class AMActorCritic(ActorCritic):
 
         # Handle action_mask shape for sequential routing
         if action_mask is not None:
-            B = g_node.shape[0]
-            N1 = g_node.shape[1]  # Number of nodes (including depot)
+            B = Z_node.shape[0]
+            N1 = Z_node.shape[1]  # Number of nodes (including depot)
 
             # If mask is bilevel (B, N+1, 2K) from environment, convert to unilevel
             if action_mask.dim() == 3:  # (B, N+1, 2K)

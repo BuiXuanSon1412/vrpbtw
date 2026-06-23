@@ -29,7 +29,8 @@ from impl.mvrpbtw import ParallelMVRPBTW, MonoMVRPBTW, SequentialMVRPBTW
 
 # Networks
 from impl.geman import (
-    GEMANActorCritic,
+    ParaGEMANActorCritic,
+    SeqGEMANActorCritic,
     FreeGraphEncoder,
     MLP_MEGAGraphEncoder,
     GCN_MEGAGraphEncoder,
@@ -43,19 +44,14 @@ from core.network import ActorCritic
 from core.trainer import BaseTrainer, MetaTrainer, POMOTrainer
 from core.evaluator import Evaluator
 from core.logger import Logger
-from core.collector import (
-    BaseCollector,
-    GAECollector,
-    MCCollector,
-    POMOSampler,
-)
 
 # ---------------------------------------------------------------------------
 # Registry: factory method dispatch tables
 # ---------------------------------------------------------------------------
 
 _NETWORK_REGISTRY: Dict[str, type] = {
-    "geman": GEMANActorCritic,
+    "para_geman": ParaGEMANActorCritic,
+    "seq_geman": SeqGEMANActorCritic,
     "am": AMActorCritic,
 }
 
@@ -85,46 +81,12 @@ _OPTIMIZER_REGISTRY: Dict[str, type | None] = {
     "unspecified": None,
 }
 
-_COLLECTOR_REGISTRY: Dict[str, type] = {
-    "gae": GAECollector,
-    "mc": MCCollector,
-    "pomo": POMOSampler,
-}
-
 _GRAPH_ENCODER_REGISTRY: Dict[str, type] = {
     "free": FreeGraphEncoder,  # Null encoder for ablation studies
     "mlp_mega": MLP_MEGAGraphEncoder,  # Default: fastest, simplest
     "gcn_mega": GCN_MEGAGraphEncoder,  # GCN with degree normalization
     "gat_mega": GAT_MEGAGraphEncoder,  # Multi-head attention
 }
-
-
-# ---------------------------------------------------------------------------
-# Collector
-# ---------------------------------------------------------------------------
-
-
-def build_collector(cfg: Dict[str, Any]) -> BaseCollector:
-    """Build collector from config.
-
-    Dispatches to registry based on collector type, then calls from_config.
-
-    Args:
-        cfg: config dict with 'name' and algorithm-specific params
-
-    Returns:
-        BaseCollector instance
-    """
-    collector_type = cfg.get("name", "gae")
-
-    if collector_type not in _COLLECTOR_REGISTRY:
-        raise ValueError(
-            f"Unknown collector type {collector_type!r}. "
-            f"Register it in registry.py. Known: {list(_COLLECTOR_REGISTRY.keys())}"
-        )
-
-    cls = _COLLECTOR_REGISTRY[collector_type]
-    return cls.from_config(cfg)
 
 
 # ---------------------------------------------------------------------------

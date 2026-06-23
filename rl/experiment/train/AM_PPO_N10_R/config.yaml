@@ -69,7 +69,7 @@ trainer:
       control:
         batch_size: 1
         n_iteration: 100
-        rollout_length: 1024
+        rollout_length: 512
         ppo_epochs: 1
         minibatch_size: 16
         eval_interval: 1
@@ -134,9 +134,8 @@ graph_encoders:
     use_instance_norm: false
     n_heads: 4
 environment:
-  name: amvrpbtw
+  name: mono
   properties:
-    allow_flexible_drone_launch: true
     max_coord: 100.0
     capacity_truck: 200
     capacity_drone: 20
