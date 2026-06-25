@@ -86,7 +86,7 @@ class SyntheticMetricsGenerator:
         # Phase 2: phase1_end → n_epochs (fine-tuning plateau)
         self.phase1_endpoints = {
             "N50": {"C": 0.45, "RC": 0.50, "R": 0.49},
-            "N100": {"C": 0.30, "RC": 0.35, "R": 0.40},
+            "N100": {"C": 0.45, "RC": 0.35, "R": 0.40},
             "N150": {"C": 0.35, "RC": 0.40, "R": 0.45},
         }
 
@@ -104,13 +104,23 @@ class SyntheticMetricsGenerator:
             "N150": {"C": 1.0, "RC": 0.7, "R": 0.5},
         }
 
-        # Noise levels by distribution
-        # Clustered has clean structure (low noise)
-        # Random has chaotic exploration (high noise)
+        # Noise levels by size and distribution
+        # Clustered has clean structure (lower noise)
+        # Random has chaotic exploration (higher noise)
         self.noise_levels = {
-            "C": 0.008,    # Clean, exploitable structure
-            "RC": 0.012,   # Mixed structure and randomness
-            "R": 0.012,    # Mixed structure (same as RC, different decay/convergence)
+            "N50": {"C": 0.025, "RC": 0.028, "R": 0.030},
+            "N100": {"C": 0.024, "RC": 0.026, "R": 0.028},
+            "N150": {"C": 0.020, "RC": 0.025, "R": 0.027},
+        }
+
+        # Noise distribution types per phase group
+        # Different phase groups sample from different distributions
+        # Types: "normal" (Gaussian), "uniform", "laplace" (exponential), "triangular"
+        self.phase_noise_distributions = {
+            "exploration": "uniform",      # Phase 0: wide exploration with uniform noise
+            "rapid_learning": "normal",    # Phases 1-3: stable Gaussian convergence
+            "refinement": "triangular",    # Phases 4-6: peaked triangular distribution
+            "stabilization": "normal",     # Phases 7-9: narrow Gaussian for fine-tuning
         }
 
         # 10-phase training progression (% of epochs for each phase)
@@ -119,9 +129,9 @@ class SyntheticMetricsGenerator:
             "N50": {"C": [0.05, 0.08, 0.10, 0.12, 0.12, 0.12, 0.10, 0.10, 0.10, 0.05],
                     "RC": [0.08, 0.12, 0.12, 0.11, 0.11, 0.11, 0.12, 0.08, 0.08, 0.05],
                     "R": [0.08, 0.12, 0.12, 0.11, 0.10, 0.10, 0.10, 0.09, 0.09, 0.09]},
-            "N100": {"C": [0.06, 0.07, 0.08, 0.09, 0.12, 0.14, 0.15, 0.14, 0.12, 0.03],
-                     "RC": [0.07, 0.11, 0.12, 0.11, 0.10, 0.10, 0.10, 0.09, 0.09, 0.05],
-                     "R": [0.09, 0.12, 0.12, 0.11, 0.10, 0.10, 0.10, 0.10, 0.09, 0.07]},
+            "N100": {"C": [0.04, 0.05, 0.06, 0.08, 0.12, 0.16, 0.18, 0.16, 0.12, 0.03],
+                     "RC": [0.10, 0.12, 0.11, 0.08, 0.09, 0.12, 0.13, 0.12, 0.10, 0.03],
+                     "R": [0.12, 0.14, 0.10, 0.09, 0.12, 0.12, 0.10, 0.10, 0.08, 0.03]},
             "N150": {"C": [0.07, 0.10, 0.11, 0.11, 0.11, 0.10, 0.10, 0.09, 0.09, 0.05],
                      "RC": [0.08, 0.12, 0.12, 0.10, 0.09, 0.09, 0.09, 0.09, 0.09, 0.13],
                      "R": [0.10, 0.14, 0.12, 0.09, 0.08, 0.08, 0.08, 0.08, 0.08, 0.15]},
@@ -134,23 +144,80 @@ class SyntheticMetricsGenerator:
         #   4-6: Refinement (moderate decay - gradual improvement)
         #   7-9: Stabilization (low decay - minor tweaks)
         self.phase_decay_rates = {
-            "N50": {"C": [1.125, 4.4, 3.9, 3.4, 2.9, 2.1, 1.9, 1.5, 1.35, 1.15],
-                    "RC": [1.2, 2.9, 2.8, 2.3, 1.8, 1.5, 1.3, 1.0, 0.85, 0.52],
-                    "R": [1.2, 6.2, 6.8, 4.2, 0.25, 0.08, 0.01, 0.005, 0.000001, 0.0000000001]},
-            "N100": {"C": [1.4, 3.9, 3.5, 2.9, 1.8, 1.4, 0.8, 0.4, 0.2, 0.1],
-                     "RC": [1.2, 3.1, 2.8, 2.3, 1.8, 1.5, 1.0, 0.6, 0.3, 0.1],
-                     "R": [1.0, 2.7, 2.5, 2.1, 1.6, 1.2, 0.8, 0.5, 0.3, 0.2]},
-            "N150": {"C": [1.3, 3.0, 2.6, 2.1, 1.7, 1.5, 1.2, 0.9, 0.6, 0.3],
+            "N50": {"C": [1.2, 1.6, 2.2, 2.4, 2.6, 2.4, 0.2, 0.1, 0.01, 0.01],
+                    "RC": [1.5, 2.0, 2.8, 2.8, 3.0, 2.8, 0.1, 0.05, 0.01, 0.01],
+                    "R": [1.4, 1.9, 2.6, 4.2, 5.2, 4.8, 0.2, 0.1, 0.01, 0.01]},
+            "N100": {"C": [1.0, 2.0, 2.2, 2.0, 1.8, 1.4, 0.6, 0.3, 0.1, 0.05],
+                     "RC": [1.0, 2.2, 2.2, 2.0, 1.8, 1.4, 0.6, 0.3, 0.1, 0.05],
+                     "R": [1.2, 2.4, 2.2, 2.0, 1.8, 1.4, 0.6, 0.3, 0.1, 0.05]},
+            "N150": {"C": [1.5, 4.0, 3.5, 2.8, 2.0, 1.5, 1.0, 0.6, 0.3, 0.1],
                      "RC": [1.1, 2.6, 2.3, 1.8, 1.5, 1.2, 1.0, 0.7, 0.5, 0.2],
-                     "R": [0.9, 2.1, 1.9, 1.4, 1.1, 0.9, 0.7, 0.5, 0.4, 0.1]},
+                     "R": [1.0, 3.0, 2.6, 2.0, 1.2, 0.7, 0.3, 0.1, 0.05, 0.02]},
         }
 
-        # Noise levels per phase (exploration phases have higher noise)
+        # Noise levels per phase, per distribution
+        # Each distribution has different noise characteristics across training phases
         self.phase_noise_multipliers = {
-            "exploration": 1.5,      # Phase 0: high noise during exploration
-            "rapid_learning": 0.8,   # Phases 1-3: stable rapid learning
-            "refinement": 1.0,       # Phases 4-6: normal noise
-            "stabilization": 1.05,   # Phases 7-9: slightly higher noise as model converges (reduced from 1.2)
+            "N50": {
+                "C": {  # Clustered: noise 0-7, stable 6-7, phase 8-9 ±0.007-8
+                    "exploration": 0.90,
+                    "rapid_learning": 0.80,
+                    "refinement": 0.70,
+                    "stabilization": 0.28,
+                },
+                "RC": {  # Mixed: noise 0-7, stable 6-7, phase 8-9 ±0.007-8
+                    "exploration": 1.00,
+                    "rapid_learning": 0.90,
+                    "refinement": 0.80,
+                    "stabilization": 0.29,
+                },
+                "R": {  # Random: noise 0-7, stable 6-7, phase 8-9 ±0.007-8
+                    "exploration": 1.10,
+                    "rapid_learning": 1.00,
+                    "refinement": 0.90,
+                    "stabilization": 0.31,
+                },
+            },
+            "N100": {
+                "C": {  # Clustered: stable convergence, moderate noise
+                    "exploration": 0.95,
+                    "rapid_learning": 0.85,
+                    "refinement": 0.75,
+                    "stabilization": 0.15,
+                },
+                "RC": {  # Mixed: balanced exploration and convergence
+                    "exploration": 1.05,
+                    "rapid_learning": 0.95,
+                    "refinement": 0.85,
+                    "stabilization": 0.18,
+                },
+                "R": {  # Random: higher initial noise, gradual stabilization
+                    "exploration": 1.15,
+                    "rapid_learning": 1.05,
+                    "refinement": 0.95,
+                    "stabilization": 0.20,
+                },
+            },
+            "N150": {
+                "C": {  # Clustered: similar learning curve to N50_C, scaled for N150
+                    "exploration": 0.90,
+                    "rapid_learning": 0.80,
+                    "refinement": 0.70,
+                    "stabilization": 0.10,
+                },
+                "RC": {  # Mixed: similar learning curve to N50_RC, scaled for N150
+                    "exploration": 1.00,
+                    "rapid_learning": 0.90,
+                    "refinement": 0.80,
+                    "stabilization": 0.12,
+                },
+                "R": {  # Random: similar learning curve to N50_R, scaled for N150
+                    "exploration": 1.10,
+                    "rapid_learning": 1.00,
+                    "refinement": 0.90,
+                    "stabilization": 0.14,
+                },
+            },
         }
 
         # Configurable phase-to-group mapping for each (size, distribution)
@@ -204,7 +271,7 @@ class SyntheticMetricsGenerator:
                     "refinement": [4, 5, 6],
                     "stabilization": [7, 8, 9],
                 },
-                "RC": {  # Mixed: more back-loaded phases
+                "RC": {  # Mixed: moderate variation
                     "exploration": [0],
                     "rapid_learning": [1, 2, 3],
                     "refinement": [4, 5, 6],
@@ -231,15 +298,15 @@ class SyntheticMetricsGenerator:
                     "R": ["linear", "linear", "linear", "exponential",
                           "exponential", "power_law", "power_law",
                           "logarithmic", "logarithmic", "hyperbolic"]},
-            "N100": {"C": ["linear", "exponential", "exponential", "exponential",
-                           "power_law", "power_law", "power_law",
-                           "logarithmic", "logarithmic", "hyperbolic"],
-                     "RC": ["linear", "exponential", "exponential", "exponential",
-                            "power_law", "power_law", "power_law",
-                            "logarithmic", "logarithmic", "hyperbolic"],
-                     "R": ["linear", "linear", "exponential", "exponential",
-                           "exponential", "power_law", "power_law",
-                           "logarithmic", "logarithmic", "hyperbolic"]},
+            "N100": {"C": ["linear", "exponential", "exponential", "power_law",
+                           "power_law", "logarithmic", "logarithmic",
+                           "asymptotic", "asymptotic", "hyperbolic"],
+                     "RC": ["linear", "exponential", "exponential", "power_law",
+                            "power_law", "exponential", "logarithmic",
+                            "logarithmic", "asymptotic", "hyperbolic"],
+                     "R": ["linear", "exponential", "power_law", "power_law",
+                           "power_law", "logarithmic", "logarithmic",
+                           "asymptotic", "asymptotic", "hyperbolic"]},
             "N150": {"C": ["linear", "exponential", "exponential", "exponential",
                            "power_law", "power_law", "power_law",
                            "logarithmic", "logarithmic", "hyperbolic"],
@@ -281,7 +348,7 @@ class SyntheticMetricsGenerator:
             List of service rates for each epoch
         """
         srs = []
-        noise_std = self.noise_levels[dist]
+        noise_std = self.noise_levels[size][dist]
 
         # Calculate phase boundaries
         phase_durations = self.phase_schedule[size][dist]
@@ -300,15 +367,15 @@ class SyntheticMetricsGenerator:
 
         # Phase-specific improvement budgets (how much SR improves in each phase)
         phase_budgets = {
-            "N50": {"C": [0.05, 0.30, 0.28, 0.25, 0.08, 0.03, 0.01, 0.00, 0.00, 0.00],
-                    "RC": [0.06, 0.30, 0.33, 0.26, 0.04, 0.01, 0.00, 0.00, 0.00, 0.00],
-                    "R": [0.08, 0.36, 0.22, 0.24, 0.08, 0.02, 0.00, 0.00, 0.00, 0.00]},
-            "N100": {"C": [0.06, 0.35, 0.31, 0.21, 0.04, 0.02, 0.01, 0.00, 0.00, 0.00],
-                     "RC": [0.07, 0.30, 0.20, 0.16, 0.12, 0.10, 0.03, 0.01, 0.01, 0.00],
-                     "R": [0.09, 0.31, 0.25, 0.19, 0.10, 0.05, 0.01, 0.00, 0.00, 0.00]},
-            "N150": {"C": [0.07, 0.26, 0.16, 0.12, 0.10, 0.08, 0.06, 0.04, 0.03, 0.02],
-                     "RC": [0.08, 0.24, 0.14, 0.11, 0.09, 0.08, 0.06, 0.06, 0.05, 0.09],
-                     "R": [0.10, 0.20, 0.12, 0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.12]},
+            "N50": {"C": [0.10, 0.13, 0.16, 0.18, 0.20, 0.19, 0.07, 0.01, 0.00, 0.00],
+                    "RC": [0.11, 0.14, 0.16, 0.18, 0.21, 0.20, 0.00, 0.00, 0.00, 0.00],
+                    "R": [0.10, 0.13, 0.15, 0.20, 0.25, 0.24, 0.04, 0.01, 0.00, 0.00]},
+            "N100": {"C": [0.12, 0.18, 0.16, 0.15, 0.18, 0.15, 0.04, 0.02, 0.01, 0.00],
+                     "RC": [0.11, 0.16, 0.16, 0.16, 0.18, 0.16, 0.05, 0.03, 0.02, 0.01],
+                     "R": [0.13, 0.18, 0.16, 0.15, 0.17, 0.14, 0.04, 0.02, 0.01, 0.00]},
+            "N150": {"C": [0.17, 0.43, 0.33, 0.07, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
+                     "RC": [0.12, 0.30, 0.23, 0.11, 0.07, 0.05, 0.04, 0.03, 0.03, 0.02],
+                     "R": [0.23, 0.46, 0.25, 0.05, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00]},
         }
 
         # Get budgets for this configuration
@@ -350,10 +417,10 @@ class SyntheticMetricsGenerator:
 
                 # Determine phase group and apply corresponding noise
                 phase_group = self.get_phase_group(phase_idx, size, dist)
-                phase_noise = noise_std * self.phase_noise_multipliers[phase_group]
+                phase_noise = noise_std * self.phase_noise_multipliers[size][dist][phase_group]
 
-                # Add realistic noise
-                sr_noise = np.random.normal(0, phase_noise)
+                # Add realistic noise sampled from phase-specific distribution
+                sr_noise = self.sample_phase_noise(phase_group, phase_noise)
                 sr = np.clip(sr_base + sr_noise, 0, 1)
 
                 srs.append(sr)
@@ -412,6 +479,43 @@ class SyntheticMetricsGenerator:
         service_value = num_customers * base_value * sr
         objective = service_value - cost
         return objective
+
+    def sample_phase_noise(self, phase_group: str, std_dev: float) -> float:
+        """Sample noise from phase-specific distribution.
+
+        Args:
+            phase_group: Phase group name (exploration, rapid_learning, refinement, stabilization)
+            std_dev: Standard deviation / scale parameter for the distribution
+
+        Returns:
+            Noise sample from the phase-specific distribution
+        """
+        dist_type = self.phase_noise_distributions[phase_group]
+
+        if dist_type == "normal":
+            # Gaussian distribution - standard normal with given std dev
+            return np.random.normal(0, std_dev)
+
+        elif dist_type == "uniform":
+            # Uniform distribution - wider exploration, symmetric around 0
+            # Range: [-sqrt(3)*std_dev, sqrt(3)*std_dev] to match normal variance
+            limit = np.sqrt(3) * std_dev
+            return np.random.uniform(-limit, limit)
+
+        elif dist_type == "laplace":
+            # Laplace (exponential) distribution - heavier tails than normal
+            # Useful for occasional large jumps during exploration
+            scale = std_dev / np.sqrt(2)
+            return np.random.laplace(0, scale)
+
+        elif dist_type == "triangular":
+            # Triangular distribution - peaked at center, tapers to edges
+            # More concentrated than uniform, less than normal
+            return np.random.triangular(-std_dev, 0, std_dev)
+
+        else:
+            # Default to normal if unknown
+            return np.random.normal(0, std_dev)
 
     def get_phase_group(self, phase_idx: int, size: str, dist: str) -> str:
         """Determine which main phase group a phase belongs to.
@@ -755,9 +859,9 @@ def main():
         "N50_C": (0.40, 0.94),
         "N50_RC": (0.40, 0.92),
         "N50_R": (0.36, 0.89),
-        "N100_C": (0.40, 0.88),
-        "N100_RC": (0.38, 0.876),
-        "N100_R": (0.36, 0.86),
+        "N100_C": (0.40, 0.89),
+        "N100_RC": (0.38, 0.86),
+        "N100_R": (0.36, 0.87),
         "N150_C": (0.40, 0.86),
         "N150_RC": (0.38, 0.85),
         "N150_R": (0.36, 0.85),
