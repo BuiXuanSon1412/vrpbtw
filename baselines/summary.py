@@ -101,7 +101,7 @@ def process_baseline(baseline_dir: Path, baseline_name: str):
             'Cost_Error': f"±{cost_std:.2f}",
             'Service_Rate': f"{sr_mean:.4f}",
             'Service_Rate_Error': f"±{sr_std:.4f}",
-            'Avg_Time_s': f"{time_mean:.2f}",
+            'Avg_Time_s': f"{time_mean}",
         })
 
     # Create summary by size
@@ -128,7 +128,7 @@ def process_baseline(baseline_dir: Path, baseline_name: str):
             'Cost_Error': f"±{cost_std:.2f}",
             'Service_Rate': f"{sr_mean:.4f}",
             'Service_Rate_Error': f"±{sr_std:.4f}",
-            'Avg_Time_s': f"{time_mean:.2f}",
+            'Avg_Time_s': f"{time_mean}",
         })
 
     # Save summaries

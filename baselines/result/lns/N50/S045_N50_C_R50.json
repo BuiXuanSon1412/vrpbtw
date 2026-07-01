@@ -1,5 +1,5 @@
 {
-  "time": 50.512494802474976,
+  "time": 109.03580951690674,
   "history": {
     "0": {
       "fitness": 155077.9675673556,
@@ -7,14 +7,14 @@
       "cost": 1327.9675673555967
     },
     "1": {
-      "fitness": 185836.48335724775,
-      "service_rate": 0.36,
-      "cost": 1336.483357247756
+      "fitness": 155245.61076111995,
+      "service_rate": 0.3,
+      "cost": 1495.6107611199554
     },
     "2": {
-      "fitness": 185836.48335724775,
-      "service_rate": 0.36,
-      "cost": 1336.483357247756
+      "fitness": 155294.3002404912,
+      "service_rate": 0.3,
+      "cost": 1544.3002404911922
     },
     "3": {
       "fitness": 206370.13343722527,
@@ -509,5 +509,31 @@
   },
   "best_fitness": 206370.13343722527,
   "best_cost": 1370.1334372252677,
-  "best_service_rate": 0.4
+  "best_service_rate": 0.4,
+  "bandit_stats": {
+    "destroy": {
+      "random": {
+        "count": 4905,
+        "avg_reward": 10.422940402875703
+      },
+      "worst_cost": {
+        "count": 93,
+        "avg_reward": 1.8026149867134424
+      },
+      "spatial_cluster": {
+        "count": 2,
+        "avg_reward": 0.0
+      }
+    },
+    "repair": {
+      "greedy": {
+        "count": 3,
+        "avg_reward": 0.0
+      },
+      "best_insertion": {
+        "count": 4997,
+        "avg_reward": 10.264591929131413
+      }
+    }
+  }
 }

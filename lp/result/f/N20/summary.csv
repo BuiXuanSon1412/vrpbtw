@@ -1,0 +1,4 @@
+Distribution,Objective,Objective_Error,Cost,Cost_Error,Service_Rate,Service_Rate_Error
+C,82597.28,±22.71,402.72,±22.71,1.0000,±0.0000
+R,81197.66,±1706.06,972.34,±59.07,0.9900,±0.0200
+RC,82217.38,±103.84,782.62,±103.84,1.0000,±0.0000

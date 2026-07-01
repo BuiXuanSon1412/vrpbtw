@@ -12,7 +12,7 @@
 # 3. Graph encoding (multi-relational GNN)
 
 network:
-  name: geman
+  name: para_geman
   layers:
     encoder:
       node_encoder:

@@ -1161,8 +1161,8 @@ class VRPBTWEnv(Environment):
 
         delta_served = float(curr_served > prev_served)
         delta_cost = curr_cost - prev_cost
-        max_cost = 2.0 * self.max_coord * max(self.c_t, self.c_d)
-        reward = delta_served - 0.1 * (delta_cost / max_cost)
+        max_cost = 2.0 * self.max_coord * max(self.c_t, self.c_d) + self.c_b
+        reward = delta_served - 1 * (delta_cost / max_cost)
 
         next_mask = (
             self.get_action_mask(state)

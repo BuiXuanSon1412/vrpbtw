@@ -1,10 +1,11 @@
 import argparse
 import json
+import math
 import random
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Any, Optional, cast
+from typing import Dict, Any, Optional, cast, Tuple
 
 from problem import Problem, Solution, Individual
 from utils import decode, cal_fitness, init_population, get_data_files, save_result
@@ -179,6 +180,72 @@ class RepairBestInsertion(RepairOperator):
         return repaired
 
 
+class BanditSelector:
+    """UCB-based adaptive operator selection."""
+
+    def __init__(self, destroy_ops: Dict[str, DestroyOperator],
+                 repair_ops: Dict[str, RepairOperator], c: float = 1.414):
+        self.destroy_names = list(destroy_ops.keys())
+        self.repair_names = list(repair_ops.keys())
+        self.c = c
+
+        # Track rewards and counts for each operator
+        self.destroy_rewards = {name: 0.0 for name in self.destroy_names}
+        self.destroy_counts = {name: 0 for name in self.destroy_names}
+        self.repair_rewards = {name: 0.0 for name in self.repair_names}
+        self.repair_counts = {name: 0 for name in self.repair_names}
+
+        self.total_iterations = 0
+
+    def select(self) -> Tuple[str, str]:
+        """Select destroy and repair operators using UCB."""
+        destroy_name = self._select_ucb(self.destroy_names, self.destroy_counts,
+                                       self.destroy_rewards)
+        repair_name = self._select_ucb(self.repair_names, self.repair_counts,
+                                      self.repair_rewards)
+        return destroy_name, repair_name
+
+    def _select_ucb(self, names: list, counts: Dict[str, int],
+                   rewards: Dict[str, float]) -> str:
+        """UCB selection: balance exploitation and exploration."""
+        if self.total_iterations == 0:
+            return random.choice(names)
+
+        ucb_scores = {}
+        for name in names:
+            exploitation = rewards[name] / max(counts[name], 1)
+            exploration = self.c * math.sqrt(math.log(self.total_iterations) / max(counts[name], 1))
+            ucb_scores[name] = exploitation + exploration
+
+        return max(ucb_scores, key=ucb_scores.get)
+
+    def update(self, destroy_name: str, repair_name: str, reward: float):
+        """Update rewards after operator application."""
+        self.destroy_counts[destroy_name] += 1
+        self.repair_counts[repair_name] += 1
+        self.destroy_rewards[destroy_name] += reward
+        self.repair_rewards[repair_name] += reward
+        self.total_iterations += 1
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return operator statistics."""
+        destroy_stats = {
+            name: {
+                "count": self.destroy_counts[name],
+                "avg_reward": self.destroy_rewards[name] / max(self.destroy_counts[name], 1),
+            }
+            for name in self.destroy_names
+        }
+        repair_stats = {
+            name: {
+                "count": self.repair_counts[name],
+                "avg_reward": self.repair_rewards[name] / max(self.repair_counts[name], 1),
+            }
+            for name in self.repair_names
+        }
+        return {"destroy": destroy_stats, "repair": repair_stats}
+
+
 def get_destroy_operators(problem: Problem) -> Dict[str, DestroyOperator]:
     """Get dictionary of all destroy operators."""
     return {
@@ -212,6 +279,7 @@ class LNSSolver:
         # Initialize operators
         self.destroy_ops = get_destroy_operators(problem)
         self.repair_ops = get_repair_operators(problem)
+        self.bandit = BanditSelector(self.destroy_ops, self.repair_ops, c=1.414)
 
         # Initial solution: use best from larger population (better starting point)
         if initial_solution is None:
@@ -246,14 +314,9 @@ class LNSSolver:
         self.destroy_size = self.destroy_size_min
 
     def local_search(self, indi: Individual, max_iterations: int = 50) -> Individual:
-        """Apply LNS with destroy-repair and simulated annealing acceptance."""
-        import math
-
+        """Apply LNS with destroy-repair, simulated annealing, and bandit-based operator selection."""
         best = deepcopy(indi)
         best_fitness, _, _ = cal_fitness(self.problem, best)
-
-        destroy_ops_list = list(self.destroy_ops.values())
-        repair_ops_list = list(self.repair_ops.values())
 
         stagnation_count = 0
         temperature = 1.0
@@ -266,9 +329,10 @@ class LNSSolver:
             else:
                 self.destroy_size = max(self.destroy_size_min, self.destroy_size - 0.5)
 
-            # Randomly choose destroy and repair operators
-            destroy_op = random.choice(destroy_ops_list)
-            repair_op = random.choice(repair_ops_list)
+            # Bandit-based operator selection
+            destroy_name, repair_name = self.bandit.select()
+            destroy_op = self.destroy_ops[destroy_name]
+            repair_op = self.repair_ops[repair_name]
 
             # Destroy and repair
             try:
@@ -277,10 +341,14 @@ class LNSSolver:
                 fitness, sr, cost = cal_fitness(self.problem, repaired)
             except:
                 stagnation_count += 1
+                self.bandit.update(destroy_name, repair_name, 0.0)
                 continue
 
-            # Simulated annealing acceptance
+            # Calculate reward: normalized fitness improvement
             delta = fitness - best_fitness
+            reward = max(0.0, delta)  # Non-negative reward for improvement
+
+            # Simulated annealing acceptance
             if delta > 0:  # Better solution - always accept
                 best = deepcopy(repaired)
                 best_fitness = fitness
@@ -292,6 +360,9 @@ class LNSSolver:
                 stagnation_count += 1
             else:
                 stagnation_count += 1
+
+            # Update bandit with reward
+            self.bandit.update(destroy_name, repair_name, reward)
 
             # Cool down temperature
             temperature *= 0.95
@@ -378,12 +449,25 @@ class LNSSolver:
 
         end_time = time.time()
 
+        bandit_stats = self.bandit.get_stats()
+
+        if verbose:
+            print(f"\n{'=' * 60}")
+            print("Bandit Operator Statistics:")
+            print(f"{'=' * 60}")
+            for op_type, stats in bandit_stats.items():
+                print(f"\n{op_type.upper()} Operators:")
+                for name, metrics in stats.items():
+                    print(f"  {name:20s}: count={metrics['count']:4d}, "
+                          f"avg_reward={metrics['avg_reward']:8.4f}")
+
         return {
             "time": end_time - start_time,
             "history": history,
             "best_fitness": self.best_fitness,
             "best_cost": self.best_cost,
             "best_service_rate": self.best_sr,
+            "bandit_stats": bandit_stats,
         }
 
     def decode_best(self) -> Solution:

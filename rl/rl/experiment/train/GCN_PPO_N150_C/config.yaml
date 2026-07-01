@@ -1,0 +1,9 @@
+{
+  "experiment": "GCN_PPO_N150_C",
+  "size": "N150",
+  "distribution": "C",
+  "sr_initial": 0.4,
+  "sr_final": 0.86,
+  "estimated_cost": 5525.0,
+  "n_epochs": 100
+}

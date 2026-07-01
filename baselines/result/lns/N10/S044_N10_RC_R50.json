@@ -1,5 +1,5 @@
 {
-  "time": 3.9375619888305664,
+  "time": 4.15205454826355,
   "history": {
     "0": {
       "fitness": 13014.203968450958,
@@ -509,5 +509,31 @@
   },
   "best_fitness": 13014.203968450958,
   "best_cost": 414.2039684509589,
-  "best_service_rate": 0.6
+  "best_service_rate": 0.6,
+  "bandit_stats": {
+    "destroy": {
+      "random": {
+        "count": 1667,
+        "avg_reward": 0.0
+      },
+      "worst_cost": {
+        "count": 1667,
+        "avg_reward": 0.0
+      },
+      "spatial_cluster": {
+        "count": 1666,
+        "avg_reward": 0.0
+      }
+    },
+    "repair": {
+      "greedy": {
+        "count": 2500,
+        "avg_reward": 0.0
+      },
+      "best_insertion": {
+        "count": 2500,
+        "avg_reward": 0.0
+      }
+    }
+  }
 }

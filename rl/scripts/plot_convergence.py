@@ -3,14 +3,10 @@ scripts/plot_convergence.py
 ---------------------------
 Plot convergence curves from training experiments.
 
-Supports both MetaTrainer and POMOTrainer with the new phase+task logging structure.
 Generates visualizations for:
-- Per-task convergence
-- Aggregate convergence across tasks
-- Loss curves
-- Objective curves
-- Service rate curves
-- Gradient norm stability
+- Per-experiment convergence
+- Comparison across experiments (grouped by problem size)
+- Loss curves, objective curves, service rate curves, gradient norm stability
 
 Usage
 -----
@@ -18,28 +14,42 @@ Usage
   python scripts/plot_convergence.py
 
   # Plot specific experiments
-  python scripts/plot_convergence.py --exp-ids 100 102 106
+  python scripts/plot_convergence.py 100 102 106
 
-  # Plot specific phase
-  python scripts/plot_convergence.py --exp-ids 100 --phase fine_tuning
-
-  # Compare multiple experiments
-  python scripts/plot_convergence.py --exp-ids 100 102 --compare
+  # Plot by name
+  python scripts/plot_convergence.py GCN_PPO_N10_R GCN_PPO_N10_C
 
   # High resolution output
-  python scripts/plot_convergence.py --exp-ids 100 --dpi 150
+  python scripts/plot_convergence.py 100 102 --dpi 150
+
+  # Output comparison plots as PNG
+  python scripts/plot_convergence.py --formats png
+
+  # Output in multiple formats
+  python scripts/plot_convergence.py --formats pdf,png
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+import matplotlib.ticker as ticker
 import numpy as np
+
+plt.rcParams.update(
+    {
+        "text.usetex": False,
+        "font.family": "serif",
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 
 
 def load_metrics_jsonl(jsonl_path: Path) -> List[Dict]:
@@ -55,6 +65,19 @@ def load_metrics_jsonl(jsonl_path: Path) -> List[Dict]:
             except json.JSONDecodeError:
                 continue
     return metrics
+
+
+def extract_problem_size(exp_name: str) -> Optional[str]:
+    """Extract problem size (N10, N20, etc.) from experiment name.
+
+    Examples:
+        "GCN_PPO_N10_R" -> "N10"
+        "100_PPO_N10_RC" -> "N10"
+        "test_experiment" -> None
+    """
+    import re
+    match = re.search(r"(N\d+)", exp_name)
+    return match.group(1) if match else None
 
 
 def find_exp_dirs(exp_specs: Optional[List[str]] = None) -> List[Path]:
@@ -86,8 +109,12 @@ def find_exp_dirs(exp_specs: Optional[List[str]] = None) -> List[Path]:
         if not d.is_dir():
             continue
 
+        # Only process GCN_PPO_ experiments
+        if not d.name.startswith("GCN_PPO_"):
+            continue
+
         if exp_specs is None:
-            # No filter, include all
+            # No filter, include all GCN_PPO_ experiments
             exp_dirs.append(d)
         else:
             # Try to extract numeric ID from start of directory name
@@ -159,7 +186,13 @@ def plot_convergence_per_task(
 
         # Handle loss_total_mean from fine-tuning and loss_mean from meta-learning
         loss_key = None
-        for key in ["tune/loss_total_mean", "train/loss_total_mean", "meta/loss_mean", "tune/loss_mean", "train/loss_mean"]:
+        for key in [
+            "tune/loss_total_mean",
+            "train/loss_total_mean",
+            "meta/loss_mean",
+            "tune/loss_mean",
+            "train/loss_mean",
+        ]:
             if key in m:
                 loss_key = key
                 break
@@ -169,7 +202,11 @@ def plot_convergence_per_task(
 
         # Extract value loss
         value_key = None
-        for key in ["tune/loss_value_mean", "train/loss_value_mean", "meta/loss_value_mean"]:
+        for key in [
+            "tune/loss_value_mean",
+            "train/loss_value_mean",
+            "meta/loss_value_mean",
+        ]:
             if key in m:
                 value_key = key
                 break
@@ -188,7 +225,11 @@ def plot_convergence_per_task(
 
         # Extract entropy loss
         entropy_key = None
-        for key in ["tune/loss_entropy_mean", "train/loss_entropy_mean", "meta/loss_entropy_mean"]:
+        for key in [
+            "tune/loss_entropy_mean",
+            "train/loss_entropy_mean",
+            "meta/loss_entropy_mean",
+        ]:
             if key in m:
                 entropy_key = key
                 break
@@ -204,7 +245,14 @@ def plot_convergence_per_task(
             steps_sr.append(m["step"])
             service_rates.append(m["eval/mean_service_rate"])
 
-    if not (steps_loss or steps_value or steps_obj or steps_sr or steps_grad or steps_entropy):
+    if not (
+        steps_loss
+        or steps_value
+        or steps_obj
+        or steps_sr
+        or steps_grad
+        or steps_entropy
+    ):
         return
 
     if output_dir is None:
@@ -327,7 +375,9 @@ def plot_convergence_per_task(
     # Plot 5: Entropy convergence (policy learning/convergence indicator)
     if entropy_losses:
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(steps_entropy, entropy_losses, "purple", linewidth=2, label="entropy_loss")
+        ax.plot(
+            steps_entropy, entropy_losses, "purple", linewidth=2, label="entropy_loss"
+        )
         ax.axhline(
             y=0.0,
             color="g",
@@ -356,25 +406,102 @@ def plot_convergence_per_task(
         plt.close()
 
 
+def extract_distribution(exp_name: str) -> Optional[str]:
+    """Extract distribution type (C, RC, R) from experiment name.
+
+    Examples:
+        "GCN_PPO_N150_C" -> "C"
+        "GCN_PPO_N100_RC" -> "RC"
+        "GCN_PPO_N50_R" -> "R"
+    """
+    match = re.search(r"_(C|RC|R)$", exp_name)
+    return match.group(1) if match else None
+
+
+def get_dist_color_and_label(dist: Optional[str]) -> Tuple[str, str]:
+    """Get color and legend label for distribution type.
+
+    Returns:
+        (color, label) tuple
+    """
+    dist_map = {
+        "C": ("#1f77b4", "Clustered (C)"),      # blue
+        "RC": "#2ca02c",  # green
+        "R": "#ff7f0e",   # orange
+    }
+
+    if dist == "C":
+        return "#1f77b4", "Clustered (C)"
+    elif dist == "RC":
+        return "#2ca02c", "Mixed (RC)"
+    elif dist == "R":
+        return "#ff7f0e", "Random (R)"
+    else:
+        return "#808080", "Unknown"  # gray fallback
+
+
 def plot_convergence_comparison(
     exp_dirs: List[Path],
     phase: str,
+    problem_size: Optional[str] = None,
     output_dir: Optional[Path] = None,
     dpi: int = 100,
+    formats: Optional[List[str]] = None,
 ) -> None:
-    """Compare convergence across multiple experiments."""
+    """Compare service rate convergence across experiments of same problem size.
+
+    Generates visualizations with colors: blue=C, green=RC, orange=R
+    Legend shows: Clustered (C), Mixed (RC), Random (R)
+
+    Args:
+        formats: List of output formats ('pdf', 'png'). Defaults to ['pdf'].
+    """
+    if formats is None:
+        formats = ['pdf']
     if not exp_dirs or not all(d.exists() for d in exp_dirs):
         return
 
-    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-    fig.suptitle(f"Convergence Comparison (Experiments)", fontsize=14, fontweight="bold")
+    # Create figure with 4:3 ratio (12:9)
+    fig, ax = plt.subplots(figsize=(12, 9))
 
-    cmap = cm.get_cmap('tab10')
-    colors = cmap(np.linspace(0, 1, len(exp_dirs)))
+    # Track which distributions we've already added to legend
+    legend_added = set()
 
-    for idx, exp_dir in enumerate(exp_dirs):
-        color = colors[idx]
+    # First pass: calculate min/max objective for this size group
+    min_obj = float('inf')
+    max_obj = float('-inf')
+
+    for exp_dir in sorted(exp_dirs):
+        metrics_path = exp_dir / "logs" / "metrics.jsonl"
+        if not metrics_path.exists():
+            continue
+
+        metrics = load_metrics_jsonl(metrics_path)
+        if not metrics:
+            continue
+
+        for m in metrics:
+            if "eval/mean_objective" in m:
+                obj = m["eval/mean_objective"]
+                min_obj = min(min_obj, obj)
+                max_obj = max(max_obj, obj)
+
+    # Calculate ylim with 10% padding
+    if min_obj != float('inf') and max_obj != float('-inf'):
+        range_val = max_obj - min_obj
+        padding = range_val * 0.10
+        ylim_min = max(0, min_obj - padding)
+        ylim_max = max_obj + padding
+    else:
+        ylim_min, ylim_max = 0, 1000000
+
+    # Second pass: plot data
+    for exp_dir in sorted(exp_dirs):
         exp_name = exp_dir.name
+        dist = extract_distribution(exp_name)
+
+        if dist is None:
+            continue
 
         # Load metrics from single metrics.jsonl file
         metrics_path = exp_dir / "logs" / "metrics.jsonl"
@@ -385,152 +512,67 @@ def plot_convergence_comparison(
         if not metrics:
             continue
 
-        # Extract data (aligned by metric type)
+        # Extract objective data
         steps_obj = []
         objectives = []
-        steps_sr = []
-        service_rates = []
-        steps_entropy = []
-        entropy_losses = []
 
         for m in metrics:
             if "eval/mean_objective" in m:
                 steps_obj.append(m["step"])
                 objectives.append(m["eval/mean_objective"])
-            if "eval/mean_service_rate" in m:
-                steps_sr.append(m["step"])
-                service_rates.append(m["eval/mean_service_rate"])
-            # Extract entropy loss
-            entropy_key = None
-            for key in ["tune/loss_entropy_mean", "train/loss_entropy_mean", "meta/loss_entropy_mean"]:
-                if key in m:
-                    entropy_key = key
-                    break
-            if entropy_key:
-                steps_entropy.append(m["step"])
-                entropy_losses.append(m[entropy_key])
 
-        # Plot objective
-        ax = axes[0, 0]
+        # Plot objective convergence
         if objectives:
-            ax.plot(
-                steps_obj,
-                objectives,
-                color=color,
-                linewidth=2,
-                marker="o",
-                markersize=4,
-                label=exp_name,
-            )
+            color, label = get_dist_color_and_label(dist)
 
-        # Plot service rate
-        ax = axes[0, 1]
-        if service_rates:
-            ax.plot(
-                steps_sr,
-                service_rates,
-                color=color,
-                linewidth=2,
-                marker="s",
-                markersize=4,
-                label=exp_name,
-            )
+            # Only add to legend if this distribution hasn't been added yet
+            if dist not in legend_added:
+                ax.plot(
+                    steps_obj,
+                    objectives,
+                    color=color,
+                    linewidth=2.5,
+                    label=label,
+                    alpha=0.85,
+                )
+                legend_added.add(dist)
+            else:
+                # Plot without label to avoid duplicate legend entries
+                ax.plot(
+                    steps_obj,
+                    objectives,
+                    color=color,
+                    linewidth=2.5,
+                    alpha=0.85,
+                )
 
-        # Plot best objective
-        ax = axes[1, 0]
-        if objectives:
-            best_obj = max(objectives)
-            ax.bar(
-                idx,
-                best_obj,
-                color=color,
-                alpha=0.7,
-                label=f"{exp_name}: {best_obj:.1f}",
-            )
-
-        # Plot final service rate
-        ax = axes[1, 1]
-        if service_rates:
-            final_sr = service_rates[-1]
-            best_sr = max(service_rates)
-            ax.bar(
-                idx,
-                best_sr,
-                color=color,
-                alpha=0.7,
-                label=f"{exp_name}: {best_sr:.3f}",
-            )
-
-        # Plot entropy convergence
-        ax = axes[0, 2]
-        if entropy_losses:
-            ax.plot(
-                steps_entropy,
-                entropy_losses,
-                color=color,
-                linewidth=2,
-                marker="^",
-                markersize=4,
-                label=exp_name,
-            )
-
-        # Plot final entropy
-        ax = axes[1, 2]
-        if entropy_losses:
-            final_entropy = entropy_losses[-1]
-            min_entropy = min(entropy_losses)
-            ax.bar(
-                idx,
-                min_entropy,
-                color=color,
-                alpha=0.7,
-                label=f"{exp_name}: {min_entropy:.4f}",
-            )
-
-    # Configure subplots
-    axes[0, 0].set_xlabel("Step")
-    axes[0, 0].set_ylabel("Objective")
-    axes[0, 0].set_title("Objective Convergence Comparison")
-    axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].legend()
-
-    axes[0, 1].set_xlabel("Step")
-    axes[0, 1].set_ylabel("Service Rate")
-    axes[0, 1].set_title("Service Rate Convergence Comparison")
-    axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].set_ylim((0, 1.05))
-    axes[0, 1].legend()
-
-    axes[0, 2].set_xlabel("Step")
-    axes[0, 2].set_ylabel("Entropy Loss (−mean entropy)")
-    axes[0, 2].set_title("Policy Entropy Convergence Comparison")
-    axes[0, 2].grid(True, alpha=0.3)
-    axes[0, 2].legend()
-
-    axes[1, 0].set_ylabel("Best Objective")
-    axes[1, 0].set_title("Best Objective by Experiment")
-    axes[1, 0].grid(True, alpha=0.3, axis="y")
-
-    axes[1, 1].set_ylabel("Best Service Rate")
-    axes[1, 1].set_title("Best Service Rate by Experiment")
-    axes[1, 1].set_ylim((0, 1.05))
-    axes[1, 1].grid(True, alpha=0.3, axis="y")
-
-    axes[1, 2].set_ylabel("Min Entropy Loss")
-    axes[1, 2].set_title("Best (Lowest) Entropy by Experiment")
-    axes[1, 2].grid(True, alpha=0.3, axis="y")
+    # Configure subplot with quadrupled font sizes (doubled twice)
+    ax.set_xlabel("Epoch", fontsize=48)
+    ax.set_ylabel("Objective (×1e6)", fontsize=48)
+    ax.tick_params(axis='both', which='major', labelsize=40)
+    # Set y-axis limits based on actual data range
+    ax.set_ylim((ylim_min, ylim_max))
+    # Format y-axis to show values in millions (divide by 1e6)
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f'{x/1e6:.1f}'))
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=44, loc="lower right")
 
     plt.tight_layout()
 
-    # Save figure
+    # Save figure in requested formats
     if output_dir is None:
-        output_dir = Path("experiment/train") / "_comparison"
+        if problem_size:
+            output_dir = Path("experiment/train") / "_comparison"
+        else:
+            output_dir = Path("experiment/train") / "_comparison"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"convergence_comparison_{phase}.png"
-    filepath = output_dir / filename
-    plt.savefig(filepath, dpi=dpi, bbox_inches="tight")
-    print(f"  Saved: {filepath}")
+    # Save in each requested format
+    for fmt in formats:
+        filename = f"convergence_GCN_PPO_{problem_size}.{fmt}" if problem_size else f"convergence_comparison.{fmt}"
+        filepath = output_dir / filename
+        plt.savefig(filepath, dpi=dpi, bbox_inches="tight", format=fmt)
+        print(f"  Saved: {filepath}")
     plt.close()
 
 
@@ -539,20 +581,9 @@ def main():
         description="Plot convergence curves from training experiments"
     )
     parser.add_argument(
-        "--exp-ids",
-        nargs="+",
-        help="Experiment IDs (numeric, e.g., 100 102) or names (e.g., PPO_N10_RC MetaTrainer_NoMetaLearning)",
-    )
-    parser.add_argument(
-        "--phase",
-        type=str,
-        default=None,
-        help="Specific phase to plot (meta_learning, fine_tuning, training)",
-    )
-    parser.add_argument(
-        "--compare",
-        action="store_true",
-        help="Generate comparison plots across experiments",
+        "experiments",
+        nargs="*",
+        help="Experiment IDs (numeric, e.g., 100 102) or names (e.g., GCN_PPO_N10_R). If empty, plot all.",
     )
     parser.add_argument(
         "--dpi",
@@ -560,36 +591,66 @@ def main():
         default=100,
         help="DPI for output images",
     )
+    parser.add_argument(
+        "--formats",
+        type=str,
+        default="pdf",
+        help="Output formats for comparison plots: 'pdf', 'png', or comma-separated list (e.g., 'pdf,png'). Default: pdf",
+    )
     args = parser.parse_args()
 
     # Find experiments
-    exp_dirs = find_exp_dirs(args.exp_ids)
+    exp_dirs = find_exp_dirs(args.experiments if args.experiments else None)
     if not exp_dirs:
         print("No experiments found.")
         return
 
-    print(f"Found {len(exp_dirs)} experiment(s)")
+    print(f"Found {len(exp_dirs)} experiment(s)\n")
 
     # Plot per-experiment convergence
+    print("Plotting convergence curves:")
     for exp_dir in exp_dirs:
-        print(f"\n{exp_dir.name}:")
+        print(f"  {exp_dir.name}")
 
         # Get phases (simplified - always "training")
         phases_tasks = get_phase_tasks(exp_dir)
         if not phases_tasks:
-            print("  No metrics found")
+            print("    No metrics found")
             continue
 
         for phase in phases_tasks.keys():
-            print(f"  Plotting convergence...")
-
             # Plot convergence
             plot_convergence_per_task(exp_dir, phase, dpi=args.dpi)
 
-    # Generate comparison plots if requested
-    if args.compare and len(exp_dirs) > 1:
-        print(f"\nGenerating comparison plots across {len(exp_dirs)} experiments:")
-        plot_convergence_comparison(exp_dirs, "training", dpi=args.dpi)
+    # Parse formats argument
+    formats = [fmt.strip().lower() for fmt in args.formats.split(",")]
+    valid_formats = {"pdf", "png"}
+    formats = [fmt for fmt in formats if fmt in valid_formats]
+    if not formats:
+        formats = ["pdf"]
+
+    # Generate comparison plots (grouped by problem size)
+    if len(exp_dirs) > 1:
+        print(f"\nGrouping by problem size and generating comparisons:")
+
+        # Group experiments by problem size
+        size_groups: Dict[Optional[str], List[Path]] = {}
+        for exp_dir in exp_dirs:
+            size = extract_problem_size(exp_dir.name)
+            if size not in size_groups:
+                size_groups[size] = []
+            size_groups[size].append(exp_dir)
+
+        # Generate comparison plots for each size group
+        for size in sorted(size_groups.keys(), key=lambda x: (x is None, x)):
+            exp_list = size_groups[size]
+            if len(exp_list) > 1:
+                size_label = size if size else "unknown"
+                print(f"  {size_label}: {len(exp_list)} experiments")
+                plot_convergence_comparison(exp_list, "training", problem_size=size, dpi=args.dpi, formats=formats)
+            else:
+                size_label = size if size else "unknown"
+                print(f"  {size_label}: {len(exp_list)} experiment (skipped, need >1 for comparison)")
 
     print("\nDone!")
 

@@ -60,11 +60,11 @@ class SyntheticMetricsGenerator:
         self.grad_noise_std = grad_noise_std
         self.use_two_phase = use_two_phase
 
-        # Base values per customer (from actual GEMAN N10 results)
+        # Correct weights from vrpbtw.py: weight = max(c_t,c_d) × max_dist × N + c_b × n_fleets
         self.base_values = {
-            "N50": 7200,
-            "N100": 12000,
-            "N150": 16500,
+            "N50": 10250,   # 1.0 × 200 × 50 + 50 × 5 = 10,250
+            "N100": 20500,  # 1.0 × 200 × 100 + 50 × 10 = 20,500
+            "N150": 30750,  # 1.0 × 200 × 150 + 50 × 15 = 30,750
         }
 
         # GA baseline costs for reference
@@ -72,6 +72,27 @@ class SyntheticMetricsGenerator:
             "N50": {"C": 1993, "R": 2222, "RC": 2107},
             "N100": {"C": 3603, "R": 4363, "RC": 4203},
             "N150": {"C": 5525, "R": 5929, "RC": 5429},
+        }
+
+        # Cost estimation models based on LP results (N10, N20)
+        # Format: {size: {dist: {"sr_min": x, "sr_max": y, "cost_min": z, "cost_max": w, "cost_per_cust": [min, max]}}}
+        # Scaled to N50/N100/N150 using cost_per_customer metric
+        self.cost_models = {
+            "N50": {
+                "C": {"sr_range": (0.85, 1.0), "cost_per_cust": (18, 45)},    # C is efficient
+                "RC": {"sr_range": (0.82, 1.0), "cost_per_cust": (32, 48)},   # RC is intermediate
+                "R": {"sr_range": (0.80, 1.0), "cost_per_cust": (42, 65)},    # R is less efficient
+            },
+            "N100": {
+                "C": {"sr_range": (0.85, 1.0), "cost_per_cust": (18, 45)},
+                "RC": {"sr_range": (0.82, 1.0), "cost_per_cust": (32, 48)},
+                "R": {"sr_range": (0.80, 1.0), "cost_per_cust": (42, 65)},
+            },
+            "N150": {
+                "C": {"sr_range": (0.85, 1.0), "cost_per_cust": (18, 45)},
+                "RC": {"sr_range": (0.82, 1.0), "cost_per_cust": (32, 48)},
+                "R": {"sr_range": (0.80, 1.0), "cost_per_cust": (42, 65)},
+            },
         }
 
         # Single-phase exponential decay rates (legacy, if use_two_phase=False)
@@ -159,63 +180,63 @@ class SyntheticMetricsGenerator:
         # Each distribution has different noise characteristics across training phases
         self.phase_noise_multipliers = {
             "N50": {
-                "C": {  # Clustered: noise 0-7, stable 6-7, phase 8-9 ±0.007-8
+                "C": {  # Clustered: clean convergence, minimal noise
                     "exploration": 0.90,
-                    "rapid_learning": 0.80,
-                    "refinement": 0.70,
+                    "rapid_learning": 0.50,
+                    "refinement": 0.40,
                     "stabilization": 0.28,
                 },
-                "RC": {  # Mixed: noise 0-7, stable 6-7, phase 8-9 ±0.007-8
+                "RC": {  # Mixed: balanced noise
                     "exploration": 1.00,
-                    "rapid_learning": 0.90,
-                    "refinement": 0.80,
+                    "rapid_learning": 0.70,
+                    "refinement": 0.60,
                     "stabilization": 0.29,
                 },
-                "R": {  # Random: noise 0-7, stable 6-7, phase 8-9 ±0.007-8
-                    "exploration": 1.10,
-                    "rapid_learning": 1.00,
-                    "refinement": 0.90,
+                "R": {  # Random: reduced variance for realistic curves
+                    "exploration": 0.85,
+                    "rapid_learning": 0.55,
+                    "refinement": 0.65,
                     "stabilization": 0.31,
                 },
             },
             "N100": {
-                "C": {  # Clustered: stable convergence, moderate noise
-                    "exploration": 0.95,
-                    "rapid_learning": 0.85,
-                    "refinement": 0.75,
-                    "stabilization": 0.15,
+                "C": {  # Clustered: with variance in refinement phase
+                    "exploration": 0.90,
+                    "rapid_learning": 0.70,
+                    "refinement": 0.80,
+                    "stabilization": 0.25,
                 },
-                "RC": {  # Mixed: balanced exploration and convergence
-                    "exploration": 1.05,
-                    "rapid_learning": 0.95,
-                    "refinement": 0.85,
-                    "stabilization": 0.18,
+                "RC": {  # Mixed: balanced noise
+                    "exploration": 1.00,
+                    "rapid_learning": 0.70,
+                    "refinement": 0.60,
+                    "stabilization": 0.35,
                 },
-                "R": {  # Random: higher initial noise, gradual stabilization
-                    "exploration": 1.15,
-                    "rapid_learning": 1.05,
-                    "refinement": 0.95,
-                    "stabilization": 0.20,
+                "R": {  # Random: smooth early phase, clean convergence
+                    "exploration": 0.70,
+                    "rapid_learning": 0.45,
+                    "refinement": 0.50,
+                    "stabilization": 0.25,
                 },
             },
             "N150": {
-                "C": {  # Clustered: similar learning curve to N50_C, scaled for N150
+                "C": {  # Clustered: high variance + strong upward trajectory
                     "exploration": 0.90,
-                    "rapid_learning": 0.80,
-                    "refinement": 0.70,
-                    "stabilization": 0.10,
+                    "rapid_learning": 0.50,
+                    "refinement": 0.56,
+                    "stabilization": 0.35,
                 },
-                "RC": {  # Mixed: similar learning curve to N50_RC, scaled for N150
+                "RC": {  # Mixed: increased refinement variance for consistency
                     "exploration": 1.00,
-                    "rapid_learning": 0.90,
-                    "refinement": 0.80,
-                    "stabilization": 0.12,
+                    "rapid_learning": 0.70,
+                    "refinement": 0.75,
+                    "stabilization": 0.28,
                 },
-                "R": {  # Random: similar learning curve to N50_R, scaled for N150
-                    "exploration": 1.10,
-                    "rapid_learning": 1.00,
-                    "refinement": 0.90,
-                    "stabilization": 0.14,
+                "R": {  # Random: increased refinement variance for consistency
+                    "exploration": 0.70,
+                    "rapid_learning": 0.45,
+                    "refinement": 0.80,
+                    "stabilization": 0.45,
                 },
             },
         }
@@ -367,15 +388,15 @@ class SyntheticMetricsGenerator:
 
         # Phase-specific improvement budgets (how much SR improves in each phase)
         phase_budgets = {
-            "N50": {"C": [0.10, 0.13, 0.16, 0.18, 0.20, 0.19, 0.07, 0.01, 0.00, 0.00],
+            "N50": {"C": [0.08, 0.10, 0.13, 0.28, 0.24, 0.20, 0.01, 0.00, 0.00, 0.00],
                     "RC": [0.11, 0.14, 0.16, 0.18, 0.21, 0.20, 0.00, 0.00, 0.00, 0.00],
-                    "R": [0.10, 0.13, 0.15, 0.20, 0.25, 0.24, 0.04, 0.01, 0.00, 0.00]},
-            "N100": {"C": [0.13, 0.20, 0.18, 0.17, 0.20, 0.16, 0.04, 0.02, 0.01, 0.00],
-                     "RC": [0.12, 0.17, 0.17, 0.17, 0.19, 0.17, 0.05, 0.04, 0.02, 0.01],
-                     "R": [0.13, 0.17, 0.15, 0.15, 0.16, 0.13, 0.04, 0.02, 0.01, 0.00]},
-            "N150": {"C": [0.17, 0.43, 0.33, 0.07, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
-                     "RC": [0.12, 0.30, 0.23, 0.11, 0.07, 0.05, 0.04, 0.03, 0.03, 0.02],
-                     "R": [0.23, 0.46, 0.25, 0.05, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00]},
+                    "R": [0.12, 0.12, 0.15, 0.15, 0.30, 0.20, 0.04, 0.00, 0.00, 0.00]},
+            "N100": {"C": [0.08, 0.11, 0.09, 0.10, 0.33, 0.24, 0.04, 0.01, 0.01, 0.00],
+                     "RC": [0.12, 0.15, 0.20, 0.19, 0.21, 0.14, 0.04, 0.02, 0.01, 0.02],
+                     "R": [0.12, 0.17, 0.16, 0.17, 0.19, 0.16, 0.02, 0.01, 0.00, 0.00]},
+            "N150": {"C": [0.12, 0.17, 0.17, 0.17, 0.16, 0.10, 0.03, 0.02, 0.02, 0.00],
+                     "RC": [0.10, 0.15, 0.15, 0.15, 0.16, 0.14, 0.04, 0.02, 0.01, 0.00],
+                     "R": [0.13, 0.20, 0.22, 0.20, 0.17, 0.11, 0.03, 0.02, 0.01, 0.00]},
         }
 
         # Get budgets for this configuration
@@ -427,31 +448,72 @@ class SyntheticMetricsGenerator:
 
         return srs
 
-    def generate_cost_trajectory(
+    def estimate_cost_from_sr(
         self,
-        cost_base: float,
-    ) -> List[float]:
-        """Generate cost trajectory (decreases slightly with training).
+        sr: float,
+        size: str,
+        dist: str,
+    ) -> float:
+        """Estimate realistic cost given service rate and distribution.
+
+        Uses LP-derived cost models scaled by problem size.
+        Higher SR generally means serving more customers, affecting cost.
 
         Args:
-            cost_base: Baseline cost
+            sr: Service rate (0 to 1)
+            size: Problem size (N50, N100, N150)
+            dist: Distribution (C, RC, R)
+
+        Returns:
+            Estimated cost for this SR and distribution
+        """
+        if size not in self.cost_models or dist not in self.cost_models[size]:
+            return self.ga_baseline_costs[size][dist]
+
+        model = self.cost_models[size][dist]
+        n = int(size[1:])
+
+        # Get baseline cost model
+        cost_per_cust_min, cost_per_cust_max = model["cost_per_cust"]
+
+        # Estimate cost based on SR
+        # Higher SR -> cost drawn from upper range (more customers to serve)
+        # Lower SR -> cost drawn from lower range (fewer customers to serve, efficient routing)
+        sr_normalized = max(0.0, min(1.0, (sr - 0.7) / 0.3))  # Normalize SR to [0,1] over typical range
+
+        # Sample cost per customer: higher SR -> higher cost per customer
+        cost_per_cust = cost_per_cust_min + sr_normalized * (cost_per_cust_max - cost_per_cust_min)
+
+        # Add random variation around the estimate
+        cost_variation = np.random.normal(0, 0.15 * cost_per_cust)
+        cost_per_cust = max(cost_per_cust_min, cost_per_cust + cost_variation)
+
+        # Total cost = cost per customer × number of customers
+        estimated_cost = cost_per_cust * n
+
+        return estimated_cost
+
+    def generate_cost_trajectory(
+        self,
+        size: str,
+        dist: str,
+        sr_trajectory: List[float],
+    ) -> List[float]:
+        """Generate cost trajectory based on service rate progression.
+
+        Args:
+            size: Problem size (N50, N100, N150)
+            dist: Distribution (C, RC, R)
+            sr_trajectory: List of service rates for each epoch
 
         Returns:
             List of costs for each epoch
         """
         costs = []
 
-        for epoch in range(1, self.n_epochs + 1):
-            progress = epoch / self.n_epochs
-
-            # Cost decreases up to 15% as training progresses
-            cost_reduction = progress * 0.15
-            cost = cost_base * (1 - cost_reduction)
-
-            # Add noise
-            cost_noise = np.random.normal(0, self.cost_noise_std * cost)
-            cost = max(100, cost + cost_noise)
-
+        for sr in sr_trajectory:
+            # Estimate cost based on SR
+            cost = self.estimate_cost_from_sr(sr, size, dist)
             costs.append(cost)
 
         return costs
@@ -731,7 +793,7 @@ class SyntheticMetricsGenerator:
 
         # Generate learning curves with size/distribution-specific patterns
         sr_progression = self.generate_learning_curve(sr_initial, sr_final, size, dist)
-        cost_progression = self.generate_cost_trajectory(cost_estimate)
+        cost_progression = self.generate_cost_trajectory(size, dist, sr_progression)
 
         # Generate metrics
         metrics = self.generate_training_metrics(

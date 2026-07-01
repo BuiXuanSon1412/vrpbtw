@@ -1,78 +1,105 @@
-import os
-import json
-import csv
+#!/usr/bin/env python3
+"""Generate summary CSV files for each problem size."""
 
-def find_file_in_dir(target_name, search_root):
-    """Tìm đường dẫn đầy đủ của một file dựa trên tên file trong một thư mục gốc"""
-    for root, dirs, files in os.walk(search_root):
-        if target_name in files:
-            return os.path.join(root, target_name)
+import json
+import os
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+import pandas as pd
+
+def extract_distribution_type(filename):
+    """Extract distribution type from filename.
+
+    E.g., 'S042_N10_C_R50.json' -> 'C'
+    """
+    parts = filename.replace('.json', '').split('_')
+    # Format is: S###_N##_DIST_R##
+    if len(parts) >= 4:
+        return parts[2]
     return None
 
-def get_json_data(filepath):
-    """Đọc dữ liệu từ file JSON"""
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return {
-                "status": data.get("status", "N/A"),
-                "objective": data.get("objective", "N/A"),
-                "time": data.get("time", "N/A")
-            }
-    except Exception:
+def process_size_folder(size_dir):
+    """Process all JSON files in a size folder and group by distribution type."""
+
+    results_by_dist = defaultdict(lambda: {
+        'objectives': [],
+        'costs': [],
+        'service_rates': []
+    })
+
+    json_files = list(Path(size_dir).glob('*.json'))
+
+    if not json_files:
+        print(f"  No JSON files found in {size_dir}")
         return None
 
-def process_results():
-    # Xác định đường dẫn thư mục summary.py đang đứng
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    tardiness_root = os.path.join(current_dir, 'result', 'tardiness')
-    cost_root = os.path.join(current_dir, 'result', 'cost')
-    
-    if not os.path.exists(tardiness_root) or not os.path.exists(cost_root):
-        print("Lỗi: Không tìm thấy thư mục result/tardiness hoặc result/cost")
+    # Load all data
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+
+            dist_type = extract_distribution_type(json_file.name)
+            if not dist_type:
+                print(f"  Warning: Could not extract distribution type from {json_file.name}")
+                continue
+
+            results_by_dist[dist_type]['objectives'].append(data.get('objective', 0))
+            results_by_dist[dist_type]['costs'].append(data.get('f2_cost', 0))
+            results_by_dist[dist_type]['service_rates'].append(data.get('f1_service_rate', 0))
+
+        except Exception as e:
+            print(f"  Error reading {json_file.name}: {e}")
+
+    # Calculate statistics
+    summary_data = []
+    for dist_type in sorted(results_by_dist.keys()):
+        metrics = results_by_dist[dist_type]
+
+        obj_mean = np.mean(metrics['objectives'])
+        obj_std = np.std(metrics['objectives'])
+
+        cost_mean = np.mean(metrics['costs'])
+        cost_std = np.std(metrics['costs'])
+
+        sr_mean = np.mean(metrics['service_rates'])
+        sr_std = np.std(metrics['service_rates'])
+
+        summary_data.append({
+            'Distribution': dist_type,
+            'Objective': f"{obj_mean:.2f}",
+            'Objective_Error': f"±{obj_std:.2f}",
+            'Cost': f"{cost_mean:.2f}",
+            'Cost_Error': f"±{cost_std:.2f}",
+            'Service_Rate': f"{sr_mean:.4f}",
+            'Service_Rate_Error': f"±{sr_std:.4f}",
+        })
+
+    return pd.DataFrame(summary_data)
+
+def main():
+    base_dir = Path('/home/bxs/thesis/vrpbtw/lp/result/f')
+
+    if not base_dir.exists():
+        print(f"Error: {base_dir} does not exist")
         return
 
-    results = []
+    size_folders = sorted([d for d in base_dir.iterdir() if d.is_dir()])
 
-    # Quét tất cả file .json trong folder tardiness (bao gồm cả N10, N20...)
-    print("Đang quét dữ liệu...")
-    for root, dirs, files in os.walk(tardiness_root):
-        for filename in files:
-            if filename.endswith('.json'):
-                path_tardiness = os.path.join(root, filename)
-                
-                path_cost = find_file_in_dir(filename, cost_root)
-                
-                if path_cost:
-                    data_t = get_json_data(path_tardiness)
-                    data_c = get_json_data(path_cost)
-                    
-                    if data_t and data_c:
-                        results.append([
-                            filename,
-                            data_t['objective'],  
-                            data_c['objective'],  
-                            data_t['status'],     
-                            data_c['status'],     
-                            data_t['time'],       
-                            data_c['time']        
-                        ])
-                else:
-                    print(f"Cảnh báo: Không tìm thấy file đối ứng cho {filename} trong thư mục cost")
+    for size_folder in size_folders:
+        size_name = size_folder.name
+        print(f"\nProcessing {size_name}...")
 
-    # Ghi dữ liệu ra CSV
-    output_path = os.path.join(current_dir, 'summary.csv')
-    header = ['Name', 'tardiness', 'cost', 'status_tardiness', 'status_cost', 'time_tardiness', 'time_cost']
-    
-    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(results)
+        df = process_size_folder(size_folder)
 
-    print("-" * 30)
-    print(f"Hoàn thành!")
-    print(f"Tổng số file đã khớp: {len(results)}")
-    print(f"File kết quả: {output_path}")
+        if df is not None and len(df) > 0:
+            output_file = size_folder / 'summary.csv'
+            df.to_csv(output_file, index=False)
+            print(f"  ✓ Created {output_file}")
+            print(f"\n{df.to_string(index=False)}\n")
+        else:
+            print(f"  No data to summarize for {size_name}")
 
-if __name__ == "__main__":
-    process_results()
+if __name__ == '__main__':
+    main()
